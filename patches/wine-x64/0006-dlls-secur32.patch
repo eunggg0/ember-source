@@ -1,0 +1,58 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 6/12] dlls-secur32: Ember changes
+
+Base: wine-11.0.tar.xz
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/secur32/schannel_gnutls.c b/dlls/secur32/schannel_gnutls.c
+index 947c591..100580a 100644
+--- a/dlls/secur32/schannel_gnutls.c
++++ b/dlls/secur32/schannel_gnutls.c
+@@ -52,6 +52,37 @@
+ #if defined(SONAME_LIBGNUTLS)
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(secur32);
++
++#ifdef __APPLE__
++/* macOS 의 dlopen 은 맨 이름만 주면 DYLD_FALLBACK_LIBRARY_PATH 만 본다.
++ * 그 환경변수는 실행하는 쪽이 빠뜨리기 쉽고, 빠지면 TLS 가 통째로 죽는다
++ * (실측: schannel 이 등록되지 않아 AcquireCredentialsHandle 이
++ *  SEC_E_SECPKG_NOT_FOUND 로 실패하고, 게임 런처가 "네트워크 점검" 으로 멈춘다).
++ * 그래서 우리 .so 의 위치를 기준으로 절대 경로를 만들어 한 번 더 시도한다.
++ *   <root>/lib/wine/<arch>-unix/*.so  →  <root>/lib/<soname> */
++static void *dlopen_beside_wine( const char *soname )
++{
++    Dl_info info;
++    char path[1024];
++    size_t len;
++    char *p;
++    int i;
++
++    if (!dladdr( (void *)dlopen_beside_wine, &info ) || !info.dli_fname) return NULL;
++    len = strlen( info.dli_fname );
++    if (len >= sizeof(path)) return NULL;
++    memcpy( path, info.dli_fname, len + 1 );
++    for (i = 0; i < 3; i++)   /* 파일명, <arch>-unix, wine 을 차례로 벗긴다 */
++    {
++        if (!(p = strrchr( path, '/' ))) return NULL;
++        *p = 0;
++    }
++    if (strlen( path ) + strlen( soname ) + 2 >= sizeof(path)) return NULL;
++    strcat( path, "/" );
++    strcat( path, soname );
++    return dlopen( path, RTLD_NOW );
++}
++#endif
+ WINE_DECLARE_DEBUG_CHANNEL(winediag);
+ 
+ static const char *system_priority_file;
+@@ -1477,6 +1508,9 @@ static NTSTATUS process_attach( void *args )
+     }
+ 
+     libgnutls_handle = dlopen(SONAME_LIBGNUTLS, RTLD_NOW);
++#ifdef __APPLE__
++    if (!libgnutls_handle) libgnutls_handle = dlopen_beside_wine( SONAME_LIBGNUTLS );
++#endif
+     if (!libgnutls_handle)
+     {
+         ERR_(winediag)("Failed to load libgnutls, secure connections will not be available.\n");

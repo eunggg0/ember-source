@@ -1,0 +1,3697 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 63/74] dlls-winemac.drv: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/winemac.drv/Makefile.in b/dlls/winemac.drv/Makefile.in
+index b2f87ce..991338f 100644
+--- a/dlls/winemac.drv/Makefile.in
++++ b/dlls/winemac.drv/Makefile.in
+@@ -6,10 +6,13 @@ UNIX_LIBS    = \
+ 	-lwin32u \
+ 	-framework AppKit \
+ 	-framework Carbon \
++	-framework CoreML \
+ 	-framework CoreVideo \
+ 	-framework Foundation \
+ 	-framework IOKit \
++	-framework IOSurface \
+ 	-framework Metal \
++	-Wl,-weak_framework,MetalFX \
+ 	-framework OpenGL \
+ 	-framework QuartzCore \
+ 	-framework Security \
+@@ -27,6 +30,9 @@ SOURCES = \
+ 	cocoa_status_item.m \
+ 	cocoa_window.m \
+ 	d3dmetal.c \
++	ember_framegen.m \
++	ember_neural.m \
++	ember_upscale.m \
+ 	d3dmetal_objc.m \
+ 	display.c \
+ 	dllmain.c \
+diff --git a/dlls/winemac.drv/cocoa_app.m b/dlls/winemac.drv/cocoa_app.m
+index 227d68b..c8c38d6 100644
+--- a/dlls/winemac.drv/cocoa_app.m
++++ b/dlls/winemac.drv/cocoa_app.m
+@@ -127,6 +127,244 @@ - (void) handleApplicationShouldTerminateReply:(BOOL)reply;  /* CW Hack 22310 */
+ @end
+ 
+ 
++/* Ember: Dock 타일은 번들 정체(+Wine 접두사)마다 하나만 (EMBER_DOCK_ONE, 기본 켬, "0" 이면 예전처럼 창을 띄운 프로세스마다).
++ * 왜: transformProcessToForeground 가 창을 띄운 모든 프로세스를 보통 앱(Regular)으로 올려, 스팀을 켜면 Steam.exe(부트스트래퍼 창)와
++ * steamwebhelper.exe(실제 스팀 창)가 저마다 "Steam" 아이콘을 가졌다(2026-10-01 lsappinfo: Foreground 2개). 사용자는 런처·게임마다
++ * Dock 아이콘 하나를 원한다.
++ * 어떻게: 처음 창을 띄운 프로세스가 /tmp/.ember-dock-<uid>/<번들ID>@<접두사 dev-ino>.lock 에 flock 을 잡아 타일 주인(Regular)이
++ * 되고, 나머지는 Accessory(Dock·앱 전환기에 없음, 그래도 활성·키 창·키보드 입력은 된다)로 둔다. flock 은 프로세스가 죽으면 풀린다.
++ * 주인 넘기기: 주인이 아닌데 실제 창이 보이는 프로세스는 1.5초마다 잠금을 다시 시도하고, 못 잡으면 notify(3) "want" 를 보낸다.
++ * 주인이 3초 넘게 창이 없는데 want 를 받으면 놓는다(Accessory) → 창 가진 쪽이 잡는다. 아무도 원하지 않으면(트레이로 숨은 스팀)
++ * 주인이 타일을 그대로 가진다. 그래서 스팀은 부트스트래퍼(Steam.exe)가 먼저 잡았다가 창이 사라지면 steamwebhelper 로 넘어간다.
++ * 번들 ID 가 정확히 dev.eung.ember(= "런처를 따로 표시" 끔, Ember 본체 정체를 물려받음)면 Wine 쪽은 타일을 아예 갖지 않는다.
++ * 처음부터 Regular 로 뜬 프로세스(게임 모드 번들 주 실행파일)는 applicationDidFinishLaunching 에서 같은 규칙으로 다툰다. */
++#include <notify.h>
++#include <sys/file.h>
++#include <sys/stat.h>
++
++static int ember_dock_state = -1;       /* -1 모름, 0 끔, 1 켬 */
++static BOOL ember_dock_noicon;          /* Ember 본체 정체 — 타일을 아예 갖지 않는다 */
++static BOOL ember_dock_started;         /* 한 번 앞 앱 준비(메뉴·App Nap)를 마쳤다 */
++static int ember_dock_fd = -1;          /* 타일 주인이면 flock 을 쥔 fd */
++static int ember_dock_token = -1;       /* notify "want" 토큰(notify_check 로 읽는다) */
++static int ember_dock_windowless;       /* 주인이 창 없이 지난 틱 수 */
++static char ember_dock_path[PATH_MAX];
++static char ember_dock_want[PATH_MAX];
++
++static BOOL ember_dock_enabled(void)
++{
++    const char* e;
++    NSString* bid;
++    const char* prefix;
++    struct stat st;
++    unsigned long long dev = 0, ino = 0;
++    char dir[64], bidc[256];
++    size_t i, n = 0;
++
++    if (ember_dock_state >= 0) return ember_dock_state;
++    ember_dock_state = 0;
++
++    e = getenv("EMBER_DOCK_ONE");
++    if (e && !strcmp(e, "0")) return NO;
++
++    bid = [[NSRunningApplication currentApplication] bundleIdentifier];
++    if (![bid length]) bid = [[NSBundle mainBundle] bundleIdentifier];
++    if (!([bid isEqualToString:@"dev.eung.ember"] || [bid hasPrefix:@"dev.eung.ember."])) return NO;
++    ember_dock_noicon = [bid isEqualToString:@"dev.eung.ember"];
++
++    for (i = 0; i < [bid length] && n < sizeof(bidc) - 1; i++)
++    {
++        unichar c = [bid characterAtIndex:i];
++        bidc[n++] = (isascii(c) && (isalnum(c) || c == '.' || c == '-' || c == '_')) ? (char)c : '_';
++    }
++    bidc[n] = 0;
++
++    /* wineserver 와 같은 열쇠: 접두사 디렉터리의 dev/ino. 같은 번들이라도 보틀이 다르면 따로. */
++    prefix = getenv("WINEPREFIX");
++    if (prefix && !stat(prefix, &st)) { dev = st.st_dev; ino = st.st_ino; }
++
++    snprintf(dir, sizeof(dir), "/tmp/.ember-dock-%u", (unsigned)getuid());
++    if (mkdir(dir, 0700) && errno != EEXIST) return NO;
++    if (lstat(dir, &st) || !S_ISDIR(st.st_mode) || st.st_uid != getuid()) return NO;
++
++    snprintf(ember_dock_path, sizeof(ember_dock_path), "%s/%s@%llx-%llx.lock", dir, bidc, dev, ino);
++    snprintf(ember_dock_want, sizeof(ember_dock_want), "dev.eung.ember.dock.want.%s@%llx-%llx", bidc, dev, ino);
++    if (notify_register_check(ember_dock_want, &ember_dock_token) == NOTIFY_STATUS_OK)
++    {
++        int dummy;
++        notify_check(ember_dock_token, &dummy);  /* 첫 호출은 늘 1 — 비운다 */
++    }
++    else
++        ember_dock_token = -1;
++
++    ember_dock_state = 1;
++    return YES;
++}
++
++/* 타일 잠금을 잡는다. 잠금 파일을 못 만들면 예전처럼 타일을 가진다(YES). */
++static BOOL ember_dock_try_claim(void)
++{
++    int fd;
++
++    if (ember_dock_noicon) return NO;
++    if (ember_dock_fd >= 0) return YES;
++    fd = open(ember_dock_path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
++    if (fd < 0) return YES;
++    if (flock(fd, LOCK_EX | LOCK_NB))
++    {
++        close(fd);
++        return NO;
++    }
++    ember_dock_fd = fd;
++    ember_dock_windowless = 0;
++    return YES;
++}
++
++static void ember_dock_release(void)
++{
++    if (ember_dock_fd < 0) return;
++    flock(ember_dock_fd, LOCK_UN);  /* fork 뒤 exec 전 자식이 같은 fd 를 쥐고 있어도 풀리게 */
++    close(ember_dock_fd);
++    ember_dock_fd = -1;
++}
++
++static void ember_dock_set_owner(BOOL own)
++{
++    NSApplicationActivationPolicy want = own ? NSApplicationActivationPolicyRegular : NSApplicationActivationPolicyAccessory;
++    if ([NSApp activationPolicy] != want)
++        [NSApp setActivationPolicy:want];
++}
++
++/* 사용자가 실제로 보는 창이 있나: 보이거나 최소화된 WineWindow 중 화면에 걸친 32pt 이상. */
++static BOOL ember_dock_has_windows(void)
++{
++    NSArray* screens = [NSScreen screens];
++
++    for (NSWindow* w in [NSApp windows])
++    {
++        NSRect f;
++        BOOL onScreen = NO;
++
++        if (![w isKindOfClass:[WineWindow class]]) continue;
++        if ([w isMiniaturized]) return YES;
++        if (![w isVisible] || [w alphaValue] <= 0) continue;
++        f = [w frame];
++        if (f.size.width < 32 || f.size.height < 32) continue;
++        for (NSScreen* s in screens)
++            if (NSIntersectsRect(f, [s frame])) { onScreen = YES; break; }
++        if (onScreen) return YES;
++    }
++    return NO;
++}
++
++static void ember_dock_tick(void)
++{
++    BOOL hasWin = ember_dock_has_windows();
++    int wanted = 0;
++
++    if (ember_dock_token >= 0)
++        notify_check(ember_dock_token, &wanted);
++
++    if (ember_dock_fd >= 0)
++    {
++        if (hasWin)
++        {
++            ember_dock_windowless = 0;
++            return;
++        }
++        ember_dock_windowless++;
++        if (wanted && ember_dock_windowless >= 2)
++        {
++            /* 창 가진 형제에게 넘긴다. 그쪽이 다음 틱에 잡는다. */
++            ember_dock_set_owner(NO);
++            ember_dock_release();
++        }
++    }
++    else if (hasWin)
++    {
++        if (ember_dock_try_claim())
++            ember_dock_set_owner(YES);
++        else if (ember_dock_token >= 0)
++            notify_post(ember_dock_want);
++    }
++}
++
++/* 처음 앞 앱이 될 때: 잠금을 잡으면 Regular, 아니면 Accessory. 넘기기 타이머를 건다. */
++static void ember_dock_start(void)
++{
++    NSTimer* timer;
++
++    ember_dock_started = YES;
++    ember_dock_set_owner(ember_dock_try_claim());
++    if (ember_dock_noicon) return;
++
++    timer = [NSTimer timerWithTimeInterval:1.5 repeats:YES block:^(NSTimer* t){ ember_dock_tick(); }];
++    timer.tolerance = 0.5;
++    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
++}
++
++/* 앞 앱 준비를 마친 뒤 또 창을 띄울 때: 주인이 없으면 바로 잡고, 있으면 want 를 보낸다. */
++static void ember_dock_window_shown(void)
++{
++    if (ember_dock_noicon || ember_dock_fd >= 0) return;
++    if (ember_dock_try_claim())
++        ember_dock_set_owner(YES);
++    else if (ember_dock_token >= 0)
++        notify_post(ember_dock_want);
++}
++
++/* 게임 모드 번들(주 실행파일 = 로더 복사본)은 Info.plist 로 처음부터 Regular 다. 같은 게임 정체로 뜬 다른 프로세스
++ * (예: 스텔라 블레이드 데모의 crs-handler.exe, 2026-10-01 lsappinfo Foreground 2개)도 타일을 가지므로, 뜰 때 바로 다툰다:
++ * 먼저 뜬 쪽(보통 게임 본체)이 잡고 나머지는 Accessory. */
++static void ember_dock_launched(void)
++{
++    if (ember_dock_started) return;
++    if ([NSApp activationPolicy] != NSApplicationActivationPolicyRegular) return;
++    if (!ember_dock_enabled()) return;
++    ember_dock_start();
++}
++
++/* Dock 아이콘을 눌렀는데 주인에게 창이 없으면, 같은 정체에서 화면에 창이 가장 많은 형제 프로세스를 앞으로. */
++static void ember_dock_forward_reopen(void)
++{
++    NSRunningApplication* me = [NSRunningApplication currentApplication];
++    NSArray* sibs;
++    NSMutableDictionary* counts;
++    NSArray* list;
++    NSRunningApplication* best = nil;
++    NSInteger bestCount = 0;
++
++    if (ember_dock_state != 1 || ember_dock_fd < 0 || ember_dock_has_windows()) return;
++    sibs = [NSRunningApplication runningApplicationsWithBundleIdentifier:me.bundleIdentifier];
++    if ([sibs count] < 2) return;
++
++    counts = [NSMutableDictionary dictionary];
++    list = [(NSArray*)CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
++                                                 kCGNullWindowID) autorelease];
++    for (NSDictionary* info in list)
++    {
++        NSNumber* pid = info[(id)kCGWindowOwnerPID];
++        if ([info[(id)kCGWindowLayer] integerValue] != 0 || !pid) continue;
++        counts[pid] = @([counts[pid] integerValue] + 1);
++    }
++    for (NSRunningApplication* app in sibs)
++    {
++        NSInteger c;
++        if ([app isEqual:me] || app.terminated) continue;
++        c = [counts[@(app.processIdentifier)] integerValue];
++        if (c > bestCount) { best = app; bestCount = c; }
++    }
++    if (!best) return;
++
++    if (@available(macOS 14.0, *))
++    {
++        [NSApp yieldActivationToApplication:best];
++        [best activateFromApplication:me options:NSApplicationActivateAllWindows];
++    }
++    else
++        [best activateWithOptions:NSApplicationActivateAllWindows];
++}
++
+ @implementation WineApplicationController
+ 
+     @synthesize keyboardType, lastFlagsChanged;
+@@ -294,6 +532,13 @@ - (void) changeEditMenuKeyEquivalentsForWindow:(NSWindow*)window
+ 
+     - (void) transformProcessToForeground:(BOOL)activateIfTransformed
+     {
++        /* Ember: 앞 앱 준비를 마친(Accessory 로 남은) 프로세스는 Dock 타일만 다시 다툰다. */
++        if (ember_dock_started)
++        {
++            ember_dock_window_shown();
++            return;
++        }
++
+         if ([NSApp activationPolicy] != NSApplicationActivationPolicyRegular)
+         {
+             NSMenu* mainMenu;
+@@ -325,7 +570,11 @@ - (void) transformProcessToForeground:(BOOL)activateIfTransformed
+                 }
+             }
+ 
+-            [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
++            /* Ember: 번들 정체마다 Dock 타일 하나 — 잠금을 잡은 프로세스만 Regular, 나머지는 Accessory. */
++            if (ember_dock_enabled())
++                ember_dock_start();
++            else
++                [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+ 
+             if (activateIfTransformed)
+                 [self tryToActivateIgnoringOtherApps:YES];
+@@ -1554,7 +1803,7 @@ - (void) handleMouseMove:(NSEvent*)anEvent
+             }
+             else
+             {
+-                double scale = retina_on ? 2 : 1;
++                double scale = retina_on ? retina_scale : 1;
+ 
+                 /* Add event delta to accumulated delta error */
+                 /* deltaY is already flipped */
+@@ -2430,6 +2679,12 @@ - (void) setRetinaMode:(BOOL)mode
+     /*
+      * ---------- NSApplicationDelegate methods ----------
+      */
++    - (void)applicationDidFinishLaunching:(NSNotification *)notification
++    {
++        /* Ember: 처음부터 Regular 인 게임 번들 프로세스도 Dock 타일 하나만. */
++        ember_dock_launched();
++    }
++
+     - (void)applicationDidBecomeActive:(NSNotification *)notification
+     {
+         NSNumber* displayID;
+@@ -2511,6 +2766,8 @@ - (BOOL) applicationShouldHandleReopen:(NSApplication*)theApplication hasVisible
+         // Note that "flag" is often wrong.  WineWindows are NSPanels and NSPanels
+         // don't count as "visible windows" for this purpose.
+         [self unminimizeWindowIfNoneVisible];
++        /* Ember: 창 없는 타일 주인이면 창을 가진 형제(예: steamwebhelper)를 앞으로. */
++        ember_dock_forward_reopen();
+         return YES;
+     }
+ 
+diff --git a/dlls/winemac.drv/cocoa_cursorclipping.m b/dlls/winemac.drv/cocoa_cursorclipping.m
+index b6151a2..285cb63 100644
+--- a/dlls/winemac.drv/cocoa_cursorclipping.m
++++ b/dlls/winemac.drv/cocoa_cursorclipping.m
+@@ -103,7 +103,7 @@ static void clip_cursor_location(CGRect cursorClipRect, CGPoint *location)
+ 
+ static void scale_rect_for_retina_mode(BOOL mode, CGRect *cursorClipRect)
+ {
+-    double scale = mode ? 0.5 : 2.0;
++    double scale = mode ? 1.0 / retina_scale : retina_scale;
+     cursorClipRect->origin.x *= scale;
+     cursorClipRect->origin.y *= scale;
+     cursorClipRect->size.width *= scale;
+diff --git a/dlls/winemac.drv/cocoa_opengl.m b/dlls/winemac.drv/cocoa_opengl.m
+index 2801834..ecbfe4e 100644
+--- a/dlls/winemac.drv/cocoa_opengl.m
++++ b/dlls/winemac.drv/cocoa_opengl.m
+@@ -224,8 +224,16 @@ void macdrv_dispose_opengl_context(macdrv_opengl_context c)
+ {
+     WineOpenGLContext *context = (WineOpenGLContext*)c;
+ 
+-    [context removeFromViews:YES];
+-    [context release];
++    /* Ember: 메인 스레드에서 한 번에(ARM64 에서 GL 스레드·메인 스레드 경합으로 종료 때 objc_release 폴트 실측). */
++    if ([NSThread isMainThread])
++    {
++        [context removeFromViews:YES];
++        [context release];
++    }
++    else OnMainThread(^{
++        [context removeFromViews:YES];
++        [context release];
++    });
+ }
+ }
+ 
+diff --git a/dlls/winemac.drv/cocoa_window.m b/dlls/winemac.drv/cocoa_window.m
+index ffb7c6a..bf484e1 100644
+--- a/dlls/winemac.drv/cocoa_window.m
++++ b/dlls/winemac.drv/cocoa_window.m
+@@ -24,6 +24,7 @@
+ #import <CoreVideo/CoreVideo.h>
+ #import <Metal/Metal.h>
+ #import <QuartzCore/QuartzCore.h>
++#import <objc/runtime.h>
+ #include <dlfcn.h>
+ 
+ #import "cocoa_window.h"
+@@ -90,6 +91,59 @@ static BOOL frame_intersects_screens(NSRect frame, NSArray* screens)
+ }
+ 
+ 
++/* Ember: 창 모드 전체화면 스냅(EMBER_FS_SNAP, 기본 켬, "0" 이면 끔).
++ * 게임 해상도를 비정수 Retina 배율(QHD = EMBER_RETINA_SCALE 1.333333)로 만들면 2560x1440 창이 1920.0005pt 가 되고
++ * AppKit 이 바깥쪽으로 올려 1921x1081 창이 된다. 오른쪽 1pt 가 옆 모니터(x=1920)에 걸치면 WindowServer 가
++ * 전체화면으로 보지 않는다 — SkyLight DetachmentDetails::evaluate_detachment_details_for_window 는 창이
++ * 정확히 디스플레이 하나에만 걸치고 그 디스플레이와 같거나 감쌀 때만 FullScreenStatus 를 참으로 둔다.
++ * 그게 gamepolicyd 의 FullScreenGrant("Full screen gaming session is now active")이고 없으면 게임 모드가 안 켜진다.
++ * 그래서 테두리 없는 창의 네 변이 한 화면의 네 변과 각각 2pt 안이면 Cocoa 프레임만 그 화면 프레임에 딱 맞춘다.
++ * Wine 이 아는 크기(wineFrame)는 그대로 둔다 → wine_fractionalFrame 이 원래 값을 돌려주므로 되먹임이 없다. */
++static BOOL ember_fs_snap_enabled(void)
++{
++    static int enabled = -1;
++    if (enabled < 0)
++    {
++        const char* e = getenv("EMBER_FS_SNAP");
++        enabled = !(e && e[0] == '0');
++    }
++    return enabled;
++}
++
++static BOOL ember_fs_snap_frame(NSWindow* window, NSRect frame, NSRect* snapped)
++{
++    const CGFloat tol = 2.0;
++
++    if (!ember_fs_snap_enabled() || NSIsEmptyRect(frame)) return FALSE;
++    /* 테두리 있는 창·네이티브 전체화면·비활성 패널(툴팁 등)은 건드리지 않는다 */
++    if ([window styleMask] & (NSWindowStyleMaskTitled | NSWindowStyleMaskFullScreen | NSWindowStyleMaskNonactivatingPanel))
++        return FALSE;
++
++    for (NSScreen* screen in [NSScreen screens])
++    {
++        NSRect s = [screen frame];
++        if (fabs(NSMinX(frame) - NSMinX(s)) <= tol && fabs(NSMaxX(frame) - NSMaxX(s)) <= tol &&
++            fabs(NSMinY(frame) - NSMinY(s)) <= tol && fabs(NSMaxY(frame) - NSMaxY(s)) <= tol)
++        {
++            if (NSEqualRects(frame, s)) return FALSE;   /* 이미 딱 맞다 */
++            *snapped = s;
++            {
++                static BOOL logged;
++                if (!logged)
++                {
++                    logged = TRUE;
++                    fprintf(stderr, "ember-fs-snap: %.4fx%.4f @ %.4f,%.4f -> %.0fx%.0f @ %.0f,%.0f\n",
++                            frame.size.width, frame.size.height, frame.origin.x, frame.origin.y,
++                            s.size.width, s.size.height, s.origin.x, s.origin.y);
++                }
++            }
++            return TRUE;
++        }
++    }
++    return FALSE;
++}
++
++
+ /* We rely on the supposedly device-dependent modifier flags to distinguish the
+    keys on the left side of the keyboard from those on the right.  Some event
+    sources don't set those device-depdendent flags.  If we see a device-independent
+@@ -704,7 +758,7 @@ - (WineMetalView*) newMetalViewWithDevice:(id<MTLDevice>)device
+ 
+     - (void) setLayerRetinaProperties:(BOOL)mode
+     {
+-        [self layer].contentsScale = mode ? 2.0 : 1.0;
++        [self layer].contentsScale = mode ? retina_scale : 1.0;
+         [self layer].minificationFilter = mode ? kCAFilterLinear : kCAFilterNearest;
+         [self layer].magnificationFilter = mode ? kCAFilterLinear : kCAFilterNearest;
+ 
+@@ -976,7 +1030,7 @@ - (void) dealloc
+ 
+     - (void) setRetinaMode:(BOOL)mode
+     {
+-        self.layer.contentsScale = mode ? 2.0 : 1.0;
++        self.layer.contentsScale = mode ? retina_scale : 1.0;
+         [super setRetinaMode:mode];
+     }
+ 
+@@ -987,7 +1041,19 @@ - (CALayer*) makeBackingLayer
+         layer.framebufferOnly = YES;
+         layer.magnificationFilter = kCAFilterNearest;
+         layer.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
+-        layer.contentsScale = retina_on ? 2.0 : 1.0;
++        layer.contentsScale = retina_on ? retina_scale : 1.0;
++        /* Ember 저지연: EMBER_DRAWABLES=2 면 화면 대기열 3→2장. 게임이 주사율에 묶일 때 지연 한 칸(60Hz 16ms) ↓, 실측상 fps 손해 없음
++         * (fgpace 12~30ms 작업 모두 같은 fps). 보간과는 같이 쓰지 않는다(Ember 가 보간 켜면 안 넘긴다). */
++        {
++            static int drawables = -1;
++            if (drawables < 0)
++            {
++                const char *e = getenv("EMBER_DRAWABLES"), *fg = getenv("EMBER_D3DM_FRAMEGEN");
++                drawables = e ? atoi(e) : 0;
++                if (fg && atoi(fg)) drawables = 0;   /* 보간 중에는 3장 그대로(스팀이 물려준 2 를 막는다) */
++            }
++            if (drawables == 2 || drawables == 3) layer.maximumDrawableCount = drawables;
++        }
+         return layer;
+     }
+ 
+@@ -1915,6 +1981,12 @@ - (void) updateFullscreen
+         NSRect contentRect = [self contentRectForFrameRect:self.wine_fractionalFrame];
+         BOOL nowFullscreen = !([self styleMask] & NSWindowStyleMaskFullScreen) && screen_covered_by_rect(contentRect, [NSScreen screens]);
+ 
++        /* Ember: 스냅으로 화면에 딱 맞춘 창은 Wine 크기가 화면보다 조금 작아도 전체화면으로 본다(레벨·메뉴막대 처리) */
++        if (!nowFullscreen && ember_fs_snap_enabled() && !([self styleMask] & NSWindowStyleMaskFullScreen) &&
++            !NSEqualRects(self.frame, self.wine_fractionalFrame) &&
++            screen_covered_by_rect([self contentRectForFrameRect:self.frame], [NSScreen screens]))
++            nowFullscreen = TRUE;
++
+         if (nowFullscreen != fullscreen)
+         {
+             WineApplicationController* controller = [WineApplicationController sharedController];
+@@ -1929,7 +2001,20 @@ - (void) updateFullscreen
+ 
+     - (void) setFrameAndWineFrame:(NSRect)frame
+     {
+-        [self setFrame:frame display:YES];
++        NSRect snapped;
++
++        /* Ember: 화면보다 1~2pt 큰(작은) 테두리 없는 창은 Cocoa 쪽만 화면 크기로(ember_fs_snap_frame 설명 참고) */
++        if (ember_fs_snap_frame(self, frame, &snapped))
++        {
++            [self setFrame:snapped display:YES];
++            wineFrame = frame;
++            roundedWineFrame = self.frame;
++            if (NSEqualRects(roundedWineFrame, snapped))
++                return;     /* self.frame == roundedWineFrame 이면 wine_fractionalFrame 이 wineFrame 을 돌려준다 */
++            /* Cocoa 가 다른 크기로 바꿨으면 아래 원래 규칙을 따른다 */
++        }
++        else
++            [self setFrame:frame display:YES];
+ 
+         wineFrame = frame;
+         roundedWineFrame = self.frame;
+@@ -2816,7 +2901,7 @@ - (void) setRetinaMode:(BOOL)mode
+ 
+         [transform scaleBy:scale];
+ 
+-        [[self contentView] layer].mask.contentsScale = mode ? 2.0 : 1.0;
++        [[self contentView] layer].mask.contentsScale = mode ? retina_scale : 1.0;
+ 
+         for (WineBaseView* subview in [self.contentView subviews])
+         {
+@@ -3965,6 +4050,99 @@ void macdrv_set_view_superview(macdrv_view v, macdrv_view s, macdrv_window w, ma
+ }
+ }
+ 
++/***********************************************************************
++ *              macdrv_set_view_holes
++ *
++ * Ember(launch3, 2026-10-03): 윈도우에서는 WS_CLIPCHILDREN 부모의 스왑체인 위에 자식 창(GDI)이 보인다. 맥 드라이버는
++ * GPU 로 그리는 창(클라이언트 표면 = Metal/GL/Vulkan 뷰)을 창 표면 위 하위 뷰로 얹어서, 그 안의 GDI 자식 창
++ * (예: EA 앱 Qt 창 안의 CEF 로그인 화면)이 통째로 가려졌다. 자식 창 자리에 마스크 구멍을 내 아래 창 표면이 보이게 한다.
++ * 구멍이 없으면(대부분의 게임) 마스크가 있을 때만 걷어 낸다 — 레이어를 건드리지 않는다.
++ * 구멍 목록은 뷰에 붙여 두고(연관 객체), 그 안에 나중에 GPU 로 그리기 시작한 자식 뷰가 생기면 그 자리 구멍만 메운다.
++ */
++static char ember_holes_key;
++
++/* 메인 스레드. 뷰에 붙인 구멍 목록으로 마스크를 다시 만든다. WineContentView 는 isFlipped(위가 0)이고 그 레이어 좌표도
++ * 위가 0으로 그려진다(10-03 EA 실측: 뒤집으면 구멍이 아래위로 어긋나 제목 막대 자리에 창 표면이 비쳤다). */
++static void ember_apply_view_holes(NSView* view)
++{
++    NSArray* rects = objc_getAssociatedObject(view, &ember_holes_key);
++    CALayer* layer = [view layer];
++    CAShapeLayer* mask;
++    CGMutablePathRef path;
++    CGRect bounds;
++
++    if (!layer) return;
++    if (![rects count])
++    {
++        if ([layer mask]) [layer setMask:nil];
++        return;
++    }
++    bounds = [layer bounds];
++    mask = [CAShapeLayer layer];
++    path = CGPathCreateMutable();
++    CGPathAddRect(path, NULL, bounds);
++    for (NSValue* value in rects)
++        CGPathAddRect(path, NULL, NSRectToCGRect([value rectValue]));
++    [mask setFrame:bounds];
++    [mask setPath:path];
++    [mask setFillRule:kCAFillRuleEvenOdd];
++    [layer setMask:mask];
++    CGPathRelease(path);
++}
++
++void macdrv_set_view_holes(macdrv_view v, const CGRect *holes, int count)
++{
++@autoreleasepool
++{
++    WineContentView* view = (WineContentView*)v;
++    NSMutableArray* rects = nil;
++    int i;
++
++    if (count > 0)
++    {
++        rects = [NSMutableArray arrayWithCapacity:count];
++        for (i = 0; i < count; i++)
++            [rects addObject:[NSValue valueWithRect:NSRectFromCGRect(cgrect_mac_from_win(holes[i]))]];
++    }
++
++    OnMainThreadAsync(^{
++        if (!rects && !objc_getAssociatedObject(view, &ember_holes_key) && ![[view layer] mask]) return;
++        objc_setAssociatedObject(view, &ember_holes_key, rects, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
++        ember_apply_view_holes(view);
++    });
++}
++}
++
++/***********************************************************************
++ *              macdrv_view_fill_hole_for_subview
++ *
++ * Ember(launch3): 구멍을 낸 GPU 창 안의 자식 창이 나중에 자기 클라이언트 뷰(GPU)로 그리기 시작하면, 그 뷰는 부모
++ * 클라이언트 뷰의 하위 뷰라 부모 마스크 구멍에 같이 잘려 안 보인다 — 그 자식 자리 구멍을 메운다.
++ */
++void macdrv_view_fill_hole_for_subview(macdrv_view v)
++{
++@autoreleasepool
++{
++    NSView* view = (NSView*)v;
++
++    OnMainThreadAsync(^{
++        NSView* parent = [view superview];
++        NSArray* rects;
++        NSMutableArray* kept;
++        NSRect frame;
++
++        if (!parent || !(rects = objc_getAssociatedObject(parent, &ember_holes_key))) return;
++        frame = [view frame];
++        kept = [NSMutableArray arrayWithCapacity:[rects count]];
++        for (NSValue* value in rects)
++            if (!NSIntersectsRect([value rectValue], frame)) [kept addObject:value];
++        if ([kept count] == [rects count]) return;
++        objc_setAssociatedObject(parent, &ember_holes_key, [kept count] ? kept : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
++        ember_apply_view_holes(parent);
++    });
++}
++}
++
+ /***********************************************************************
+  *              macdrv_set_view_hidden
+  */
+diff --git a/dlls/winemac.drv/d3dmetal.c b/dlls/winemac.drv/d3dmetal.c
+index b003607..2bda323 100644
+--- a/dlls/winemac.drv/d3dmetal.c
++++ b/dlls/winemac.drv/d3dmetal.c
+@@ -29,6 +29,7 @@
+ #include "ntstatus.h"
+ #define WIN32_NO_STATUS
+ #include "macdrv.h"
++#include "ember_framegen.h"
+ #include "shellapi.h"
+ #include "wine/server.h"
+ 
+@@ -191,7 +192,8 @@ static macdrv_metal_view my_macdrv_view_create_metal_view(macdrv_view v, macdrv_
+ static macdrv_metal_layer my_macdrv_view_get_metal_layer(macdrv_metal_view v)
+ {
+     TRACE("macdrv_view_get_metal_layer %p\n", v);
+-    return macdrv_view_get_metal_layer(v);
++    /* Ember: D3DMetal 프레임 보간(EMBER_D3DM_FRAMEGEN=1). 꺼져 있으면 진짜 레이어를 그대로 준다. */
++    return ember_fg_wrap_layer(macdrv_view_get_metal_layer(v));
+ }
+ 
+ static void my_macdrv_view_release_metal_view(macdrv_metal_view v)
+diff --git a/dlls/winemac.drv/d3dmetal_objc.m b/dlls/winemac.drv/d3dmetal_objc.m
+index 9b4a054..9a17fd3 100644
+--- a/dlls/winemac.drv/d3dmetal_objc.m
++++ b/dlls/winemac.drv/d3dmetal_objc.m
+@@ -25,6 +25,11 @@
+ #import <AppKit/AppKit.h>
+ #import <QuartzCore/QuartzCore.h>
+ #import <objc/runtime.h>
++#include <stdlib.h>
++#include <string.h>
++#include <stdio.h>
++#include <pthread.h>
++#import <Metal/Metal.h>
+ 
+ #include "macdrv_cocoa.h"
+ #import "cocoa_app.h"
+@@ -35,8 +40,54 @@
+ #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
+ 
+ 
++/* Ember 저지연: EMBER_DRAWABLES=2 를 화면 대기열 상한으로 지킨다 — 단 게임이 vsync 를 켰을 때만.
++ * D3DMetal 은 스왑체인을 만들 때 setMaximumDrawableCount: 로 3 을 다시 넣고, Present(0)(vsync 끔)이면 displaySyncEnabled=NO 를 준다.
++ * 60Hz 실측(fgpace, 진짜 레이어에서 drawable 받은 시각→화면): vsync 켠 게임 2장 48ms / 3장 65ms(8ms 작업) — 2장이 낫다.
++ * vsync 끈 게임은 2장이면 nextDrawable 에서 막혀 83→60fps 로 묶이고 지연도 46ms 로 3장(38ms, 남는 프레임은 버려짐)보다 나쁘다.
++ * 그래서 displaySync 켬 → 2장, 끔 → 3장. 보간(3장 필요)·D3DMetal 이 아닐 때(DXMT 는 winemetal 이 정함)는 손대지 않는다. */
++int ember_drawables_cap(void)
++{
++    static int cap = -1;
++    if (cap < 0)
++    {
++        const char *e = getenv("EMBER_DRAWABLES"), *fg = getenv("EMBER_D3DM_FRAMEGEN");
++        const char *b = getenv("CX_ACTIVE_GRAPHICS_BACKEND");
++        cap = e ? atoi(e) : 0;
++        if (fg && atoi(fg)) cap = 0;
++        if (cap != 2) cap = 0;
++        if (!b || strcmp(b, "d3dmetal")) cap = 0;
++    }
++    return cap;
++}
++
++static int ember_drawables_debug(void)
++{
++    static int on = -1;
++    if (on < 0) on = getenv("EMBER_DRAWABLES_DEBUG") != NULL;
++    return on;
++}
++
+ @implementation WineMetalLayer
+ 
++    - (void) setDisplaySyncEnabled:(BOOL)v
++    {
++        BOOL changed = v != self.displaySyncEnabled;
++        [super setDisplaySyncEnabled:v];
++        if (changed && ember_drawables_cap())
++        {
++            if (ember_drawables_debug()) fprintf(stderr, "ember-drawables: displaySync %d\n", v);
++            [self setMaximumDrawableCount:3];   /* 상한 규칙을 다시 적용 */
++        }
++    }
++
++    - (void) setMaximumDrawableCount:(NSUInteger)n
++    {
++        int cap = ember_drawables_cap();
++        if (cap) n = self.displaySyncEnabled ? cap : 3;
++        if (ember_drawables_debug()) fprintf(stderr, "ember-drawables: max %lu\n", (unsigned long)n);
++        [super setMaximumDrawableCount:n];
++    }
++
+     /* Extend [CAMetalLayer nextDrawable] so client_surface_present() can be
+      * called for the corresponding client_surface.
+      */
+@@ -67,7 +118,41 @@ @implementation WineMetalLayer
+             }
+         }
+ 
+-        return [super nextDrawable];
++        {
++            /* EMBER_DRAWABLES_DEBUG=1: 대리 레이어 없이 진짜 레이어에서 지연을 잰다 — drawable 을 받은 시각 → 화면에 뜬 시각.
++             * (대리 레이어는 표시 경로를 바꿔서 저지연 비교가 틀어진다.) 5초마다: 받은 수·뜬 수·버려진 수·평균/최대·받을 때 기다린 시간. */
++            static int dbg = -1;
++            static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
++            static double since, sum, mx, wsum;
++            static unsigned int got, shown, dropped;
++            double t0, t1;
++            id<CAMetalDrawable> d;
++            if (dbg < 0) dbg = ember_drawables_debug();
++            if (!dbg) return [super nextDrawable];
++            t0 = CACurrentMediaTime();
++            d = [super nextDrawable];
++            t1 = CACurrentMediaTime();
++            pthread_mutex_lock(&m);
++            got++; wsum += t1 - t0;
++            if (!since) since = t1;
++            if (t1 - since >= 5.0)
++            {
++                fprintf(stderr, "ember-drawables: sync=%d max=%lu got=%.1f/s shown=%.1f/s dropped=%u lat=%.1fms max=%.1fms wait=%.1fms\n",
++                        self.displaySyncEnabled, (unsigned long)self.maximumDrawableCount, got / (t1 - since), shown / (t1 - since), dropped,
++                        shown ? sum * 1000 / shown : 0, mx * 1000, got ? wsum * 1000 / got : 0);
++                since = t1; sum = mx = wsum = 0; got = shown = dropped = 0;
++            }
++            pthread_mutex_unlock(&m);
++            if (d && [d respondsToSelector:@selector(addPresentedHandler:)])
++                [d addPresentedHandler:^(id<MTLDrawable> dr) {
++                    double t = dr.presentedTime;
++                    pthread_mutex_lock(&m);
++                    if (t > t1 && t - t1 < 1.0) { shown++; sum += t - t1; if (t - t1 > mx) mx = t - t1; }
++                    else dropped++;
++                    pthread_mutex_unlock(&m);
++                }];
++            return d;
++        }
+     }
+ 
+ @end
+diff --git a/dlls/winemac.drv/display.c b/dlls/winemac.drv/display.c
+index 2663eb8..8f08615 100644
+--- a/dlls/winemac.drv/display.c
++++ b/dlls/winemac.drv/display.c
+@@ -456,8 +456,8 @@ static CFDictionaryRef create_mode_dict(CGDisplayModeRef display_mode, BOOL is_o
+ 
+     if (retina_enabled && is_original)
+     {
+-        width *= 2;
+-        height *= 2;
++        width = width * retina_scale + 0.5;
++        height = height * retina_scale + 0.5;
+     }
+ 
+     io_flags &= kDisplayModeInterlacedFlag | kDisplayModeStretchedFlag | kDisplayModeTelevisionFlag;
+@@ -747,8 +747,8 @@ static CGDisplayModeRef find_best_display_mode(DEVMODEW *devmode, CFArrayRef dis
+ 
+         if (is_original && retina_enabled)
+         {
+-            width *= 2;
+-            height *= 2;
++            width = width * retina_scale + 0.5;
++            height = height * retina_scale + 0.5;
+         }
+ 
+         if (bpp != mode_bpp)
+@@ -888,8 +888,8 @@ static DEVMODEW *display_get_modes(CGDirectDisplayID display_id, int *modes_coun
+ 
+         if (retina_enabled && display_mode_matches_descriptor(mode, desc))
+         {
+-            devmodes[i].dmPelsWidth *= 2;
+-            devmodes[i].dmPelsHeight *= 2;
++            devmodes[i].dmPelsWidth = devmodes[i].dmPelsWidth * retina_scale + 0.5;
++            devmodes[i].dmPelsHeight = devmodes[i].dmPelsHeight * retina_scale + 0.5;
+         }
+     }
+     free_display_mode_descriptor(desc);
+@@ -935,8 +935,8 @@ static void display_get_current_mode(struct macdrv_monitor *monitor, DEVMODEW *d
+         struct display_mode_descriptor *desc = create_original_display_mode_descriptor(display_id);
+         if (display_mode_matches_descriptor(display_mode, desc))
+         {
+-            devmode->dmPelsWidth *= 2;
+-            devmode->dmPelsHeight *= 2;
++            devmode->dmPelsWidth = devmode->dmPelsWidth * retina_scale + 0.5;
++            devmode->dmPelsHeight = devmode->dmPelsHeight * retina_scale + 0.5;
+         }
+         free_display_mode_descriptor(desc);
+     }
+diff --git a/dlls/winemac.drv/ember_autohdr_d3dm.h b/dlls/winemac.drv/ember_autohdr_d3dm.h
+new file mode 100644
+index 0000000..be9f884
+--- /dev/null
++++ b/dlls/winemac.drv/ember_autohdr_d3dm.h
+@@ -0,0 +1,114 @@
++/*
++ * Ember Flare (Auto HDR, EMBER_AUTOHDR) glue for the D3DMetal path (winemac proxy layer). The gain-map passes, the trained
++ * highlight net and the EDR output pass live in libEmberTone.dylib (EmberCore, separate proprietary library); this header only
++ * forwards to it (ember_tone_load.h). Without the library Flare stays off (create returns NULL).
++ *
++ * When the game is SDR and the screen can do EDR (potential headroom > 1.25), ember_framegen.m switches the real layer to
++ * RGBA16Float + extended linear sRGB, calls ember_ahdr_encode once per game frame and ember_ahdr_draw for the final pass.
++ * Switches (same as DXMT): EMBER_AUTOHDR=1, EMBER_AUTOHDR_STRENGTH, EMBER_AUTOHDR_PEAK, EMBER_AUTOHDR_GAMMA=2.2, EMBER_AUTOHDR_LOG=1.
++ * Included by ember_framegen.m.
++ *
++ * This library is free software; you can redistribute it and/or modify it under the terms of the GNU Lesser
++ * General Public License as published by the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ */
++#include "ember_tone_load.h"
++
++static int ember_ahdr_enabled(void)
++{
++    static int on = -1;
++    if (on < 0) { const char *v = getenv("EMBER_AUTOHDR"); on = v && !strcmp(v, "1"); }
++    return on;
++}
++static int ember_ahdr_log(void)
++{
++    static int on = -1;
++    if (on < 0) { const char *v = getenv("EMBER_AUTOHDR_LOG"); on = v && !strcmp(v, "1"); }
++    return on;
++}
++
++struct ember_ahdr
++{
++    void *ctx;
++    BOOL failed;     /* mirrors the library state (read by ember_framegen.m) */
++    float peak;      /* current display peak (log line in ember_framegen.m) */
++};
++
++static void ember_ahdr_sync(struct ember_ahdr *a)
++{
++    struct etone_ahdr_config c;
++    memset(&c, 0, sizeof(c));
++    c.size = sizeof(c);
++    etone.ahdr_get_config(a->ctx, &c);
++    a->failed = c.failed ? YES : NO;
++    a->peak = c.peak;
++}
++
++static struct ember_ahdr *ember_ahdr_create(id<MTLDevice> dev)
++{
++    struct ember_ahdr *a;
++    void *ctx;
++    if (!ember_ahdr_enabled() || !dev || !etone_available()) return NULL;
++    ctx = etone.ahdr_create((uint64_t)(uintptr_t)dev, NULL, 0, ETONE_HOST_D3DMETAL);
++    if (!ctx) return NULL;
++    a = calloc(1, sizeof(*a));
++    if (!a) { etone.ahdr_destroy(ctx); return NULL; }
++    a->ctx = ctx;
++    ember_ahdr_sync(a);
++    return a;
++}
++
++static void ember_ahdr_destroy(struct ember_ahdr *a)
++{
++    if (!a) return;
++    etone.ahdr_destroy(a->ctx);
++    free(a);
++}
++
++/* game frame → gain map (1/4 size), same command buffer, no CPU wait */
++static void ember_ahdr_encode(struct ember_ahdr *a, id<MTLCommandBuffer> cb, id<MTLTexture> cur)
++{
++    struct etone_ahdr_encode_in in;
++    struct etone_ahdr_encode_out out;
++    if (!a || a->failed || !cur) return;
++    memset(&in, 0, offsetof(struct etone_ahdr_encode_in, wait_fences));
++    in.size = offsetof(struct etone_ahdr_encode_in, wait_fences);
++    in.flags = ETONE_AHDR_SRC_AUTO;
++    in.command_buffer = (uint64_t)(uintptr_t)cb;
++    in.source = (uint64_t)(uintptr_t)cur;
++    memset(&out, 0, sizeof(out));
++    out.size = sizeof(out);
++    if (!etone.ahdr_encode(a->ctx, &in, &out)) ember_ahdr_sync(a);
++}
++
++/* screen output: only into an RGBA16Float (EDR) target. NO → the caller draws its normal pass */
++static BOOL ember_ahdr_draw(struct ember_ahdr *a, id<MTLCommandBuffer> cb, id<MTLTexture> cur, id<MTLTexture> prv, float w,
++                            id<MTLTexture> dst, float sharp)
++{
++    struct etone_ahdr_draw_in in;
++    if (!a || a->failed || !dst) return NO;
++    memset(&in, 0, sizeof(in));
++    in.size = sizeof(in);
++    in.blend = w;
++    in.sharp = sharp;
++    in.command_buffer = (uint64_t)(uintptr_t)cb;
++    in.current = (uint64_t)(uintptr_t)cur;
++    in.previous = (uint64_t)(uintptr_t)prv;
++    in.target = (uint64_t)(uintptr_t)dst;
++    return etone.ahdr_draw(a->ctx, &in) ? YES : NO;
++}
++
++/* follow the display headroom (now value) smoothly */
++static void ember_ahdr_update_peak(struct ember_ahdr *a, double edr_now)
++{
++    struct etone_ahdr_frame_in in;
++    struct etone_ahdr_frame_out out;
++    if (!a) return;
++    memset(&in, 0, sizeof(in));
++    in.size = sizeof(in);
++    in.edr_now = edr_now;
++    memset(&out, 0, sizeof(out));
++    out.size = sizeof(out);
++    etone.ahdr_frame(a->ctx, &in, &out);
++    a->peak = out.peak;
++}
+diff --git a/dlls/winemac.drv/ember_framegen.h b/dlls/winemac.drv/ember_framegen.h
+new file mode 100644
+index 0000000..cead14a
+--- /dev/null
++++ b/dlls/winemac.drv/ember_framegen.h
+@@ -0,0 +1,8 @@
++/* Ember: D3DMetal 프레임 보간. d3dmetal.c 가 D3DMetal 에 레이어를 넘길 때 부른다. */
++#ifndef __WINE_EMBER_FRAMEGEN_H
++#define __WINE_EMBER_FRAMEGEN_H
++
++/* 보간이 켜져 있으면 real 을 감싼 대리 레이어를, 아니면 real 을 그대로 돌려준다. */
++void *ember_fg_wrap_layer(void *real);
++
++#endif
+diff --git a/dlls/winemac.drv/ember_framegen.m b/dlls/winemac.drv/ember_framegen.m
+new file mode 100644
+index 0000000..cfbbaeb
+--- /dev/null
++++ b/dlls/winemac.drv/ember_framegen.m
+@@ -0,0 +1,1312 @@
++/*
++ * Ember: D3DMetal 프레임 보간 — 운반 계층(대리 레이어·presentDrawable 가로채기·링·보조 스레드·표시)
++ *
++ * D3DMetal 은 winemac 이 넘겨 준 CAMetalLayer 에 nextDrawable 로 그리고 [commandBuffer presentDrawable:] 로 내보낸다.
++ * 보간을 켜면 화면에 붙지 않은 대리 레이어(EmberFGLayer)를 대신 넘긴다. D3DMetal 이 대리 레이어의 drawable 을
++ * 내보내려 할 때(presentDrawable: 를 가로챔) 같은 커맨드 버퍼에
++ *   ① 보간 프레임(이전·이번 원본 사이) → 진짜 레이어에 표시
++ *   ② 이번 프레임 → 한 칸(박자가 2칸이면 두 칸) 뒤 진짜 레이어에 표시(보조 스레드)
++ * 를 덧붙인다. 같은 커맨드 버퍼라 GPU 순서가 보장된다.
++ *
++ * 보간 판단(켜고 끔·칸 예산·가드 2·비용 탐침·박자/머무름·HUD 이유·5초 통계)과 움직임 보상(MC) 보간은 DXMT 와 같은
++ * 보간 엔진 EmberCore libEmberFG.dylib(별도 라이브러리, winemac.so 옆)이 한다 — 이 파일은 dlopen 으로 부르기만 한다.
++ * 라이브러리가 없으면(또는 ABI 가 안 맞으면) 보간은 꺼지고 대리 레이어는 원본만 통과시킨다(선명화·Neural·확대·Auto HDR 은 그대로).
++ * 같은 스위치: EMBER_FG_*(MC·MIN_FPS·MAX_COST·GUARD_MODE·CADENCE·LOG …), EMBER_D3DM_FG_MODE/LOG 는 별칭.
++ * EMBER_FG_GAME_CAP=<fps>: "안정" 방식 — 게임을 이 fps(보통 주사율 절반)로 붙잡고(present 쪽 제한기, 엔진이 시각을 정한다)
++ *   매 게임 프레임 보간 1장. DXMT 의 d3d11.gameFrameCap 과 같다.
++ *
++ * EMBER_D3DM_FRAMEGEN=1 이고 CX_ACTIVE_GRAPHICS_BACKEND=d3dmetal 일 때만 켜진다.
++ * EMBER_D3DM_FG_HZ: 화면 주사율(없으면 주 화면 최대값). EMBER_D3DM_FG_LOG=1(또는 EMBER_FG_LOG=1): 5초마다 입력·출력 프레임 수.
++ * EMBER_FG_DUMP=<폴더>: DXMT 와 같은 fg_NNNNNN_{prev,cur,blend,mc}.ppm + _meta.txt (fgghost_eval.py eval 로 채점).
++ *   EMBER_FG_DUMP_AT(120) 번째 프레임부터 EMBER_FG_DUMP_COUNT(3) 장, 5프레임 간격.
++ */
++
++#import <Metal/Metal.h>
++#import <QuartzCore/QuartzCore.h>
++#import <CoreGraphics/CoreGraphics.h>
++#import <objc/runtime.h>
++#import <AppKit/AppKit.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <pthread.h>
++#include <dlfcn.h>
++#include <time.h>
++#include <mach/mach_time.h>
++
++static int fg_cmp_float(const void *a, const void *b);
++
++#include "ember_framegen.h"
++#include "ember_neural.h"
++#include "ember_upscale.h"
++#include <math.h>
++#include "ember_autohdr_d3dm.h"   /* Ember Auto HDR(EMBER_AUTOHDR=1) */
++#include "ember_hud_d3dm.h"       /* Ember 게임 화면 안 HUD(libEmberHUD) */
++#include "ember_hdr_d3dm.h"       /* Ember(hdr12) D3DMetal HDR: PQ 레이어 EDR 메타데이터 */
++
++/* Ember Auto HDR: 지금 화면으로 나가는 프레임에 쓸 컨텍스트(EDR 이 켜진 레이어일 때만, 아니면 NULL). fg_draw 가 읽는다. */
++static struct ember_ahdr *volatile fg_ahdr_now;
++
++/* ---- 보간 엔진 연결(EmberCore libEmberFG, ABI 1.1 이상). 아래 구조체는 ember_fg.h 와 같은 배치다 ---- */
++struct fge_config { uint32_t size, ring_enabled, ring_drawables, ring_sync; int32_t ring_phase; uint32_t ring_copy_draw; double ring_phase_lead;
++                    uint32_t mc_enabled, queue_guard, smooth, log, ring_slots, ring_frames_ahead, host, pad0; double game_cap_fps; };
++struct fge_frame_in { uint32_t size, flags; int64_t now_ns; uint64_t frame_no; double display_interval, display_latency_ms; };
++struct fge_frame_plan { uint32_t size, flags; float blend_weight, pad0; double defer, cadence_hold; };
++struct fge_encode_in { uint32_t size, n_wait_fences; uint64_t command_buffer, current, previous, current_iosurface, current_format;
++                       float alpha, pad0; uint64_t wait_fences[256]; };
++struct fge_encode_out { uint32_t size, ok; uint64_t texture, fence; };
++struct fge_stats { uint32_t size, guard_active; int32_t guard_reason, backoff_level; double guard_cost, guard_native_fps, guard_hold_left;
++                   uint32_t active, fast; double game_interval, mc_confidence, dump_mean_conf, base_interval;
++                   uint64_t frames_in, frames_generated, frames_budget_skipped, frames_guard_blocked; double cadence_hold;
++                   int32_t cadence_slots; uint32_t pad1; };
++enum { FGE_IN_FRAMEGEN = 1, FGE_IN_PREV_VALID = 2 };
++enum { FGE_PLAN_GENERATE = 1, FGE_PLAN_MC = 2, FGE_PLAN_KEEP_PREVIOUS = 4 };
++enum { FGE_DROP_STALE = 0, FGE_DROP_LATE = 1, FGE_DROP_NO_DRAWABLE = 2 };
++#define FGE_HOST_D3DMETAL 1
++
++static struct
++{
++    uint32_t (*abi_version)(void);
++    void *(*create2)(uint64_t device, const char *env, size_t len, uint32_t host);
++    void (*destroy)(void *ctx);
++    void (*get_config)(void *ctx, struct fge_config *out);
++    int (*begin_frame)(void *ctx, const struct fge_frame_in *in, struct fge_frame_plan *out);
++    int (*encode)(void *ctx, const struct fge_encode_in *in, struct fge_encode_out *out);
++    void (*note_drop)(void *ctx, uint32_t kind);
++    void (*get_stats)(void *ctx, int64_t now, struct fge_stats *out);
++    size_t (*hud_text)(void *ctx, int64_t now, double fps, uint64_t generated, char *buf, size_t cap);
++    size_t (*drain_log)(void *ctx, char *buf, size_t cap);
++    int64_t (*pace_present)(void *ctx, int64_t now, double display_interval);
++} fge;
++static int fge_ok;
++static pthread_once_t fge_once = PTHREAD_ONCE_INIT;
++
++/* winemac.so 옆(또는 EMBER_FG_LIB)의 libEmberFG.dylib. ABI 주 버전 1·부 버전 1 이상만 쓴다. */
++static void fge_load(void)
++{
++    char path[4096];
++    const char *override = getenv("EMBER_FG_LIB");
++    void *lib = NULL;
++    Dl_info info;
++    path[0] = 0;
++    if (override && *override) snprintf(path, sizeof(path), "%s", override);
++    else if (dladdr((const void *)&fge_load, &info) && info.dli_fname)
++    {
++        const char *slash = strrchr(info.dli_fname, '/');
++        if (slash) snprintf(path, sizeof(path), "%.*s/libEmberFG.dylib", (int)(slash - info.dli_fname), info.dli_fname);
++    }
++    if (path[0]) lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
++    if (!lib) { fprintf(stderr, "ember-d3dm-fg: libEmberFG 없음 — 프레임 보간 끔\n"); return; }
++#define FGE_SYM(field, name) *(void **)&fge.field = dlsym(lib, name)
++    FGE_SYM(abi_version, "ember_fg_abi_version");
++    FGE_SYM(create2, "ember_fg_create2");
++    FGE_SYM(destroy, "ember_fg_destroy");
++    FGE_SYM(get_config, "ember_fg_get_config");
++    FGE_SYM(begin_frame, "ember_fg_begin_frame");
++    FGE_SYM(encode, "ember_fg_encode");
++    FGE_SYM(note_drop, "ember_fg_note_drop");
++    FGE_SYM(get_stats, "ember_fg_get_stats");
++    FGE_SYM(hud_text, "ember_fg_hud_text");
++    FGE_SYM(drain_log, "ember_fg_drain_log");
++    FGE_SYM(pace_present, "ember_fg_pace_present");
++#undef FGE_SYM
++    if (!fge.abi_version || (fge.abi_version() >> 16) != 1 || (fge.abi_version() & 0xffff) < 1 || !fge.create2 || !fge.destroy ||
++        !fge.get_config || !fge.begin_frame || !fge.encode || !fge.note_drop || !fge.get_stats || !fge.hud_text || !fge.drain_log ||
++        !fge.pace_present)
++    {
++        fprintf(stderr, "ember-d3dm-fg: libEmberFG ABI 가 맞지 않음 — 프레임 보간 끔\n");
++        memset(&fge, 0, sizeof(fge));
++        dlclose(lib);
++        return;
++    }
++    fge_ok = 1;
++}
++
++static int fge_available(void)
++{
++    pthread_once(&fge_once, fge_load);
++    return fge_ok;
++}
++
++/* 엔진이 쌓은 로그 줄("I …\n"/"E …\n")을 stderr 로 */
++static void fge_flush_log(void *ctx)
++{
++    char buf[4096];
++    size_t n;
++    if (!ctx) return;
++    while ((n = fge.drain_log(ctx, buf, sizeof(buf))) > 0)
++    {
++        char *line = buf, *end = buf + n;
++        while (line < end)
++        {
++            char *nl = memchr(line, '\n', end - line);
++            size_t len = nl ? (size_t)(nl - line) : (size_t)(end - line);
++            if (len > 2) fprintf(stderr, "%.*s\n", (int)(len - 2), line + 2);
++            line += len + 1;
++        }
++    }
++}
++
++static int64_t fge_ns(double t) { return (int64_t)(t * 1e9); }
++
++@interface EmberFGLayer : CAMetalLayer
++{
++@public
++    CAMetalLayer *real;
++    id<MTLTexture> prev;
++    BOOL have_prev;
++    BOOL active;                   /* 엔진의 "보간 켬" 판정(쉴 때 2장·보간 중 3장 대기열 규칙이 읽는다) */
++    double last_time;
++    double display_interval;
++    volatile double screen_interval;   /* 창이 떠 있는 화면의 실제 주기(2초마다 메인 스레드에서 갱신). 목표는 둘 중 긴 쪽 */
++    double next_screen_check;
++    unsigned int count_in, count_out;
++    double count_since;
++    /* 지연 측정 (presented 처리기는 다른 스레드에서 불린다) */
++    volatile int pending;          /* 내보냈지만 아직 화면에 안 뜬 drawable 수 */
++    double lat_sum; volatile int lat_n;   /* 원본 프레임: 게임이 넘긴 시각 → 실제 화면에 뜬 시각 */
++    double lat_max;
++    double wait_sum;               /* 게임 스레드가 nextDrawable 에서 기다린 시간 */
++    double pace_sum;               /* 안정 방식: present 쪽 제한기가 게임을 붙잡은 시간 */
++    unsigned int dropped;          /* 운반 계층이 버린 보간(보조 스레드에 원본이 밀려 있음·drawable 없음) */
++    /* 보충형: 원본을 링에 복사해 두고, 원본 표시는 보조 스레드가 한다(게임 스레드는 화면 버퍼를 기다리지 않는다). */
++    id<MTLTexture> ring[4];
++    int ring_i;
++    BOOL ring_prev;
++    id<MTLCommandQueue> hq;
++    id<MTLEvent> ev;
++    uint64_t ev_value;
++    dispatch_queue_t dq;
++    volatile int outstanding;      /* 보조 스레드가 아직 내보내지 못한 원본 수 */
++    NSUInteger game_drawables;     /* D3DMetal 이 setMaximumDrawableCount: 로 준 값(보통 3). 보간이 쉴 땐 저지연 2장으로 줄인다 */
++    float ft[2048];                /* 미터 5초 구간의 게임 프레임 간격(초) — p99 프레임 시간(Frame Check 게임 모드 A/B) */
++    unsigned int ft_n;
++    ember_neural_t *neural;        /* Ember Neural 후처리(EMBER_NEURAL=1). 원본에 프레임마다 한 번, 보간 앞에서 */
++    /* 보간 엔진(EmberCore) 컨텍스트 — 없으면 보간 끔 */
++    void *fge_ctx;
++    id<MTLDevice> fge_dev;
++    struct fge_config fge_cfg;
++    uint64_t frame_no;             /* 게임 프레임 번호(엔진·덤프) */
++    uint64_t gen_total;            /* 화면에 낸 보간 프레임 수(HUD OUT 계산) */
++    unsigned int mc_frames;        /* 이번 로그 구간에 MC 로 만든 보간 수 */
++    uint64_t log_skip0, log_block0;   /* 엔진 누적 카운터의 지난 로그 구간 값 */
++    /* EMBER_FG_DUMP */
++    int dumps_queued;
++    uint64_t last_dump_frame;
++    /* Ember Auto HDR: 진짜 레이어를 EDR(RGBA16Float·확장 선형 sRGB)로 돌렸나, 화면 헤드룸(메인 스레드가 2초마다 갱신) */
++    struct ember_ahdr *ahdr;
++    BOOL ahdr_on, ahdr_applied;
++    volatile double edr_now, edr_pot;
++    BOOL game_sync;                /* D3DMetal 이 준 displaySyncEnabled(보간 중엔 진짜 레이어를 켜 둔다) */
++    /* Ember(hdr12): 진짜 레이어에 우리가 마지막으로 둔(또는 본) colorspace·EDR. D3DMetal 의 SetColorSpace1 은 대리 레이어를 건너뛰고
++     * 진짜 레이어에 바로 쓴다 — 값이 이것과 달라지면 게임이 바꾼 것(fg_follow_real) */
++    CGColorSpaceRef seen_cs;
++    BOOL seen_edr;
++}
++- (void)emberAdoptColorspace:(CGColorSpaceRef)c edr:(BOOL)v;
++@end
++
++/* EMBER_D3DM_FG_METER=1: 보간하지 않고 프레임 수만 센다(FPS 측정용). 켜면 로그도 켠다. */
++static int fg_meter(void)
++{
++    static int on = -1;
++    if (on < 0) { const char *v = getenv("EMBER_D3DM_FG_METER"); on = v && !strcmp(v, "1"); }
++    return on;
++}
++
++/* 보간을 실제로 하는가(EMBER_D3DM_FRAMEGEN=1). 선명화만 켜면 프록시는 쓰되 이것은 거짓. */
++static int fg_generate(void)
++{
++    static int on = -1;
++    if (on < 0) { const char *v = getenv("EMBER_D3DM_FRAMEGEN"); on = v && !strcmp(v, "1"); }
++    return on;
++}
++
++static int fg_enabled(void)
++{
++    static int enabled = -1;
++    if (enabled < 0)
++    {
++        const char *v = getenv("EMBER_D3DM_FRAMEGEN"), *b = getenv("CX_ACTIVE_GRAPHICS_BACKEND");
++        const char *sh = getenv("EMBER_D3DM_SHARPNESS");
++        /* ember_up_enabled(): 화면 확대(MetalFX)만 켜도 대리 레이어가 필요하다(게임 크기와 화면 크기를 가른다) */
++        enabled = ((v && !strcmp(v, "1")) || fg_meter() || (sh && atof(sh) > 0) || ember_neural_enabled() || ember_up_enabled() ||
++                   ember_ahdr_enabled()) && b && !strcmp(b, "d3dmetal");
++    }
++    return enabled;
++}
++
++/* EMBER_D3DM_FG_MODE=smooth: 예전 방식(게임 프레임마다 보간 1장을 무조건 끼움, 화면 간격이 고름).
++ * 기본(fill): 보충형 — 빈 칸이 있을 때만 끼우고, 앞서 보낸 화면이 아직 안 떴으면 보간을 버리고 원본만 바로 낸다.
++ * 게임을 화면 버퍼 대기로 막지 않아 인풋렉·게임 fps 손실이 적다(포지플레이 개발자가 말한 방향). */
++static int fg_smooth(void)
++{
++    static int on = -1;
++    if (on < 0)
++    {
++        const char *v = getenv("EMBER_FG_MODE");
++        if (!v || !*v) v = getenv("EMBER_D3DM_FG_MODE");
++        on = v && !strcmp(v, "smooth");
++    }
++    return on;
++}
++
++static int fg_log(void)
++{
++    static int on = -1;
++    if (on < 0)
++    {
++        const char *v = getenv("EMBER_FG_LOG");
++        if (!v || !*v) v = getenv("EMBER_D3DM_FG_LOG");
++        on = v && !strcmp(v, "1");
++    }
++    return on;
++}
++
++static int fg_low_latency(void)
++{
++    static int on = -1;
++    if (on < 0) { const char *v = getenv("EMBER_LOW_LATENCY"); on = v && !strcmp(v, "1"); }
++    return on;
++}
++
++/* 화면 대기열 길이(진짜 레이어). 보간이 쉬는 동안(게임이 주사율 근처)은 보간 끔+저지연과 같은 2장 — 그래야 통과 지연이 보간 끔과 같다.
++ * 보간 중엔 보간 프레임과 원본을 함께 잡아야 하므로 3장(2장이면 5.8fps 로 무너짐, README 117). vsync 끈 게임은 3장 그대로(README 125).
++ * EMBER_LOW_LATENCY=1(Ember 가 보간을 켜면 같이 켠다)이고 보충형일 때만. 켜기/끄기 순간에 바뀌므로 프레임마다 읽지 않는다. */
++static void fg_apply_drawables(EmberFGLayer *p)
++{
++    NSUInteger n;
++    if (!p->real || !fg_generate() || (p->fge_ctx ? (BOOL)p->fge_cfg.smooth : (BOOL)fg_smooth()) || !fg_low_latency()) return;
++    n = p->game_drawables ? p->game_drawables : 3;
++    if (!p->active && p->real.displaySyncEnabled && n > 2) n = 2;
++    if (p->real.maximumDrawableCount != n)
++    {
++        unsigned long was = (unsigned long)p->real.maximumDrawableCount;
++        p->real.maximumDrawableCount = n;
++        if (fg_log()) fprintf(stderr, "ember-d3dm-fg: drawables %lu -> %lu (active=%d sync=%d)\n",
++                              was, (unsigned long)p->real.maximumDrawableCount, p->active, p->real.displaySyncEnabled);
++    }
++}
++
++/* ---- 합성 셰이더: out = mix(cur, prev, w) ---- */
++
++static NSString * const fg_shader =
++    @"#include <metal_stdlib>\n"
++     "using namespace metal;\n"
++     "struct V { float4 pos [[position]]; float2 uv; };\n"
++     "vertex V ember_fg_vs(uint id [[vertex_id]]) {\n"
++     "  float2 p = float2((id << 1) & 2, id & 2);\n"
++     "  V o; o.pos = float4(p * 2.0 - 1.0, 0.0, 1.0); o.uv = float2(p.x, 1.0 - p.y); return o; }\n"
++     /* Ember 선명화: AMD FidelityFX CAS 방식(MIT) — DXMT 와 같은 식. sharp 0 이면 그대로 */
++     "struct P { float w; float sharp; };\n"
++     "float4 cas(texture2d<float> t, float2 uv, float sharp) {\n"
++     "  constexpr sampler s(filter::linear, address::clamp_to_edge);\n"
++     "  float4 e = t.sample(s, uv);\n"
++     "  if (sharp <= 0.0) return e;\n"
++     "  float2 px = 1.0 / float2(t.get_width(), t.get_height());\n"
++     "  float3 b = t.sample(s, uv + float2(0, -px.y)).rgb, d = t.sample(s, uv + float2(-px.x, 0)).rgb;\n"
++     "  float3 f = t.sample(s, uv + float2(px.x, 0)).rgb, h = t.sample(s, uv + float2(0, px.y)).rgb;\n"
++     "  float3 mn = min(min(min(d, e.rgb), min(f, b)), h), mx = max(max(max(d, e.rgb), max(f, b)), h);\n"
++     "  float3 amp = sqrt(saturate(min(mn, 2.0 - mx) / max(mx, 1e-5)));\n"
++     "  float3 w = amp * (-1.0 / mix(8.0, 5.0, saturate(sharp)));\n"
++     "  return float4(max((b * w + d * w + f * w + h * w + e.rgb) / (1.0 + 4.0 * w), 0.0), e.a); }\n"
++     "fragment float4 ember_fg_fs(V in [[stage_in]], texture2d<float> cur [[texture(0)]],\n"
++     "                            texture2d<float> prv [[texture(1)]], constant P &p [[buffer(0)]]) {\n"
++     "  float4 c = cas(cur, in.uv, p.sharp);\n"
++     "  if (p.w <= 0.0) return c;\n"
++     "  return mix(c, cas(prv, in.uv, p.sharp), p.w); }\n";
++
++static pthread_mutex_t fg_lock = PTHREAD_MUTEX_INITIALIZER;
++static NSMutableDictionary *fg_pipelines;   /* "<device ptr>-<format>" -> pipeline */
++static id<MTLLibrary> fg_library;
++
++static id<MTLRenderPipelineState> fg_pipeline(id<MTLDevice> dev, MTLPixelFormat fmt)
++{
++    id<MTLRenderPipelineState> ps;
++    NSString *key;
++
++    pthread_mutex_lock(&fg_lock);
++    if (!fg_pipelines) fg_pipelines = [[NSMutableDictionary alloc] init];
++    key = [NSString stringWithFormat:@"%p-%lu", dev, (unsigned long)fmt];
++    ps = [fg_pipelines objectForKey:key];
++    if (!ps)
++    {
++        NSError *err = nil;
++        MTLRenderPipelineDescriptor *desc;
++        if (!fg_library || fg_library.device != dev)
++        {
++            [fg_library release];
++            fg_library = [dev newLibraryWithSource:fg_shader options:nil error:&err];
++        }
++        desc = [[MTLRenderPipelineDescriptor alloc] init];
++        desc.vertexFunction = [[fg_library newFunctionWithName:@"ember_fg_vs"] autorelease];
++        desc.fragmentFunction = [[fg_library newFunctionWithName:@"ember_fg_fs"] autorelease];
++        desc.colorAttachments[0].pixelFormat = fmt;
++        ps = [dev newRenderPipelineStateWithDescriptor:desc error:&err];
++        [desc release];
++        if (ps) { [fg_pipelines setObject:ps forKey:key]; [ps release]; }
++        else fprintf(stderr, "ember-d3dm-fg: pipeline failed: %s\n", err ? [[err description] UTF8String] : "?");
++    }
++    pthread_mutex_unlock(&fg_lock);
++    return ps;
++}
++
++/* EMBER_D3DM_SHARPNESS(0~1): 화면으로 나가는 프레임에만 선명화(내부 사본에는 안 한다 — 두 번 먹지 않게). */
++static float fg_sharpness(void)
++{
++    static float v = -1;
++    if (v < 0) { const char *e = getenv("EMBER_D3DM_SHARPNESS"); v = e ? (float)atof(e) : 0; if (v < 0) v = 0; if (v > 1) v = 1; }
++    return v;
++}
++
++static void fg_draw_sharp(id<MTLCommandBuffer> cb, id<MTLTexture> cur, id<MTLTexture> prv, float w, id<MTLTexture> dst, float sharp);
++/* 화면으로 나가는 모든 프레임(원본·보간, 게임 스레드·보조 스레드)이 여기를 지난다.
++ * 화면 확대(EMBER_D3DM_UPSCALE, ember_upscale.m)가 켜져 있고 진짜 drawable 이 더 크면: 보간 혼합은 게임 해상도에서 먼저 한 장으로
++ * (싸다), 그 한 장을 MetalFX 로 한 번 키우고, 선명화(CAS)는 모니터 해상도에서. 못 키우면(형식·메모리) 예전처럼 이중선형. */
++static void fg_draw_frame(id<MTLCommandBuffer> cb, id<MTLTexture> cur, id<MTLTexture> prv, float w, id<MTLTexture> dst)
++{
++    if (ember_up_enabled() && (dst.width > cur.width || dst.height > cur.height))
++    {
++        id<MTLTexture> src = cur, up;
++        if (w > 0)
++        {
++            id<MTLTexture> t = ember_up_scratch(cb, cur);
++            if (t) { fg_draw_sharp(cb, cur, prv, w, t, 0); src = t; }
++        }
++        if ((src != cur || w <= 0) && (up = ember_up_encode(cb, src, dst.width, dst.height)))
++        {
++            if (!ember_ahdr_draw(fg_ahdr_now, cb, up, up, 0.0f, dst, fg_sharpness()))
++                fg_draw_sharp(cb, up, up, 0.0f, dst, fg_sharpness());
++            return;
++        }
++    }
++    if (ember_ahdr_draw(fg_ahdr_now, cb, cur, prv, w, dst, fg_sharpness())) return;   /* Ember Auto HDR */
++    fg_draw_sharp(cb, cur, prv, w, dst, fg_sharpness());
++}
++
++/* 화면으로 나가는 프레임 한 장 + Ember 게임 화면 안 HUD(보스 기믹·엠버 말풍선·토스트 판, 있을 때만 — ember_hud_d3dm.h) */
++static void fg_draw(id<MTLCommandBuffer> cb, id<MTLTexture> cur, id<MTLTexture> prv, float w, id<MTLTexture> dst)
++{
++    fg_draw_frame(cb, cur, prv, w, dst);
++    ember_hud_draw(cb, dst, ehud_proxy_real);
++}
++
++static void fg_draw_sharp(id<MTLCommandBuffer> cb, id<MTLTexture> cur, id<MTLTexture> prv, float w, id<MTLTexture> dst, float sharp)
++{
++    struct { float w, sharp; } params = { w, sharp };
++    id<MTLRenderPipelineState> ps = fg_pipeline(cb.device, dst.pixelFormat);
++    MTLRenderPassDescriptor *rp;
++    id<MTLRenderCommandEncoder> enc;
++
++    if (!ps) return;
++    rp = [MTLRenderPassDescriptor renderPassDescriptor];
++    rp.colorAttachments[0].texture = dst;
++    rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
++    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
++    enc = [cb renderCommandEncoderWithDescriptor:rp];
++    [enc setRenderPipelineState:ps];
++    [enc setFragmentTexture:cur atIndex:0];
++    [enc setFragmentTexture:prv atIndex:1];
++    [enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
++    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
++    [enc endEncoding];
++}
++
++static double fg_envf(const char *name, double def)
++{
++    const char *e = getenv(name);
++    return e && *e ? atof(e) : def;
++}
++
++/* ---- EMBER_FG_DUMP: 보간 프레임과 앞뒤 원본을 PPM 으로(DXMT queueFrameDump/flushFrameDumps 와 같은 파일 이름·meta) ---- */
++static const char *fg_dump_dir(void)
++{
++    static const char *dir; static int init;
++    if (!init) { dir = getenv("EMBER_FG_DUMP"); if (dir && !*dir) dir = NULL; init = 1; }
++    return dir;
++}
++
++static BOOL fg_write_ppm(const char *path, id<MTLTexture> t)
++{
++    NSUInteger w = t.width, h = t.height, i;
++    unsigned char *px = malloc(w * h * 4);
++    FILE *f;
++    if (!px) return NO;
++    [t getBytes:px bytesPerRow:w * 4 fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
++    if (!(f = fopen(path, "wb"))) { free(px); return NO; }
++    fprintf(f, "P6\n%lu %lu\n255\n", (unsigned long)w, (unsigned long)h);
++    for (i = 0; i < w * h; i++) fwrite(px + i * 4, 1, 3, f);
++    fclose(f);
++    free(px);
++    return YES;
++}
++
++static void fg_dump_queue(EmberFGLayer *p, id<MTLCommandBuffer> cb, id<MTLTexture> prev, id<MTLTexture> cur, float w_prev, id<MTLTexture> mc_tex)
++{
++    BOOL mc = mc_tex != nil;
++    const char *dir = fg_dump_dir();
++    NSUInteger w = cur.width, h = cur.height;
++    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:w height:h mipmapped:NO];
++    id<MTLTexture> dprev, dcur, dblend, dmc = nil;
++    uint64_t frame = p->frame_no;
++    float alpha = 1.0f - w_prev;
++    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
++    td.storageMode = MTLStorageModeShared;
++    dprev = [cb.device newTextureWithDescriptor:td];
++    dcur = [cb.device newTextureWithDescriptor:td];
++    dblend = [cb.device newTextureWithDescriptor:td];
++    if (mc) dmc = [cb.device newTextureWithDescriptor:td];
++    if (!dprev || !dcur || !dblend || (mc && !dmc)) { [dprev release]; [dcur release]; [dblend release]; [dmc release]; return; }
++    fg_draw_sharp(cb, prev, prev, 0.0f, dprev, 0);
++    fg_draw_sharp(cb, cur, cur, 0.0f, dcur, 0);
++    fg_draw_sharp(cb, cur, prev, w_prev, dblend, 0);
++    if (mc) fg_draw_sharp(cb, mc_tex, mc_tex, 0.0f, dmc, 0);
++    p->dumps_queued++;
++    p->last_dump_frame = frame;
++    [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
++        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
++            char base[1024];
++            char path[1100];
++            FILE *f;
++            BOOL ok;
++            float conf = -1;
++            /* 레이어를 붙잡아 엔진 컨텍스트가 살아 있게. 마지막 MC 프레임의 평균 신뢰도(엔진 통계) */
++            if (p->fge_ctx)
++            {
++                struct fge_stats st;
++                memset(&st, 0, sizeof(st));
++                st.size = sizeof(st);
++                fge.get_stats(p->fge_ctx, fge_ns(CACurrentMediaTime()), &st);
++                conf = (float)st.dump_mean_conf;
++            }
++            snprintf(base, sizeof(base), "%s/fg_%06llu", dir, (unsigned long long)frame);
++            snprintf(path, sizeof(path), "%s_prev.ppm", base); ok = fg_write_ppm(path, dprev);
++            snprintf(path, sizeof(path), "%s_cur.ppm", base); ok = fg_write_ppm(path, dcur) && ok;
++            snprintf(path, sizeof(path), "%s_blend.ppm", base); ok = fg_write_ppm(path, dblend) && ok;
++            if (dmc) { snprintf(path, sizeof(path), "%s_mc.ppm", base); ok = fg_write_ppm(path, dmc) && ok; }
++            snprintf(path, sizeof(path), "%s_meta.txt", base);
++            if ((f = fopen(path, "w")))
++            {
++                fprintf(f, "frame=%llu\nalpha=%.6f\nmc=%d\nmean_conf=%.4f\nwidth=%lu\nheight=%lu\nfmt_cur=%d\nfmt_gen=%d\n",
++                        (unsigned long long)frame, alpha, (int)mc, conf, (unsigned long)w, (unsigned long)h, (int)cur.pixelFormat, (int)dblend.pixelFormat);
++                fclose(f);
++            }
++            fprintf(stderr, "ember-d3dm-fg-dump: %s %s alpha=%.3f mc=%d\n", base, ok ? "ok" : "FAILED", alpha, (int)mc);
++            [dprev release]; [dcur release]; [dblend release]; [dmc release];
++        });
++    }];
++}
++
++/* ---- MTLCommandBuffer presentDrawable: 가로채기 ---- */
++
++static IMP orig_present, orig_present_min, orig_present_at;
++
++static pthread_mutex_t fg_stat_lock = PTHREAD_MUTEX_INITIALIZER;
++
++/* drawable 을 내보내고 실제로 화면에 뜬 시각을 받는다. handed>0 이면 원본 프레임 — 게임이 넘긴 시각부터의 지연을 잰다.
++ * presented 처리기는 버려진 drawable 에도 불린다(presentedTime 0) — 대기열 수는 그래도 줄인다. */
++static void fg_submit(EmberFGLayer *p, id<MTLCommandBuffer> cb, id<CAMetalDrawable> d, double min_dur, double handed)
++{
++    if (@available(macOS 10.15.4, *))
++    {
++    __sync_fetch_and_add(&p->pending, 1);
++    [d addPresentedHandler:^(id<MTLDrawable> dr) {
++        double t = dr.presentedTime;
++        __sync_fetch_and_sub(&p->pending, 1);
++        if (handed > 0 && t > handed && t - handed < 1.0)
++        {
++            pthread_mutex_lock(&fg_stat_lock);
++            p->lat_sum += t - handed;
++            p->lat_n++;
++            if (t - handed > p->lat_max) p->lat_max = t - handed;
++            pthread_mutex_unlock(&fg_stat_lock);
++        }
++    }];
++    }
++    if (min_dur > 0)
++        ((void (*)(id, SEL, id, CFTimeInterval))orig_present_min)(cb, @selector(presentDrawable:afterMinimumDuration:), d, min_dur);
++    else
++        ((void (*)(id, SEL, id))orig_present)(cb, @selector(presentDrawable:), d);
++}
++
++/* Ember(표시 방식 고정, 10-02): 보충형은 보간 프레임을 평범한 present 로, 원본을 presentDrawable:afterMinimumDuration: 으로 냈다.
++ * macOS 는 최소 간격 표시를 늘 합성(Composited, FramePacing detach 0xE0017)으로, 평범한 present 는 직접 표시(Direct)로 돌려서
++ * Metal HUD 가 프레임마다 Direct↔Composited 를 오갔다(원스휴먼 실측: 걷기 17초에 전환 1791번, 사용자 관찰 "번갈아 표시").
++ * 수직동기 끈 레이어의 Direct 는 화면 칸과 상관없이 바로 바꿔 단다(실측: 원본이 보간 3ms 뒤에 뜸 = 찢김·3ms/13.6ms 박자).
++ * EMBER_FG_PRESENT 0 = 예전, 1(기본) = 보간이 켜진 동안 진짜 레이어 수직동기 켬 — 모든 프레임이 합성·수직동기 칸에 차례대로
++ *   (DXMT 링 표시와 같은 방식, 전환·찢김 없음). 보간이 쉬면 게임이 준 값으로 돌아간다(켜고 끌 때만 한 번 바뀜).
++ * 2 = 실험: 원본을 앞 보간 프레임이 뜬 직후 평범한 present(Direct 유지, 대신 위 찢김). 시험: C:\ember-d11.cfg 의 EMBER_FG_PRESENT=. */
++static int fg_present_mode(void)
++{
++    static int env = -2, file_v = -1;
++    static double next_read;
++    double now = CACurrentMediaTime();
++    if (env == -2) { const char *v = getenv("EMBER_FG_PRESENT"); env = v && *v ? atoi(v) : 1; }
++    /* 보틀의 C:\ember-d11.cfg 에 EMBER_FG_PRESENT= 이 있으면 그 값(약 1초마다 다시 읽음 — 같은 장면 A/B) */
++    if (now >= next_read)
++    {
++        const char *pfx = getenv("WINEPREFIX");
++        char path[1024], line[256];
++        int v = -1;
++        FILE *f;
++        next_read = now + 1.0;
++        if (pfx && *pfx)
++        {
++            snprintf(path, sizeof(path), "%s/drive_c/ember-d11.cfg", pfx);
++            if ((f = fopen(path, "r")))
++            {
++                while (fgets(line, sizeof(line), f))
++                    if (!strncmp(line, "EMBER_FG_PRESENT=", 17)) v = atoi(line + 17);
++                fclose(f);
++            }
++        }
++        if (v != file_v && fg_log()) fprintf(stderr, "ember-d3dm-fg: EMBER_FG_PRESENT(cfg)=%d\n", v);
++        file_v = v;
++    }
++    return file_v >= 0 ? file_v : env;
++}
++
++/* 진짜 레이어 수직동기: 게임(D3DMetal)이 준 값, 보간 중(방식 1)에는 켬 */
++static void fg_apply_sync(EmberFGLayer *p)
++{
++    BOOL want = p->game_sync || (p->active && fg_present_mode() == 1 && fg_generate());
++    if (p->real && p->real.displaySyncEnabled != want)
++    {
++        p->real.displaySyncEnabled = want;
++        if (fg_log()) fprintf(stderr, "ember-d3dm-fg: display sync %d (game %d, active %d)\n", want, p->game_sync, p->active);
++    }
++}
++
++/* 보간 프레임이 화면에 뜬 시각을 보조 스레드에 넘기는 표(처리기 스레드 → 보조 스레드). 버려지면 t = 0 */
++@interface EmberFGTicket : NSObject
++{
++@public
++    dispatch_semaphore_t sem;
++    volatile double t;
++}
++@end
++@implementation EmberFGTicket
++- (id)init { if ((self = [super init])) sem = dispatch_semaphore_create(0); return self; }
++- (void)dealloc { dispatch_release(sem); [super dealloc]; }
++@end
++
++static unsigned int fg_direct_late, fg_direct_timeout, fg_direct_n;   /* 5초 통계(로그) */
++
++/* fg_submit 과 같은 지연 측정, 표시는 drawable 의 평범한 present(GPU 작업은 이미 끝남) */
++static void fg_submit_direct(EmberFGLayer *p, id<CAMetalDrawable> d, double handed)
++{
++    if (@available(macOS 10.15.4, *))
++    {
++    __sync_fetch_and_add(&p->pending, 1);
++    [d addPresentedHandler:^(id<MTLDrawable> dr) {
++        double t = dr.presentedTime;
++        __sync_fetch_and_sub(&p->pending, 1);
++        if (handed > 0 && t > handed && t - handed < 1.0)
++        {
++            pthread_mutex_lock(&fg_stat_lock);
++            p->lat_sum += t - handed;
++            p->lat_n++;
++            if (t - handed > p->lat_max) p->lat_max = t - handed;
++            pthread_mutex_unlock(&fg_stat_lock);
++        }
++    }];
++    }
++    [d present];
++}
++
++static id<CAMetalDrawable> fg_next(EmberFGLayer *p)
++{
++    double t0 = CACurrentMediaTime();
++    id<CAMetalDrawable> d = [p->real nextDrawable];
++    p->wait_sum += CACurrentMediaTime() - t0;
++    return d;
++}
++
++static BOOL fg_ensure_ring(EmberFGLayer *p, id<MTLTexture> cur)
++{
++    int i;
++    if (!p->ring[0] || p->ring[0].width != cur.width || p->ring[0].height != cur.height ||
++        p->ring[0].pixelFormat != cur.pixelFormat)
++    {
++        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:cur.pixelFormat
++                                                                                       width:cur.width
++                                                                                      height:cur.height
++                                                                                   mipmapped:NO];
++        if (p->outstanding > 0) return NO;   /* 보조 스레드가 옛 링을 읽는 중 — 이번 프레임은 예전 경로로 */
++        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
++        td.storageMode = MTLStorageModePrivate;
++        for (i = 0; i < 4; i++) { [p->ring[i] release]; p->ring[i] = [cur.device newTextureWithDescriptor:td]; }
++        p->ring_i = 0;
++        p->ring_prev = NO;
++    }
++    if (!p->hq) p->hq = [cur.device newCommandQueue];
++    if (!p->ev) p->ev = [cur.device newEvent];
++    if (!p->dq) p->dq = dispatch_queue_create("ember.framegen", DISPATCH_QUEUE_SERIAL);
++    return p->ring[0] && p->hq && p->ev && p->dq;
++}
++
++/* 엔진 MC: cur·prv(같은 크기) 사이 보간 프레임을 같은 커맨드 버퍼에 만든다. 결과는 엔진 소유 텍스처(추적 텍스처라 뒤의 표시 패스와
++ * GPU 순서가 저절로 맞는다). 못 만들면 nil — 혼합으로. */
++static id<MTLTexture> fg_engine_mc(EmberFGLayer *p, id<MTLCommandBuffer> cb, id<MTLTexture> cur, id<MTLTexture> prv, float alpha)
++{
++    static struct fge_encode_in in;   /* 게임 스레드 하나(present 가로채기)에서만 — 2KB 를 스택에 두지 않는다 */
++    struct fge_encode_out o;
++    memset(&in, 0, sizeof(in));
++    in.size = sizeof(in);
++    in.command_buffer = (uint64_t)(uintptr_t)cb;
++    in.current = (uint64_t)(uintptr_t)cur;
++    in.previous = (uint64_t)(uintptr_t)prv;
++    in.alpha = alpha;
++    memset(&o, 0, sizeof(o));
++    o.size = sizeof(o);
++    if (!fge.encode(p->fge_ctx, &in, &o) || !o.ok || !o.texture) return nil;
++    return (id<MTLTexture>)(uintptr_t)o.texture;
++}
++
++/* 보충형 한 프레임(운반). 보간할지·MC·박자는 엔진이 정한 plan 대로.
++ * 게임 스레드: 원본을 링에 복사 → (보간이면) 보간 프레임만 바로 표시 → 돌아간다.
++ * 보조 스레드: 화면 버퍼가 날 때 원본을 표시(보간 뒤 한 칸, 박자가 2칸이면 두 칸). 보조 스레드에 아직 못 낸 원본이 있으면
++ * (원본이 앞섬) 보간을 버리고 원본도 그 뒤에 줄 세운다 — 순서를 지키고 대기열을 늘리지 않는다. */
++static void fg_present_fill(EmberFGLayer *p, id<MTLCommandBuffer> cb, id<MTLTexture> cur, double now, double disp,
++                            const struct fge_frame_plan *plan)
++{
++    int i = (p->ring_i + 1) % 4, prev = p->ring_i;
++    BOOL generate = (plan->flags & FGE_PLAN_GENERATE) != 0;
++    /* 링 복사는 보간이 켜져 있거나 곧 켜질 때만(엔진 KEEP_PREVIOUS — 쉴 때·가드 중엔 프레임마다 전체 화면 복사 한 장을 아낀다) */
++    BOOL copy = generate || (plan->flags & FGE_PLAN_KEEP_PREVIOUS);
++    BOOL interp = generate && p->ring_prev;
++    id<MTLBlitCommandEncoder> blit;
++    id<CAMetalDrawable> out = nil;
++    EmberFGTicket *ticket = nil;
++
++    if (copy)
++    {
++        blit = [cb blitCommandEncoder];
++        [blit copyFromTexture:cur toTexture:p->ring[i]];
++        [blit endEncoding];
++    }
++    if (interp && p->outstanding > 0) { interp = NO; p->dropped++; fge.note_drop(p->fge_ctx, FGE_DROP_STALE); }
++    if (interp && !(out = fg_next(p))) { interp = NO; p->dropped++; fge.note_drop(p->fge_ctx, FGE_DROP_NO_DRAWABLE); }
++    if (interp)
++    {
++        float w = 1.0f - plan->blend_weight;   /* 혼합일 때 이전 프레임 비중(엔진 기본 반반, EMBER_FG_ALPHA=1 이면 표시 시각 비중) */
++        id<MTLTexture> mc_tex = (plan->flags & FGE_PLAN_MC) ? fg_engine_mc(p, cb, p->ring[i], p->ring[prev], plan->blend_weight) : nil;
++        if (mc_tex) { fg_draw(cb, mc_tex, mc_tex, 0.0f, out.texture); p->mc_frames++; }
++        else fg_draw(cb, p->ring[i], p->ring[prev], w, out.texture);
++        if (fg_dump_dir() && p->dumps_queued < (int)fg_envf("EMBER_FG_DUMP_COUNT", 3) &&
++            p->frame_no >= (uint64_t)fg_envf("EMBER_FG_DUMP_AT", 120) && p->frame_no >= p->last_dump_frame + 5)
++            fg_dump_queue(p, cb, p->ring[prev], p->ring[i], w, mc_tex);
++        if (fg_present_mode() == 2 && !p->real.displaySyncEnabled)
++        {
++            if (@available(macOS 10.15.4, *))
++            {
++                EmberFGTicket *tk = [[EmberFGTicket alloc] init];
++                [out addPresentedHandler:^(id<MTLDrawable> dr) { tk->t = dr.presentedTime; dispatch_semaphore_signal(tk->sem); }];
++                ticket = tk;
++            }
++        }
++        fg_submit(p, cb, out, 0, 0);
++        __sync_fetch_and_add(&p->count_out, 1);
++        p->gen_total++;
++    }
++
++    if (interp)
++    {
++        uint64_t v = ++p->ev_value;
++        id<MTLTexture> tex = [p->ring[i] retain];
++        EmberFGTicket *tk = ticket;   /* 블록이 가져간다(release 는 블록 안에서) */
++        /* 원본은 보간 프레임이 최소 이만큼 떠 있은 뒤 — 엔진 박자(고정 주사율 30~37fps 면 2칸, VRR 이면 게임 간격 절반), 아니면 한 칸 */
++        double handed = now, min_dur = plan->cadence_hold > 0 ? plan->cadence_hold : disp * 0.9;
++        [cb encodeSignalEvent:p->ev value:v];
++        __sync_fetch_and_add(&p->outstanding, 1);
++        dispatch_async(p->dq, ^{
++            @autoreleasepool
++            {
++                id<CAMetalDrawable> d2 = [p->real nextDrawable];
++                if (d2)
++                {
++                    id<MTLCommandBuffer> hc = [p->hq commandBuffer];
++                    [hc encodeWaitForEvent:p->ev value:v];
++                    fg_draw(hc, tex, tex, 0.0f, d2.texture);
++                    if (tk)
++                    {
++                        /* Direct 유지: 복사를 끝내 두고, 보간 프레임이 뜬 직후(그 칸이 열린 뒤) 평범한 present → 다음 칸 */
++                        int k = (int)floor(min_dur / disp + 0.15);
++                        long w;
++                        if (k < 1) k = 1;
++                        [hc commit];
++                        [hc waitUntilCompleted];
++                        w = dispatch_semaphore_wait(tk->sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)((3 * disp + 0.02) * 1e9)));
++                        if (w) fg_direct_timeout++;
++                        else if (tk->t > 0)
++                        {
++                            double at = tk->t + (k - 1) * disp + 0.0005, now2 = CACurrentMediaTime();
++                            if (k > 1 && at > now2) usleep((useconds_t)((at - now2) * 1e6));
++                            else if (now2 - tk->t > disp * 0.6) fg_direct_late++;   /* 처리기가 늦게 와 다음 칸을 놓쳤을 수 있다 */
++                        }
++                        fg_direct_n++;
++                        fg_submit_direct(p, d2, handed);
++                    }
++                    else
++                    {
++                        fg_submit(p, hc, d2, min_dur, handed);
++                        [hc commit];
++                    }
++                    __sync_fetch_and_add(&p->count_out, 1);
++                }
++                [tk release];
++                [tex release];
++                __sync_fetch_and_sub(&p->outstanding, 1);
++            }
++        });
++    }
++    else
++    {
++        /* 통과(원본만, 보간 없음·쉼·버림 모두): 게임 스레드가 직접 화면 버퍼를 받아 낸다 — 보간 끔과 같은 경로·같은 되먹임(vsync 에 막힘).
++         * 보조 스레드에 아직 못 낸 원본이 있으면(직전 프레임이 보간이었다) 그것이 나갈 때까지만 기다려 순서를 지킨다(길어야 화면 한 칸).
++         * (예전에 원본을 또 보조 스레드에 넘기던 방식은 원본이 dispatch 큐에 한없이 쌓였다 — 09-29 Frame Check 120Hz: lat 58→235ms) */
++        if (p->outstanding > 0) dispatch_sync(p->dq, ^{});
++        if ((out = fg_next(p)))
++        {
++            fg_draw(cb, cur, cur, 0.0f, out.texture);
++            fg_submit(p, cb, out, 0, now);
++            __sync_fetch_and_add(&p->count_out, 1);
++        }
++    }
++    if (copy) p->ring_i = i;
++    p->ring_prev = copy;
++}
++
++/* 안정 방식(엔진 제한기)이 정한 시각까지 잔다. 시각은 CACurrentMediaTime(mach 시계) 나노초. */
++static void fg_sleep_until_ns(int64_t due)
++{
++    double left = due * 1e-9 - CACurrentMediaTime();
++    if (left > 0 && left < 1.0)
++    {
++        struct timespec ts;
++        ts.tv_sec = 0;
++        ts.tv_nsec = (long)(left * 1e9);
++        nanosleep(&ts, NULL);
++    }
++}
++
++/* Ember(hdr12): 진짜 레이어의 지금 colorspace·EDR 을 "우리가 아는 값"으로 적어 둔다(우리가 쓴 뒤마다) */
++static void fg_seen_real(EmberFGLayer *p)
++{
++    CGColorSpaceRef cs = p->real.colorspace;
++    if (cs) CGColorSpaceRetain(cs);
++    if (p->seen_cs) CGColorSpaceRelease(p->seen_cs);
++    p->seen_cs = cs;
++    p->seen_edr = p->real.wantsExtendedDynamicRangeContent;
++}
++
++static void fg_ahdr_layer(EmberFGLayer *p);
++
++/* Ember(hdr12): D3DMetal 이 SetColorSpace1 로 진짜 레이어를 HDR(PQ·확장 선형)로 바꿨으면 대리 레이어도 같은 값으로 맞춘다 —
++ * 그래야 Auto HDR 이 이 게임을 SDR 로 보고 PQ 신호 위에 또 HDR 을 씌우지 않는다. 게임 스레드에서 프레임마다(속성 두 개 읽기). */
++static void fg_follow_real(EmberFGLayer *p)
++{
++    CGColorSpaceRef cs = p->real.colorspace;
++    BOOL edr = p->real.wantsExtendedDynamicRangeContent;
++    CFStringRef n;
++    if (cs == p->seen_cs && edr == p->seen_edr) return;
++    if (cs && p->seen_cs && CFEqual(cs, p->seen_cs) && edr == p->seen_edr) { fg_seen_real(p); return; }
++    n = cs ? CGColorSpaceCopyName(cs) : NULL;
++    fprintf(stderr, "ember-hdr: D3DMetal set the real layer to %s (EDR %d) — following on the proxy\n",
++            n ? [(NSString *)n UTF8String] : "(null)", (int)edr);
++    if (n) CFRelease(n);
++    [p emberAdoptColorspace:cs edr:edr];
++    fg_seen_real(p);
++    if (p->ahdr) { p->ahdr_applied = NO; fg_ahdr_layer(p); }
++}
++
++/* Ember Auto HDR: 게임이 SDR(대리 레이어의 EDR 끔·확장/PQ 색공간 아님)이고 화면이 EDR 을 낼 수 있으면 진짜 레이어를 EDR 로.
++ * 아니면 게임이 준 설정(대리 레이어 값)을 그대로 진짜 레이어에. 바뀔 때만 손댄다. 게임 스레드에서 부른다. */
++static void fg_ahdr_layer(EmberFGLayer *p)
++{
++    CGColorSpaceRef gcs = [p colorspace];
++    BOOL game_hdr = [p wantsExtendedDynamicRangeContent];
++    if (gcs && !game_hdr) { if (@available(macOS 11.0, *)) game_hdr = CGColorSpaceUsesExtendedRange(gcs) || CGColorSpaceUsesITUR_2100TF(gcs); }
++    BOOL want = p->ahdr && !p->ahdr->failed && !game_hdr && p->edr_pot > (p->ahdr_on ? 1.15 : 1.25);
++    if (want == p->ahdr_on && p->ahdr_applied) return;
++    p->ahdr_on = want;
++    p->ahdr_applied = YES;
++    if (want)
++    {
++        CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearSRGB);
++        p->real.pixelFormat = MTLPixelFormatRGBA16Float;
++        p->real.colorspace = cs;
++        p->real.wantsExtendedDynamicRangeContent = YES;
++        CGColorSpaceRelease(cs);
++    }
++    else
++    {
++        p->real.pixelFormat = [p pixelFormat];
++        p->real.colorspace = gcs;
++        p->real.wantsExtendedDynamicRangeContent = [p wantsExtendedDynamicRangeContent];
++    }
++    fprintf(stderr, "ember-autohdr: d3dmetal layer %s (game_hdr=%d potential=%.2f)\n", want ? "EDR on" : "SDR", (int)game_hdr, p->edr_pot);
++    fg_seen_real(p);
++}
++
++static void fg_present(id<MTLCommandBuffer> cb, id<CAMetalDrawable> d)
++{
++    EmberFGLayer *p = (EmberFGLayer *)d.layer;
++    id<MTLTexture> cur = d.texture;
++    double now = CACurrentMediaTime(), disp;
++    id<CAMetalDrawable> out;
++    BOOL was_active = p->active, smooth, use_ring, framegen, generate;
++    struct fge_frame_plan plan;
++
++    disp = p->display_interval > 0 ? p->display_interval : 1.0 / 60.0;
++    /* 실제 화면 주사율로 묶는다: 시작 때 주 화면 값(EMBER_D3DM_FG_HZ)은 창이 다른 모니터에 있거나 모니터를 끊고 붙이면 틀린다
++     * (60Hz 모니터에서 120 을 만들면 절반은 버려지고 지연만 는다 — DXMT 에서 실측, README 117). AppKit 은 메인 스레드에서만. */
++    if (now >= p->next_screen_check)
++    {
++        EmberFGLayer *pp = [p retain];
++        p->next_screen_check = now + 2.0;
++        fg_apply_drawables(p);   /* D3DMetal 이 나중에 값을 덮어도 2초 안에 규칙을 되돌린다(값이 같으면 아무 일도 없음) */
++        ember_up_resync_layer(p->real, [p drawableSize]);   /* 화면 확대: winemac 이 contentsScale 을 되돌렸으면 다시(꺼져 있으면 아무 일도 없음) */
++        dispatch_async(dispatch_get_main_queue(), ^{
++            NSScreen *screen = nil;
++            id delegate = pp->real.delegate;
++            if ([delegate isKindOfClass:[NSView class]]) screen = [[(NSView *)delegate window] screen];
++            if (!screen) screen = [NSScreen mainScreen];
++            /* Ember Auto HDR: 화면 헤드룸(지금 값·잠재 값) */
++            pp->edr_now = screen.maximumExtendedDynamicRangeColorComponentValue;
++            pp->edr_pot = screen.maximumPotentialExtendedDynamicRangeColorComponentValue;
++            if (pp->ahdr && ember_ahdr_log())
++                fprintf(stderr, "ember-autohdr: d3dmetal on=%d peak=%.2f edr=%.2f potential=%.2f\n", (int)pp->ahdr_on,
++                        pp->ahdr->peak, pp->edr_now, pp->edr_pot);
++            if (@available(macOS 12.0, *))
++            {
++                NSInteger fps = screen.maximumFramesPerSecond;
++                if (fps > 1) pp->screen_interval = 1.0 / (double)fps;
++            }
++            [pp release];
++        });
++    }
++    if (p->screen_interval > disp) disp = p->screen_interval;
++
++    /* 안정 방식(EMBER_FG_GAME_CAP): present 쪽 제한기 — 엔진이 정한 시각까지 게임의 present 를 붙잡는다(DXMT d3d11.gameFrameCap 과 같은 규칙) */
++    if (p->fge_ctx && fg_generate() && !fg_meter() && p->fge_cfg.game_cap_fps > 0)
++    {
++        int64_t due = fge.pace_present(p->fge_ctx, fge_ns(now), disp);
++        if (due > fge_ns(now))
++        {
++            double t;
++            fg_sleep_until_ns(due);
++            t = CACurrentMediaTime();
++            p->pace_sum += t - now;
++            now = t;
++        }
++    }
++
++    /* Ember Neural: 게임 해상도 원본에 후처리(같은 커맨드 버퍼, CPU 대기 없음). 아래 모든 경로(링 복사·보간·표시·이전 프레임)가
++     * 처리본을 읽는다. 꺼져 있거나 못 하면 cur 그대로. */
++    if (p->neural) cur = ember_neural_encode(p->neural, cb, cur, nil);
++    /* Ember(hdr12): 게임이 진짜 레이어에 바로 준 HDR 색공간을 대리 레이어로 + PQ 면 EDR 메타데이터(하이라이트를 지금 헤드룸에 맞춰 접는다) */
++    fg_follow_real(p);
++    ember_hdr_meta_apply(p->real, p->edr_pot > 0 ? p->edr_pot : -1);
++    /* Ember Auto HDR: 레이어 전환 판단 + 이득 지도(처리본 기준, 모든 표시 경로가 같은 지도를 쓴다) */
++    if (p->ahdr)
++    {
++        fg_ahdr_layer(p);
++        if (p->ahdr_on) { ember_ahdr_update_peak(p->ahdr, p->edr_now); ember_ahdr_encode(p->ahdr, cb, cur); }
++        fg_ahdr_now = p->ahdr_on ? p->ahdr : NULL;
++    }
++
++    if (p->last_time > 0)
++    {
++        double dt = now - p->last_time;
++        if (dt > 0 && dt < 2.0 && p->ft_n < sizeof(p->ft) / sizeof(p->ft[0])) p->ft[p->ft_n++] = (float)dt;
++    }
++    p->last_time = now;
++
++    /* 이전 프레임을 담아 둘 텍스처(부드러움 방식·링을 못 만들 때). 크기·형식이 바뀌면 다시 만든다.
++     * Ember perf3: 보간을 안 하는 프록시(Frame Check 미터·선명화·Neural·화면 확대만 켬)는 이전 프레임이 필요 없다. */
++    if (fg_generate() && p->fge_ctx && (!p->prev || p->prev.width != cur.width || p->prev.height != cur.height || p->prev.pixelFormat != cur.pixelFormat))
++    {
++        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:cur.pixelFormat
++                                                                                       width:cur.width
++                                                                                      height:cur.height
++                                                                                   mipmapped:NO];
++        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
++        td.storageMode = MTLStorageModePrivate;
++        [p->prev release];
++        p->prev = [cb.device newTextureWithDescriptor:td];
++        p->have_prev = NO;
++    }
++
++    p->count_in++;
++    p->frame_no++;
++    smooth = p->fge_ctx ? (BOOL)p->fge_cfg.smooth : (BOOL)fg_smooth();
++    use_ring = p->fge_ctx && fg_generate() && !smooth && !fg_meter() && fg_ensure_ring(p, cur);   /* 엔진이 없으면 링(4장)도 안 만든다 */
++    framegen = p->fge_ctx && fg_generate() && !fg_meter() && (use_ring || p->prev);
++
++    /* 보간 판단은 엔진이(켜고 끔·칸 예산·가드 2·비용 탐침·박자). 여기서는 plan 대로 운반만 한다. */
++    memset(&plan, 0, sizeof(plan));
++    plan.blend_weight = 0.5f;
++    if (framegen)
++    {
++        struct fge_frame_in in;
++        struct fge_stats st;
++        memset(&in, 0, sizeof(in));
++        in.size = sizeof(in);
++        in.flags = FGE_IN_FRAMEGEN | ((use_ring ? p->ring_prev : p->have_prev) ? FGE_IN_PREV_VALID : 0);
++        in.now_ns = fge_ns(now);
++        in.frame_no = p->frame_no;
++        in.display_interval = disp;
++        plan.size = sizeof(plan);
++        if (!fge.begin_frame(p->fge_ctx, &in, &plan)) { memset(&plan, 0, sizeof(plan)); plan.blend_weight = 0.5f; }
++        memset(&st, 0, sizeof(st));
++        st.size = sizeof(st);
++        fge.get_stats(p->fge_ctx, in.now_ns, &st);
++        p->active = st.active != 0;
++        fge_flush_log(p->fge_ctx);
++    }
++    else p->active = NO;
++    fg_apply_sync(p);   /* 보간 켬/끔·방식 전환 때만 실제로 바뀐다 */
++    if (p->active != was_active) fg_apply_drawables(p);  /* 쉼 → 2장(보간 끔과 같은 지연), 보간 → 3장 */
++
++    if (use_ring)
++    {
++        fg_present_fill(p, cb, cur, now, disp, &plan);
++        goto stats;
++    }
++    generate = (plan.flags & FGE_PLAN_GENERATE) && p->have_prev;
++    {
++        BOOL interp = generate;
++        /* 보충형(링을 못 만든 경우): 앞서 낸 화면이 아직 안 떴으면(원본이 앞서 옴) 보간을 버리고 원본을 바로 낸다 — 대기열을 쌓지 않는다. */
++        if (interp && !smooth && p->pending > 0) { interp = NO; p->dropped++; fge.note_drop(p->fge_ctx, FGE_DROP_STALE); }
++        if (!(out = fg_next(p))) return;
++        if (interp)
++        {
++            id<CAMetalDrawable> next;
++            id<MTLTexture> mc_tex = (plan.flags & FGE_PLAN_MC) ? fg_engine_mc(p, cb, cur, p->prev, plan.blend_weight) : nil;
++            if (mc_tex) { fg_draw(cb, mc_tex, mc_tex, 0.0f, out.texture); p->mc_frames++; }
++            else fg_draw(cb, cur, p->prev, 1.0f - plan.blend_weight, out.texture);
++            fg_submit(p, cb, out, 0, 0);
++            p->count_out++;
++            p->gen_total++;
++            if ((next = fg_next(p)))
++            {
++                /* 보간 프레임 뒤 원본까지의 간격(엔진 defer: 부드러움 = 게임 간격 절반, 보충형 = 한 칸)을 화면 주기 단위로 **내림**한다
++                 * (최소 1주기, 조금 앞당김). 올림하면 25ms 게임이 3주기(=40fps)에 묶여 영영 못 빠져나왔다(스텔라 블레이드 실측). */
++                double steps = floor(plan.defer / disp + 0.05), min_dur;
++                if (steps < 1) steps = 1;
++                min_dur = steps * disp - 0.1 * disp;
++                if (!smooth && plan.cadence_hold > min_dur) min_dur = plan.cadence_hold;
++                fg_draw(cb, cur, cur, 0.0f, next.texture);
++                fg_submit(p, cb, next, min_dur, now);
++                p->count_out++;
++            }
++        }
++        else
++        {
++            fg_draw(cb, cur, cur, 0.0f, out.texture);
++            fg_submit(p, cb, out, 0, now);
++            p->count_out++;
++        }
++    }
++    /* 진단: EMBER_D3DM_FG_DUMP=<경로> 이면 120번째 프레임에서 합성 결과(보간 중이면 중간 프레임)를 PPM 으로 남긴다. */
++    if (p->count_in == 120 && getenv("EMBER_D3DM_FG_DUMP"))
++    {
++        const char *path = getenv("EMBER_D3DM_FG_DUMP");
++        NSUInteger w = cur.width, h = cur.height;
++        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
++                                                                                       width:w height:h mipmapped:NO];
++        id<MTLTexture> snap;
++        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
++        td.storageMode = MTLStorageModeShared;
++        snap = [cb.device newTextureWithDescriptor:td];
++        fg_draw_sharp(cb, cur, p->prev ? p->prev : cur, generate ? 0.5f : 0.0f, snap, 0);
++        [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
++            unsigned char *px = malloc(w * h * 4);
++            FILE *f;
++            [snap getBytes:px bytesPerRow:w * 4 fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
++            if ((f = fopen(path, "wb")))
++            {
++                NSUInteger i;
++                fprintf(f, "P6\n%lu %lu\n255\n", (unsigned long)w, (unsigned long)h);
++                for (i = 0; i < w * h; i++) fwrite(px + i * 4, 1, 3, f);
++                fclose(f);
++            }
++            free(px);
++            [snap release];
++        }];
++    }
++    /* 이번 원본을 다음 보간의 "이전 프레임"으로(엔진이 보간 중이거나 곧 켜질 때만 — 쉴 때는 전체 화면 사본 한 장을 아낀다) */
++    if (framegen && p->prev && (plan.flags & (FGE_PLAN_KEEP_PREVIOUS | FGE_PLAN_GENERATE)))
++    {
++        fg_draw_sharp(cb, cur, cur, 0.0f, p->prev, 0);
++        p->have_prev = YES;
++    }
++    else p->have_prev = NO;
++
++stats:
++
++    if ((fg_log() || fg_meter()) && now - p->count_since >= 5.0)
++    {
++        if (p->count_since > 0)
++        {
++            double lat, latmax, p99 = 0, el = now - p->count_since;
++            int n;
++            struct fge_stats st;
++            char hud[96];
++            const char *reason = "off";
++            memset(&st, 0, sizeof(st));
++            st.size = sizeof(st);
++            hud[0] = 0;
++            if (p->fge_ctx)
++            {
++                size_t k;
++                fge.get_stats(p->fge_ctx, fge_ns(now), &st);
++                /* HUD 이유(DXMT 오버레이와 같은 문구: FG ON OUT n / WAIT (GAME FAST) / CHECK / OFF (GPU xC) / RETRY ns / PAUSE (LOW FPS n)) */
++                k = fge.hud_text(p->fge_ctx, fge_ns(now), p->count_in / el, p->gen_total, hud, sizeof(hud));
++                reason = k > 0 && hud[0] == '\n' ? hud + 1 : hud;
++            }
++            /* p99 프레임 시간: 이 구간 게임 프레임 간격의 99번째 백분위(끝에 붙인다 — 앞 필드를 읽는 쪽이 그대로 동작) */
++            if (p->ft_n)
++            {
++                unsigned int j, k = p->ft_n;
++                qsort(p->ft, k, sizeof(p->ft[0]), fg_cmp_float);
++                j = (unsigned int)(k * 0.99); if (j >= k) j = k - 1;
++                p99 = p->ft[j];
++            }
++            pthread_mutex_lock(&fg_stat_lock);
++            n = p->lat_n; lat = n ? p->lat_sum / n : 0; latmax = p->lat_max;
++            p->lat_sum = 0; p->lat_n = 0; p->lat_max = 0;
++            pthread_mutex_unlock(&fg_stat_lock);
++            /* game/base/conf/guard/cost/skip/blocked 는 엔진 값(skip = 칸 예산 부족, blocked = 가드·탐침이 원본만 낸 게임 프레임),
++             * drop = 운반 계층이 버린 보간, pace = 안정 방식 제한기가 게임을 붙잡은 평균 ms, mcgen = MC 로 만든 보간 수, fg = HUD 이유 */
++            fprintf(stderr, "ember-d3dm-fg: in=%.1f/s out=%.1f/s active=%d game=%.1fms display=%.1fms "
++                    "lat=%.1fms max=%.1fms wait=%.1fms drop=%u skip=%u base=%.1fms dr=%lu mode=%s "
++                    "mc=%d conf=%.2f guard=%d blocked=%u cost=%.2f pace=%.1fms mcgen=%u p99=%.1fms fg=%s\n",
++                    p->count_in / el, p->count_out / el, p->active,
++                    st.game_interval * 1000, disp * 1000, lat * 1000, latmax * 1000,
++                    p->count_in ? p->wait_sum * 1000 / p->count_in : 0, p->dropped,
++                    (unsigned)(st.frames_budget_skipped - p->log_skip0), st.base_interval * 1000,
++                    (unsigned long)p->real.maximumDrawableCount,
++                    p->fge_cfg.game_cap_fps > 0 ? "stable" : (smooth ? "smooth" : "fill"),
++                    (int)(p->fge_ctx && p->fge_cfg.mc_enabled), p->fge_ctx ? st.mc_confidence : -1.0, (int)st.guard_active,
++                    (unsigned)(st.frames_guard_blocked - p->log_block0), p->fge_ctx ? st.guard_cost : 1.0,
++                    p->count_in ? p->pace_sum * 1000 / p->count_in : 0, p->mc_frames, p99 * 1000, reason);
++            if (fg_direct_n || fg_direct_timeout)   /* Direct 유지: 평범한 present 로 낸 원본 수·처리기 늦음·시간 초과 */
++                fprintf(stderr, "ember-d3dm-fg: direct=%u late=%u timeout=%u\n", fg_direct_n, fg_direct_late, fg_direct_timeout);
++            fg_direct_n = fg_direct_late = fg_direct_timeout = 0;
++            p->log_skip0 = st.frames_budget_skipped;
++            p->log_block0 = st.frames_guard_blocked;
++        }
++        p->count_in = p->count_out = 0;
++        p->ft_n = 0;
++        p->wait_sum = 0;
++        p->pace_sum = 0;
++        p->dropped = 0;
++        p->mc_frames = 0;
++        /* 첫 구간: HUD 의 보간 수 기준점을 잡아 둔다(다음 줄의 OUT 이 이 구간부터 센다) */
++        if (p->count_since <= 0 && p->fge_ctx)
++        {
++            char hud[96];
++            fge.hud_text(p->fge_ctx, fge_ns(now), 0, p->gen_total, hud, sizeof(hud));
++        }
++        p->count_since = now;
++    }
++}
++
++static int fg_cmp_float(const void *a, const void *b)
++{
++    float x = *(const float *)a, y = *(const float *)b;
++    return x < y ? -1 : x > y;
++}
++
++static BOOL is_proxy(id d)
++{
++    return [d respondsToSelector:@selector(layer)] && [[(id<CAMetalDrawable>)d layer] isKindOfClass:[EmberFGLayer class]];
++}
++
++static void my_present(id self, SEL cmd, id d)
++{
++    if (is_proxy(d)) fg_present(self, d);
++    else { ember_hud_on_present(self, d); ember_hdr_on_present(d); ((void (*)(id, SEL, id))orig_present)(self, cmd, d); }
++}
++
++static void my_present_min(id self, SEL cmd, id d, CFTimeInterval t)
++{
++    if (is_proxy(d)) fg_present(self, d);
++    else { ember_hud_on_present(self, d); ember_hdr_on_present(d); ((void (*)(id, SEL, id, CFTimeInterval))orig_present_min)(self, cmd, d, t); }
++}
++
++static void my_present_at(id self, SEL cmd, id d, CFTimeInterval t)
++{
++    if (is_proxy(d)) fg_present(self, d);
++    else { ember_hud_on_present(self, d); ember_hdr_on_present(d); ((void (*)(id, SEL, id, CFTimeInterval))orig_present_at)(self, cmd, d, t); }
++}
++
++static void fg_hook_device(id<MTLDevice> dev)
++{
++    static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
++    static Class hooked;
++    id<MTLCommandQueue> q;
++    Class c;
++    Method a, b, t;
++
++    if (!dev) return;
++    q = [dev newCommandQueue];
++    c = [[q commandBuffer] class];
++    [q release];
++    pthread_mutex_lock(&m);
++    if (c && c != hooked && !hooked)
++    {
++        a = class_getInstanceMethod(c, @selector(presentDrawable:));
++        b = class_getInstanceMethod(c, @selector(presentDrawable:afterMinimumDuration:));
++        t = class_getInstanceMethod(c, @selector(presentDrawable:atTime:));
++        if (a && b && t)
++        {
++            orig_present = method_setImplementation(a, (IMP)my_present);
++            orig_present_min = method_setImplementation(b, (IMP)my_present_min);
++            orig_present_at = method_setImplementation(t, (IMP)my_present_at);
++            hooked = c;
++            fprintf(stderr, "ember-d3dm-fg: hooked %s\n", class_getName(c));
++        }
++    }
++    pthread_mutex_unlock(&m);
++}
++
++@implementation EmberFGLayer
++
++- (void)dealloc
++{
++    int i;
++    [real release];
++    [prev release];
++    for (i = 0; i < 4; i++) [ring[i] release];
++    [hq release];
++    [ev release];
++    if (dq) dispatch_release(dq);
++    ember_neural_destroy(neural);
++    ember_ahdr_destroy(ahdr);
++    if (fge_ctx) fge.destroy(fge_ctx);
++    if (seen_cs) CGColorSpaceRelease(seen_cs);
++    [super dealloc];
++}
++
++/* D3DMetal 이 대리 레이어에 주는 설정을 진짜 레이어에도 그대로 준다. */
++- (void)setDevice:(id<MTLDevice>)device
++{
++    [super setDevice:device];
++    real.device = device;
++    fg_hook_device(device);
++    if (!neural) neural = ember_neural_create(device);   /* EMBER_NEURAL=1 이 아니면 NULL */
++    if (!ahdr) ahdr = ember_ahdr_create(device);         /* EMBER_AUTOHDR=1 이 아니면 NULL */
++    /* 보간 엔진(EmberCore): 보간을 켠 게임에서만, 장치마다 하나. 없으면 보간 끔(원본만 통과). 스위치(EMBER_FG_*)는 엔진이 읽는다. */
++    if (device && device != fge_dev && fg_generate() && !fg_meter() && fge_available())
++    {
++        if (fge_ctx) { fge.destroy(fge_ctx); fge_ctx = NULL; }
++        memset(&fge_cfg, 0, sizeof(fge_cfg));
++        fge_ctx = fge.create2((uint64_t)(uintptr_t)device, NULL, 0, FGE_HOST_D3DMETAL);
++        fge_dev = device;   /* 엔진이 장치를 붙잡는다 — 여기서는 비교에만 쓴다 */
++        if (fge_ctx)
++        {
++            fge_cfg.size = sizeof(fge_cfg);
++            fge.get_config(fge_ctx, &fge_cfg);
++            fge_flush_log(fge_ctx);
++            fprintf(stderr, "ember-d3dm-fg: EmberFG 엔진 v%u.%u (mc=%d mode=%s game_cap=%.0f)\n", fge.abi_version() >> 16,
++                    fge.abi_version() & 0xffff, (int)fge_cfg.mc_enabled, fge_cfg.smooth ? "smooth" : "fill", fge_cfg.game_cap_fps);
++        }
++        else fprintf(stderr, "ember-d3dm-fg: EmberFG 엔진을 시작하지 못해 프레임 보간을 끕니다\n");
++    }
++}
++- (void)setPixelFormat:(MTLPixelFormat)f
++{
++    if (ember_up_log()) fprintf(stderr, "ember-d3dm-up: D3DMetal setPixelFormat %lu\n", (unsigned long)f);
++    [super setPixelFormat:f];
++    if (!ahdr_on) real.pixelFormat = f;   /* Auto HDR 중엔 진짜 레이어는 RGBA16Float 그대로 */
++    if (ahdr) { ahdr_applied = NO; fg_ahdr_layer(self); }
++}
++/* 화면 확대가 켜져 있으면 게임(대리 레이어)은 게임 크기, 진짜 레이어는 × 배율(모니터 픽셀) — ember_up_layer_size. 꺼져 있으면 s 그대로. */
++- (void)setDrawableSize:(CGSize)s { [super setDrawableSize:s]; real.drawableSize = ember_up_layer_size(real, s); }
++- (void)setColorspace:(CGColorSpaceRef)c
++{
++    if (ember_up_log())
++    {
++        CFStringRef n = c ? CGColorSpaceCopyName(c) : NULL;
++        fprintf(stderr, "ember-d3dm-up: D3DMetal setColorspace %s\n", n ? [(NSString *)n UTF8String] : "(null)");
++        if (n) CFRelease(n);
++    }
++    [super setColorspace:c];
++    if (!ahdr_on) real.colorspace = c;
++    fg_seen_real(self);
++    if (ahdr) { ahdr_applied = NO; fg_ahdr_layer(self); }
++}
++/* Ember(hdr12): 게임이 진짜 레이어에 바로 준 값을 대리 레이어에만 적는다(진짜 레이어로 되돌려 쓰지 않는다) */
++- (void)emberAdoptColorspace:(CGColorSpaceRef)c edr:(BOOL)v
++{
++    [super setColorspace:c];
++    [super setWantsExtendedDynamicRangeContent:v];
++}
++- (void)setDisplaySyncEnabled:(BOOL)v { [super setDisplaySyncEnabled:v]; game_sync = v; fg_apply_sync(self); fg_apply_drawables(self); }
++- (void)setMaximumDrawableCount:(NSUInteger)n
++{
++    [super setMaximumDrawableCount:n];
++    real.maximumDrawableCount = n;
++    game_drawables = n;            /* D3DMetal 이 스왑체인을 만들 때마다 3 을 다시 준다 → 규칙을 다시 적용 */
++    fg_apply_drawables(self);
++}
++- (void)setWantsExtendedDynamicRangeContent:(BOOL)v
++{
++    if (ember_up_log()) fprintf(stderr, "ember-d3dm-up: D3DMetal setWantsExtendedDynamicRangeContent %d\n", v);
++    [super setWantsExtendedDynamicRangeContent:v];
++    if (!ahdr_on) real.wantsExtendedDynamicRangeContent = v;
++    fg_seen_real(self);
++    if (ahdr) { ahdr_applied = NO; fg_ahdr_layer(self); }
++}
++/* 셰이더로 읽어야 하므로 대리 레이어의 drawable 은 늘 읽을 수 있게 둔다. */
++- (void)setFramebufferOnly:(BOOL)v { [super setFramebufferOnly:NO]; }
++/* 크기·배율은 화면에 붙은 진짜 레이어를 따른다. */
++- (CGRect)bounds { return real ? real.bounds : [super bounds]; }
++- (CGRect)frame { return real ? real.frame : [super frame]; }
++/* 화면 확대 중엔 진짜 레이어 contentsScale 을 올려 두므로, 게임 쪽에는 원래(게임이 보는) 배율을 알려 준다. */
++- (CGFloat)contentsScale { return real ? ember_up_game_scale(real) : [super contentsScale]; }
++
++@end
++
++void *ember_fg_wrap_layer(void *layer)
++{
++    CAMetalLayer *real = (CAMetalLayer *)layer;
++    static char key;
++    EmberFGLayer *p;
++    const char *hz;
++
++    if (!real) return layer;
++    if (!fg_enabled())
++    {
++        /* Ember HUD: 대리 레이어 없이도 D3DMetal 의 presentDrawable: 에서 판을 얹는다(가로채기만 설치, 판이 없으면 그대로 통과) */
++        if ((ember_hud_mark_layer(real) | ember_hdr_meta_on()) && real.device) fg_hook_device(real.device);   /* (hdr12) PQ EDR 메타데이터도 */
++        return layer;
++    }
++    if ((p = objc_getAssociatedObject(real, &key))) return p;
++
++    p = [[EmberFGLayer alloc] init];
++    p->real = [real retain];
++    ehud_proxy_real = p->real;
++    p->game_sync = real.displaySyncEnabled;
++    [p setFramebufferOnly:NO];
++    if (real.device) [p setDevice:real.device];
++    if ((hz = getenv("EMBER_D3DM_FG_HZ")) && atof(hz) > 1) p->display_interval = 1.0 / atof(hz);
++    else
++    {
++        /* D3DMetal 스레드에서 불리므로 AppKit 대신 CoreGraphics 로 읽는다. ProMotion 은 0 을 돌려주므로 120 으로 본다. */
++        CGDisplayModeRef mode = CGDisplayCopyDisplayMode(CGMainDisplayID());
++        double r = mode ? CGDisplayModeGetRefreshRate(mode) : 0;
++        if (mode) CGDisplayModeRelease(mode);
++        p->display_interval = 1.0 / (r > 1 ? r : 120);
++    }
++    objc_setAssociatedObject(real, &key, p, OBJC_ASSOCIATION_RETAIN);
++    [p release];
++    fg_seen_real(p);         /* (hdr12) 진짜 레이어의 처음 색공간 */
++    fg_apply_drawables(p);   /* 첫 nextDrawable 전에 2장으로 — 대기열 풀이 만들어진 뒤 바꾸는 것보다 확실하다 */
++    fprintf(stderr, "ember-d3dm-fg: proxy layer for %p (display %.1fms, drawables %lu, engine=%d)\n", real,
++            p->display_interval * 1000, (unsigned long)real.maximumDrawableCount, p->fge_ctx != NULL);
++    return p;
++}
+diff --git a/dlls/winemac.drv/ember_hdr_d3dm.h b/dlls/winemac.drv/ember_hdr_d3dm.h
+new file mode 100644
+index 0000000..8f9e3d8
+--- /dev/null
++++ b/dlls/winemac.drv/ember_hdr_d3dm.h
+@@ -0,0 +1,81 @@
++/*
++ * Ember(hdr12): D3DMetal HDR 표시 보조 — winemac 연결부(LGPL). 
++ *
++ * D3DMetal 은 IDXGISwapChain3::SetColorSpace1(G2084 = HDR10 PQ / G10 = scRGB)을 받으면 창 뷰의 CAMetalLayer 를
++ * ITUR_2100_PQ(또는 확장 선형 sRGB) + wantsExtendedDynamicRangeContent 로 바꾼다(3.0 실측·역어셈블). 하지만 EDR 메타데이터를
++ * 주지 않아, 게임이 출력 최대 밝기(GetDesc1 MaxLuminance = 화면 잠재 헤드룸 × 100nit)에 맞춰 만든 하이라이트가 지금 화면이 낼 수
++ * 있는 밝기(현재 헤드룸, 예: MAG 272U 3.9 = 390nit)를 넘으면 그대로 잘린다. PQ 레이어에 HDR10 EDR 메타데이터를 주면 macOS 가
++ * 지금 헤드룸에 맞춰 톤 매핑한다(중간 밝기는 그대로, opticalOutputScale 100 = 100nit 가 EDR 1.0).
++ *
++ * 기본 꺼짐(EMBER_HDR_EDRMETA=1 로 켬): 10-03 실측(hdrcap HDR 캡처) — HDR10 메타데이터를 주면 macOS 가 PQ 를 다른 기준 흰색으로 읽어
++ * 화면 전체가 절반 밝기가 됐다(100nit → EDR 0.50, 1000nit → 5.0). 하이라이트를 접는 효과보다 손해가 커서 실험으로만 남긴다.
++ * 진짜 레이어에만 쓴다(대리 레이어는 화면에 안 붙는다).
++ */
++#ifndef EMBER_HDR_D3DM_H
++#define EMBER_HDR_D3DM_H
++
++static int ember_hdr_meta_on(void)
++{
++    static int on = -1;
++    if (on < 0)
++    {
++        /* D3DMetal 일 때만(DXMT 는 자기 표시 셰이더가 지금 헤드룸에 맞춰 톤 매핑한다 — 겹치면 두 번 접힌다) */
++        const char *v = getenv("EMBER_HDR_EDRMETA"), *b = getenv("CX_ACTIVE_GRAPHICS_BACKEND");
++        on = (v && *v ? atoi(v) != 0 : 0) && b && !strcmp(b, "d3dmetal");
++    }
++    return on;
++}
++
++static char ember_hdr_meta_key;
++
++/* 레이어 색공간이 PQ 면 HDR10 EDR 메타데이터를 둔다(없을 때만), PQ 가 아니게 되면 우리가 둔 것을 걷는다.
++ * potential = 창 화면의 잠재 EDR 헤드룸(0 = 모름 → 1000nit, 음수 = 필요할 때 주 화면에서 읽음). 게임 스레드에서 불러도 된다(CALayer 속성). */
++static void ember_hdr_meta_apply(CAMetalLayer *l, double potential)
++{
++    CGColorSpaceRef cs;
++    CFStringRef name;
++    BOOL pq = NO, ours;
++    if (!l || !ember_hdr_meta_on()) return;
++    if (@available(macOS 11.0, *))
++    {
++        cs = l.colorspace;
++        if (cs && (name = CGColorSpaceCopyName(cs)))
++        {
++            pq = CFEqual(name, kCGColorSpaceITUR_2100_PQ);
++            CFRelease(name);
++        }
++        ours = objc_getAssociatedObject(l, &ember_hdr_meta_key) != nil;
++        if (pq && !l.EDRMetadata)
++        {
++            float maxl;
++            if (potential < 0) potential = [[NSScreen mainScreen] maximumPotentialExtendedDynamicRangeColorComponentValue];
++            maxl = potential > 1.0 ? (float)(potential * 100.0) : 1000.0f;
++            l.EDRMetadata = [CAEDRMetadata HDR10MetadataWithMinLuminance:0.0001f maxLuminance:maxl opticalOutputScale:100.0f];
++            objc_setAssociatedObject(l, &ember_hdr_meta_key, (id)kCFBooleanTrue, OBJC_ASSOCIATION_ASSIGN);
++            fprintf(stderr, "ember-hdr: PQ layer %p — HDR10 EDR metadata max %.0f nit (system tone mapping to current headroom)\n", l, maxl);
++        }
++        else if (!pq && ours && l.EDRMetadata)
++        {
++            l.EDRMetadata = nil;
++            objc_setAssociatedObject(l, &ember_hdr_meta_key, nil, OBJC_ASSOCIATION_ASSIGN);
++            fprintf(stderr, "ember-hdr: layer %p left PQ — EDR metadata removed\n", l);
++        }
++    }
++}
++
++/* 대리 레이어 없이(보간·확대 끔) D3DMetal 이 진짜 레이어로 바로 낼 때: presentDrawable: 가로채기에서 0.5초에 한 번만 본다. */
++static void ember_hdr_on_present(id d)
++{
++    static double next;
++    double now;
++    CAMetalLayer *l;
++    if (!ember_hdr_meta_on() || ![d respondsToSelector:@selector(layer)]) return;
++    now = CACurrentMediaTime();
++    if (now < next) return;
++    next = now + 0.5;
++    l = [(id<CAMetalDrawable>)d layer];
++    if (![l isKindOfClass:[CAMetalLayer class]]) return;
++    ember_hdr_meta_apply(l, -1);   /* 잠재 헤드룸은 메타데이터를 둘 때만 묻는다 */
++}
++
++#endif
+diff --git a/dlls/winemac.drv/ember_hud_d3dm.h b/dlls/winemac.drv/ember_hud_d3dm.h
+new file mode 100644
+index 0000000..9bb58d7
+--- /dev/null
++++ b/dlls/winemac.drv/ember_hud_d3dm.h
+@@ -0,0 +1,179 @@
++/*
++ * Ember in-game HUD for D3DMetal — thin connection to the optional EmberCore HUD library (libEmberHUD.dylib next to
++ * winemac.so, or EMBER_HUD_LIB). The library maps the Ember app's shared panel images for this process and blends the
++ * visible panels (boss mechanics, Ember speech bubble, toasts) onto the frame that goes to the screen with one small
++ * render pass, so the app does not need a separate window above the game (a window above the game forces macOS to
++ * composite the game instead of presenting it directly).
++ *
++ * Where it draws:
++ *   - frame generation / upscale / Auto HDR proxy layer (ember_framegen.m): every frame that goes to the real layer,
++ *     real and interpolated (fg_draw);
++ *   - plain D3DMetal (no proxy): D3DMetal's own [commandBuffer presentDrawable:] on the window's layer — the HUD pass is
++ *     appended to that command buffer just before the present (the same interception ember_framegen.m already uses).
++ * EMBER_HUD=0 turns it off. Without the library nothing changes.
++ *
++ * This library is free software; you can redistribute it and/or modify it under the terms of the GNU Lesser
++ * General Public License as published by the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ */
++#ifndef __EMBER_HUD_D3DM_H
++#define __EMBER_HUD_D3DM_H
++
++#import <Metal/Metal.h>
++#import <QuartzCore/QuartzCore.h>
++#import <objc/runtime.h>
++#include <dlfcn.h>
++#include <mach-o/dyld.h>
++#include <pthread.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++/* same layout as EmberCore/hud/include/ember_hud.h (ABI 1.x) */
++struct ehud_encode_in { uint32_t size, transfer; uint64_t command_buffer, target; float sdr_white, pad0; };
++struct ehud_encode_out { uint32_t size, drawn; int32_t next_call_ms; uint32_t attached; };
++enum { EHUD_TRANSFER_AUTO = 0, EHUD_TRANSFER_LINEAR = 1, EHUD_TRANSFER_PQ = 2 };
++#define EHUD_HOST_D3DMETAL 1
++
++static struct
++{
++    uint32_t (*abi_version)(void);
++    void *(*create)(uint64_t device, const char *env, size_t len, uint32_t host);
++    int (*encode)(void *ctx, const struct ehud_encode_in *in, struct ehud_encode_out *out);
++} ehud;
++static pthread_once_t ehud_once = PTHREAD_ONCE_INIT;
++static pthread_mutex_t ehud_lock = PTHREAD_MUTEX_INITIALIZER;
++static void *ehud_ctx;
++static id ehud_dev;                     /* device the context was made for (not retained — the library retains it) */
++static volatile double ehud_next;       /* CACurrentMediaTime() before which calls are skipped (nothing visible) */
++static volatile int ehud_drawing;       /* last call drew something → call every frame */
++static char ehud_layer_key;             /* associated object: this real layer gets the HUD on presentDrawable: */
++static CAMetalLayer *volatile ehud_proxy_real;   /* real layer behind the frame-generation proxy (colour space for fg_draw) */
++
++static void ehud_load(void)
++{
++    char path[4096];
++    const char *v = getenv("EMBER_HUD"), *override = getenv("EMBER_HUD_LIB");
++    void *lib = NULL;
++    Dl_info info;
++    if (v && !strcmp(v, "0")) return;
++    path[0] = 0;
++    if (override && *override) snprintf(path, sizeof(path), "%s", override);
++    else if (dladdr((const void *)&ehud_load, &info) && info.dli_fname)
++    {
++        const char *slash = strrchr(info.dli_fname, '/');
++        if (slash) snprintf(path, sizeof(path), "%.*s/libEmberHUD.dylib", (int)(slash - info.dli_fname), info.dli_fname);
++    }
++    if (path[0]) lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
++    if (!lib) return;
++    *(void **)&ehud.abi_version = dlsym(lib, "ember_hud_abi_version");
++    *(void **)&ehud.create = dlsym(lib, "ember_hud_create");
++    *(void **)&ehud.encode = dlsym(lib, "ember_hud_encode");
++    if (!ehud.abi_version || (ehud.abi_version() >> 16) != 1 || !ehud.create || !ehud.encode)
++    {
++        memset(&ehud, 0, sizeof(ehud));
++        dlclose(lib);
++    }
++}
++
++static int ehud_available(void)
++{
++    pthread_once(&ehud_once, ehud_load);
++    return ehud.encode != NULL;
++}
++
++/* Transfer of the layer the frame goes to: PQ / extended-linear colour spaces, else sRGB-encoded (the library handles *_sRGB). */
++static uint32_t ehud_transfer_for(CAMetalLayer *layer, MTLPixelFormat fmt)
++{
++    uint32_t t = EHUD_TRANSFER_AUTO;
++    CGColorSpaceRef cs = layer ? layer.colorspace : NULL;
++    if (cs)
++    {
++        CFStringRef n = CGColorSpaceCopyName(cs);
++        if (n)
++        {
++            if (CFStringFind(n, CFSTR("PQ"), 0).location != kCFNotFound) t = EHUD_TRANSFER_PQ;
++            else if (CFStringFind(n, CFSTR("Linear"), 0).location != kCFNotFound) t = EHUD_TRANSFER_LINEAR;
++            CFRelease(n);
++        }
++    }
++    else if (fmt == MTLPixelFormatRGBA16Float) t = EHUD_TRANSFER_LINEAR;
++    return t;
++}
++
++/* Append the HUD pass for dst (a texture that goes to the screen) to cb. Cheap when nothing is shown (one time check). */
++static void ember_hud_draw(id<MTLCommandBuffer> cb, id<MTLTexture> dst, CAMetalLayer *layer)
++{
++    struct ehud_encode_in in;
++    struct ehud_encode_out out;
++    double now;
++    if (!cb || !dst) return;
++    now = CACurrentMediaTime();
++    if (!ehud_drawing && now < ehud_next) return;
++    if (!ehud_available()) { ehud_next = now + 3600; return; }
++    pthread_mutex_lock(&ehud_lock);
++    if (!ehud_ctx || ehud_dev != (id)cb.device)
++    {
++        /* one context per process (the device of D3DMetal's queue); a new device replaces it — rare, the old one is leaked */
++        ehud_ctx = ehud.create((uint64_t)(uintptr_t)cb.device, NULL, 0, EHUD_HOST_D3DMETAL);
++        ehud_dev = (id)cb.device;
++        if (ehud_ctx) fprintf(stderr, "ember-hud: d3dmetal HUD ready\n");
++    }
++    if (!ehud_ctx) { pthread_mutex_unlock(&ehud_lock); ehud_next = now + 3600; return; }
++    memset(&in, 0, sizeof(in));
++    in.size = sizeof(in);
++    in.transfer = ehud_transfer_for(layer, dst.pixelFormat);
++    in.command_buffer = (uint64_t)(uintptr_t)cb;
++    in.target = (uint64_t)(uintptr_t)dst;
++    memset(&out, 0, sizeof(out));
++    out.size = sizeof(out);
++    out.next_call_ms = 500;
++    ehud.encode(ehud_ctx, &in, &out);
++    pthread_mutex_unlock(&ehud_lock);
++    ehud_drawing = out.next_call_ms <= 0;
++    ehud_next = now + (out.next_call_ms > 0 ? out.next_call_ms : 0) / 1000.0;
++}
++
++/* Plain D3DMetal (no proxy layer): mark the window's real layer. Returns 1 if the presentDrawable: hook must be installed. */
++/* DXMT also asks winemac for the window's layer (winemetal.so → macdrv_view_get_metal_layer), but its presenter draws the
++ * HUD itself (EmberHudHook, host DXMT). Marking that layer too drew every panel twice (10-03 inhud2: d11fs "d3dmetal HUD
++ * ready"). winemetal.so is DXMT's unix side and D3DMetal never loads it, so: loaded → this layer is DXMT's → leave it. */
++static int ehud_dxmt_in_process(void)
++{
++    uint32_t i, n = _dyld_image_count();
++    for (i = 0; i < n; i++)
++    {
++        const char *name = _dyld_get_image_name(i);
++        size_t len = name ? strlen(name) : 0;
++        if (len >= 13 && !strcmp(name + len - 13, "/winemetal.so")) return 1;
++    }
++    return 0;
++}
++
++static int ember_hud_mark_layer(CAMetalLayer *layer)
++{
++    if (!layer || !ehud_available()) return 0;
++    if (ehud_dxmt_in_process())
++    {
++        static int said;
++        if (!said++) fprintf(stderr, "ember-hud: DXMT in this process — winemac leaves the HUD to DXMT\n");
++        return 0;
++    }
++    if (objc_getAssociatedObject(layer, &ehud_layer_key)) return 1;
++    objc_setAssociatedObject(layer, &ehud_layer_key, (id)kCFBooleanTrue, OBJC_ASSOCIATION_ASSIGN);
++    fprintf(stderr, "ember-hud: d3dmetal layer %p marked for in-game HUD\n", layer);
++    return 1;
++}
++
++/* presentDrawable: hook, drawable of a marked real layer: draw the HUD into it before the present. */
++static void ember_hud_on_present(id<MTLCommandBuffer> cb, id d)
++{
++    CAMetalLayer *layer;
++    if (!ehud.encode || ![d respondsToSelector:@selector(layer)]) return;
++    layer = [(id<CAMetalDrawable>)d layer];
++    if (!layer || !objc_getAssociatedObject(layer, &ehud_layer_key)) return;
++    ember_hud_draw(cb, [(id<CAMetalDrawable>)d texture], layer);
++}
++
++#endif
+diff --git a/dlls/winemac.drv/ember_neural.h b/dlls/winemac.drv/ember_neural.h
+new file mode 100644
+index 0000000..359d298
+--- /dev/null
++++ b/dlls/winemac.drv/ember_neural.h
+@@ -0,0 +1,51 @@
++/*
++ * Ember Neural: 완성된 게임 프레임에 거는 "사실감" 후처리(ForgePlay 2.0 의 DLSS5 흉내 기능에 대응).
++ *
++ *  - 게임 해상도 원본에 프레임마다 한 번, 보간(프레임 생성) 앞에서 건다. 보간·표시 패스는 모두 처리본을 읽는다.
++ *  - 표시 경로에 들어가는 것은 Metal 패스 셋뿐(다운스케일·통계·적용, 전부 같은 커맨드 버퍼, CPU 동기화 없음).
++ *  - CoreML(뉴럴 엔진)은 완전히 비동기: 720p 로 줄인 프레임을 IOSurface 로 넘기고(복사 0), "가장 최근 완료 결과" 의
++ *    저주파 색 차이(delta = 모델 출력 - 모델 입력)를 현재 프레임에 얹는다. 원본의 고주파 디테일은 그대로 남는다
++ *    (out = x + up(y_lo - x_lo) = up(y_lo) + (x - up(x_lo))). 결과가 늦으면 그냥 이전 결과를 쓴다 — fps·지연 영향 0.
++ *  - 색 일관성 가드: 처리본의 채널별 평균·분산을 원본에 맞춘다(초록 끼 같은 색 쏠림 제거). 세기 0~100%.
++ *  - 모델이 없어도 비 ML 기본 패스(필름 S 커브·국소 대비·바이브런스·그레인)로 바로 쓸 수 있다.
++ *
++ * 환경 변수: EMBER_NEURAL=1 켬. EMBER_NEURAL_STRENGTH 0~100(기본 60). EMBER_NEURAL_RES 분석 세로 해상도(기본 720, 0=원본).
++ *  EMBER_NEURAL_MODEL 모델 이름/경로(없으면 기본 패스만). EMBER_NEURAL_UNITS ane|all|gpu|cpu. EMBER_NEURAL_GUARD 0~100(기본 100).
++ *  EMBER_NEURAL_CONTRAST/CLARITY/VIBRANCE/GRAIN 0~100(기본 35/25/20/0, 모델이 있으면 대비·바이브런스 기본 0).
++ *  EMBER_NEURAL_LOG=1 5초마다 통계.
++ */
++#ifndef __EMBER_NEURAL_H
++#define __EMBER_NEURAL_H
++
++#ifdef __OBJC__
++#import <Metal/Metal.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct ember_neural ember_neural_t;
++
++/* EMBER_NEURAL=1 인가(한 번만 읽는다) */
++int ember_neural_enabled(void);
++/* 켜져 있지 않으면 NULL. */
++ember_neural_t *ember_neural_create(id<MTLDevice> dev);
++void ember_neural_destroy(ember_neural_t *n);
++/* src → dst(같은 크기, 렌더 타깃). dst 가 nil 이면 내부 스크래치 텍스처를 쓰고 그것을 돌려준다.
++ * 실패(멀티샘플·형식 불가)하면 src 를 그대로 돌려준다(호출자는 돌려받은 텍스처를 쓰면 된다). */
++id<MTLTexture> ember_neural_encode(ember_neural_t *n, id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst);
++/* neuralbench: 파라미터 덮어쓰기 / 통계 */
++struct ember_neural_info {
++    uint64_t frames, ane_done, ane_skipped, ane_failed;
++    double ane_ms_ema, ane_ms_max, ane_open_ms;
++    int model_loaded, lo_w, lo_h, layout;
++    char model_path[512];
++};
++void ember_neural_info(ember_neural_t *n, struct ember_neural_info *info);
++/* 표시 프레임이 끝나기를 기다려야 하는 도구용: 모델 결과가 최소 하나 있을 때까지(최대 ms) */
++int ember_neural_wait_model(ember_neural_t *n, double timeout_ms);
++
++#ifdef __cplusplus
++}
++#endif
++#endif /* __OBJC__ */
++#endif
+diff --git a/dlls/winemac.drv/ember_neural.m b/dlls/winemac.drv/ember_neural.m
+new file mode 100644
+index 0000000..80c7b71
+--- /dev/null
++++ b/dlls/winemac.drv/ember_neural.m
+@@ -0,0 +1,82 @@
++/*
++ * Ember Tone (EMBER_NEURAL) glue for the D3DMetal path. The look passes and the CoreML worker live in libEmberTone.dylib
++ * (EmberCore, separate proprietary library); this file only loads it and forwards the calls (API: ember_neural.h).
++ *
++ * This library is free software; you can redistribute it and/or modify it under the terms of the GNU Lesser
++ * General Public License as published by the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ */
++#import <Metal/Metal.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "ember_neural.h"
++#include "ember_tone_load.h"
++
++struct ember_neural { void *ctx; };
++
++int ember_neural_enabled(void)
++{
++    static int on = -1;
++    if (on < 0) { const char *v = getenv("EMBER_NEURAL"); on = v && !strcmp(v, "1"); }
++    return on;
++}
++
++ember_neural_t *ember_neural_create(id<MTLDevice> dev)
++{
++    struct ember_neural *n;
++    void *ctx;
++    if (!dev || !ember_neural_enabled() || !etone_available()) return NULL;
++    ctx = etone.neural_create((uint64_t)(uintptr_t)dev, NULL, 0, ETONE_HOST_D3DMETAL);
++    if (!ctx) return NULL;
++    n = calloc(1, sizeof(*n));
++    if (!n) { etone.neural_destroy(ctx); return NULL; }
++    n->ctx = ctx;
++    return n;
++}
++
++void ember_neural_destroy(ember_neural_t *n)
++{
++    if (!n) return;
++    etone.neural_destroy(n->ctx);
++    free(n);
++}
++
++id<MTLTexture> ember_neural_encode(ember_neural_t *n, id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst)
++{
++    struct etone_neural_in in;
++    struct etone_neural_out out;
++    if (!n || !src) return src;
++    memset(&in, 0, offsetof(struct etone_neural_in, wait_fences));
++    in.size = offsetof(struct etone_neural_in, wait_fences);   /* no fences on this path */
++    in.rt_mode = -1;
++    in.command_buffer = (uint64_t)(uintptr_t)cb;
++    in.source = (uint64_t)(uintptr_t)src;
++    in.target = (uint64_t)(uintptr_t)dst;
++    memset(&out, 0, sizeof(out));
++    out.size = sizeof(out);
++    if (!etone.neural_encode(n->ctx, &in, &out)) return src;
++    return (id<MTLTexture>)(uintptr_t)out.texture;
++}
++
++void ember_neural_info(ember_neural_t *n, struct ember_neural_info *info)
++{
++    struct etone_neural_info r;
++    memset(info, 0, sizeof(*info));
++    if (!n) return;
++    memset(&r, 0, sizeof(r));
++    r.size = sizeof(r);
++    etone.neural_get_info(n->ctx, &r);
++    info->frames = r.frames;
++    info->model_loaded = r.model_loaded;
++    info->ane_done = r.ane_done; info->ane_skipped = r.ane_skipped; info->ane_failed = r.ane_failed;
++    info->ane_ms_ema = r.ane_ms_ema; info->ane_ms_max = r.ane_ms_max; info->ane_open_ms = r.ane_open_ms;
++    info->lo_w = r.lo_w; info->lo_h = r.lo_h; info->layout = r.layout;
++    strlcpy(info->model_path, r.model_path, sizeof(info->model_path));
++}
++
++int ember_neural_wait_model(ember_neural_t *n, double timeout_ms)
++{
++    return n ? etone.neural_wait_model(n->ctx, timeout_ms) : 0;
++}
+diff --git a/dlls/winemac.drv/ember_tone_load.h b/dlls/winemac.drv/ember_tone_load.h
+new file mode 100644
+index 0000000..5870dcd
+--- /dev/null
++++ b/dlls/winemac.drv/ember_tone_load.h
+@@ -0,0 +1,112 @@
++/*
++ * Ember Tone / Ember Flare glue (winemac.drv, D3DMetal path): loads the optional libEmberTone.dylib (EmberCore, separate
++ * proprietary library, not part of this tree) from the directory of winemac.so (override: EMBER_TONE_LIB) and resolves its
++ * C ABI. When the library is missing or has another ABI major version, Tone (EMBER_NEURAL) and Flare (EMBER_AUTOHDR) stay off.
++ * The structs below have the same layout as EmberCore/tone/include/ember_tone.h (ABI 1.x).
++ *
++ * This library is free software; you can redistribute it and/or modify it under the terms of the GNU Lesser
++ * General Public License as published by the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ */
++#ifndef __EMBER_TONE_LOAD_H
++#define __EMBER_TONE_LOAD_H
++
++#include <dlfcn.h>
++#include <pthread.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++#define ETONE_HOST_D3DMETAL 1
++#define ETONE_MAX_WAIT_FENCES 256
++
++struct etone_neural_in {
++    uint32_t size; int32_t rt_mode;
++    uint64_t command_buffer, source, target;
++    uint32_t sample_count, n_wait_fences;
++    uint64_t wait_fences[ETONE_MAX_WAIT_FENCES];
++};
++struct etone_neural_out { uint32_t size, processed; uint64_t texture; };
++struct etone_neural_info {
++    uint32_t size, model_loaded;
++    uint64_t frames, ane_done, ane_skipped, ane_failed;
++    double ane_ms_ema, ane_ms_max, ane_open_ms;
++    int32_t lo_w, lo_h, layout, lut_mode;
++    char model_path[512];
++};
++struct etone_ahdr_config { uint32_t size, failed; float strength, peak_cap, gamma22, wexp, peak, pad; };
++struct etone_ahdr_encode_in {
++    uint32_t size, flags;
++    uint64_t command_buffer, source;
++    uint32_t n_wait_fences, pad;
++    uint64_t wait_fences[ETONE_MAX_WAIT_FENCES];
++};
++#define ETONE_AHDR_SRC_AUTO 2
++struct etone_ahdr_encode_out { uint32_t size, ok; uint64_t gain; };
++struct etone_ahdr_frame_in { uint32_t size, log; double edr_now, edr_potential; };
++struct etone_ahdr_frame_out { uint32_t size; float peak; };
++struct etone_ahdr_draw_in { uint32_t size; float blend, sharp; uint32_t pad; uint64_t command_buffer, current, previous, target; };
++
++static struct
++{
++    uint32_t (*abi_version)(void);
++    void *(*neural_create)(uint64_t device, const char *env, size_t len, uint32_t host);
++    void (*neural_destroy)(void *ctx);
++    int (*neural_encode)(void *ctx, const struct etone_neural_in *in, struct etone_neural_out *out);
++    void (*neural_get_info)(void *ctx, struct etone_neural_info *info);
++    int (*neural_wait_model)(void *ctx, double timeout_ms);
++    void *(*ahdr_create)(uint64_t device, const char *env, size_t len, uint32_t host);
++    void (*ahdr_destroy)(void *ctx);
++    void (*ahdr_get_config)(void *ctx, struct etone_ahdr_config *cfg);
++    int (*ahdr_encode)(void *ctx, const struct etone_ahdr_encode_in *in, struct etone_ahdr_encode_out *out);
++    void (*ahdr_frame)(void *ctx, const struct etone_ahdr_frame_in *in, struct etone_ahdr_frame_out *out);
++    int (*ahdr_draw)(void *ctx, const struct etone_ahdr_draw_in *in);
++} etone;
++static pthread_once_t etone_once = PTHREAD_ONCE_INIT;
++
++static void etone_load(void)
++{
++    char path[4096];
++    const char *override = getenv("EMBER_TONE_LIB");
++    void *lib = NULL;
++    Dl_info info;
++    path[0] = 0;
++    if (override && *override) snprintf(path, sizeof(path), "%s", override);
++    else if (dladdr((const void *)&etone_load, &info) && info.dli_fname)
++    {
++        const char *slash = strrchr(info.dli_fname, '/');
++        if (slash) snprintf(path, sizeof(path), "%.*s/libEmberTone.dylib", (int)(slash - info.dli_fname), info.dli_fname);
++    }
++    if (path[0]) lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
++    if (!lib) { fprintf(stderr, "ember-tone: libEmberTone.dylib not found — Tone/Flare off\n"); return; }
++#define ETONE_SYM(f, n) *(void **)&etone.f = dlsym(lib, n)
++    ETONE_SYM(abi_version, "ember_tone_abi_version");
++    ETONE_SYM(neural_create, "ember_tone_neural_create");
++    ETONE_SYM(neural_destroy, "ember_tone_neural_destroy");
++    ETONE_SYM(neural_encode, "ember_tone_neural_encode");
++    ETONE_SYM(neural_get_info, "ember_tone_neural_get_info");
++    ETONE_SYM(neural_wait_model, "ember_tone_neural_wait_model");
++    ETONE_SYM(ahdr_create, "ember_tone_ahdr_create");
++    ETONE_SYM(ahdr_destroy, "ember_tone_ahdr_destroy");
++    ETONE_SYM(ahdr_get_config, "ember_tone_ahdr_get_config");
++    ETONE_SYM(ahdr_encode, "ember_tone_ahdr_encode");
++    ETONE_SYM(ahdr_frame, "ember_tone_ahdr_frame");
++    ETONE_SYM(ahdr_draw, "ember_tone_ahdr_draw");
++#undef ETONE_SYM
++    if (!etone.abi_version || (etone.abi_version() >> 16) != 1 || !etone.neural_create || !etone.neural_destroy ||
++        !etone.neural_encode || !etone.neural_get_info || !etone.neural_wait_model || !etone.ahdr_create || !etone.ahdr_destroy ||
++        !etone.ahdr_get_config || !etone.ahdr_encode || !etone.ahdr_frame || !etone.ahdr_draw)
++    {
++        fprintf(stderr, "ember-tone: libEmberTone.dylib has an incompatible ABI — Tone/Flare off\n");
++        memset(&etone, 0, sizeof(etone));
++        dlclose(lib);
++    }
++}
++
++static int etone_available(void)
++{
++    pthread_once(&etone_once, etone_load);
++    return etone.abi_version != NULL;
++}
++
++#endif
+diff --git a/dlls/winemac.drv/ember_upscale.h b/dlls/winemac.drv/ember_upscale.h
+new file mode 100644
+index 0000000..236851e
+--- /dev/null
++++ b/dlls/winemac.drv/ember_upscale.h
+@@ -0,0 +1,59 @@
++/*
++ * Ember: D3DMetal 화면 확대 (MetalFX 공간 업스케일)
++ *
++ * DXMT 의 d3d11.metalSpatialUpscaleFactor 와 같은 일을 D3DMetal 에 한다. 게임은 EMBER_RETINA_SCALE 로 작은 화면(FHD·QHD)을 보고
++ * 그 크기로 그린다. 대리 레이어(EmberFGLayer, ember_framegen.m)가 D3DMetal 의 setDrawableSize: 를 받을 때
++ *   - 대리 레이어(게임이 그리는 곳) = 게임 크기 그대로
++ *   - 진짜 레이어(화면)             = 게임 크기 × 배율(모니터 픽셀), contentsScale 도 같은 배율(macOS 가 다시 늘이지 않게)
++ * 로 가르고, 화면으로 나가는 모든 프레임(원본·보간)을 표시 직전에 MTLFXSpatialScaler 로 한 번씩 키운다.
++ * 보간(혼합·MC)·Ember Neural 은 게임 해상도에서 그대로 하고(싸다) 확대는 맨 끝 — DXMT 의 EMBER_FG_PRE_UPSCALE=1 과 같은 순서.
++ * 선명화(EMBER_D3DM_SHARPNESS, CAS)는 확대된 모니터 해상도에서 건다.
++ *
++ * 환경 변수:
++ *   EMBER_D3DM_UPSCALE=1            켬(CX_ACTIVE_GRAPHICS_BACKEND=d3dmetal 일 때만)
++ *   EMBER_D3DM_UPSCALE_FACTOR=<f>   배율(모니터 backingScale / 게임 retina 배율, FHD on 4K = 2, QHD = 1.5). 1.01 이하면 꺼짐.
++ *   EMBER_D3DM_UPSCALE_LOG=1        레이어 설정 호출(크기·형식·색공간·EDR)과 5초마다 확대 수·스케일러 재생성 수
++ *   EMBER_D3DM_UPSCALE_MODE=metalfx|bilinear   bilinear = MetalFX 없이 같은 경로(비교용)
++ */
++#ifndef __WINE_EMBER_UPSCALE_H
++#define __WINE_EMBER_UPSCALE_H
++
++#ifdef __OBJC__
++#import <Metal/Metal.h>
++#import <QuartzCore/QuartzCore.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* EMBER_D3DM_UPSCALE=1 + d3dmetal + 배율 > 1.01 + MetalFX 지원(macOS 13+, 애플 GPU). 한 번만 판정. */
++int ember_up_enabled(void);
++/* 배율(꺼져 있으면 1) */
++double ember_up_factor(void);
++/* EMBER_D3DM_UPSCALE_LOG=1 */
++int ember_up_log(void);
++
++/* 대리 레이어가 D3DMetal 의 setDrawableSize: 를 받았을 때: 진짜 레이어 크기(=게임 크기 × 배율)를 돌려주고,
++ * 진짜 레이어 contentsScale 을 (원래 값 × 배율)로 한 번 올린다. 꺼져 있으면 game 을 그대로 돌려주고 아무것도 안 바꾼다. */
++CGSize ember_up_layer_size(CAMetalLayer *real, CGSize game);
++/* 진짜 레이어의 원래(게임이 보는) contentsScale. 올리기 전이면 지금 값. */
++CGFloat ember_up_game_scale(CAMetalLayer *real);
++/* 2초마다(대리 레이어 화면 점검 때) 부른다: winemac(setRetinaMode·창 이동)이 contentsScale 을 되돌렸으면 다시 올린다. */
++void ember_up_resync_layer(CAMetalLayer *real, CGSize game);
++
++/* src(게임 해상도) → out_w × out_h 로 MetalFX 확대. 결과는 커맨드 큐마다 하나인 전용(private) 텍스처(src 와 같은 형식)라
++ * 같은 커맨드 버퍼에서 바로 읽으면 된다(추적 자원 → 순서 자동). 스케일러는 (입력 형식·크기, 출력 크기)가 바뀌면 다시 만든다.
++ * 못 하면(형식 미지원·메모리) nil — 호출자는 원래처럼 이중선형으로 그린다. 여러 스레드(게임 스레드·보간 보조 스레드)에서 불러도 된다. */
++id<MTLTexture> ember_up_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, NSUInteger out_w, NSUInteger out_h);
++/* 보간 혼합처럼 확대 앞에 한 장을 그려야 할 때 쓰는 게임 해상도 렌더 타깃(큐마다 하나, like 와 같은 크기·형식). */
++id<MTLTexture> ember_up_scratch(id<MTLCommandBuffer> cb, id<MTLTexture> like);
++
++/* 도구(d3dmup)용: 마지막으로 만든 스케일러의 요구 용도·처리 모드 */
++struct ember_up_info { unsigned long color_usage, output_usage; int mode; unsigned long created, encoded; };
++void ember_up_get_info(struct ember_up_info *info);
++
++#ifdef __cplusplus
++}
++#endif
++#endif /* __OBJC__ */
++#endif
+diff --git a/dlls/winemac.drv/ember_upscale.m b/dlls/winemac.drv/ember_upscale.m
+new file mode 100644
+index 0000000..682349a
+--- /dev/null
++++ b/dlls/winemac.drv/ember_upscale.m
+@@ -0,0 +1,549 @@
++/*
++ * Ember: D3DMetal 화면 확대 (MetalFX 공간 업스케일). 설명은 ember_upscale.h.
++ * 수동 참조 계수(MRC) — winemac 의 다른 .m 과 같다.
++ */
++
++#import <Metal/Metal.h>
++#import <MetalFX/MetalFX.h>
++#import <QuartzCore/QuartzCore.h>
++#import <objc/runtime.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <pthread.h>
++
++#include "ember_upscale.h"
++#include <dlfcn.h>
++
++/* ---- Ember AI 업스케일(EmberCore libEmberUp.dylib, winemac.so 옆 또는 EMBER_UP_LIB) — 기본 꺼짐, EMBER_UP_AI=1 로 켬.
++ * MetalFX 결과(정확히 2배)에 렌더 해상도 작은 망의 휘도 잔차를 더한다. 라이브러리가 없거나 ABI 가 다르면 MetalFX 만. ---- */
++static struct
++{
++    unsigned int (*abi)(void);
++    void *(*create)(uint64_t dev);
++    void (*destroy)(void *ctx);
++    int (*supported)(void *ctx, unsigned int lw, unsigned int lh, unsigned int hw, unsigned int hh, unsigned int fmt);
++    int (*post)(void *ctx, uint64_t cb, uint64_t lo, uint64_t hi, unsigned int flags, uint64_t *out);
++    size_t (*drain_log)(void *ctx, char *buf, size_t cap);
++} eup;
++static int eup_ok;
++static pthread_once_t eup_once = PTHREAD_ONCE_INIT;
++static void eup_load(void)
++{
++    char path[4096];
++    const char *ov = getenv("EMBER_UP_LIB"), *on = getenv("EMBER_UP_AI");
++    void *lib = NULL;
++    Dl_info info;
++    if (!on || strcmp(on, "1")) return;
++    path[0] = 0;
++    if (ov && *ov) snprintf(path, sizeof(path), "%s", ov);
++    else if (dladdr((const void *)&eup_load, &info) && info.dli_fname)
++    {
++        const char *slash = strrchr(info.dli_fname, '/');
++        if (slash) snprintf(path, sizeof(path), "%.*s/libEmberUp.dylib", (int)(slash - info.dli_fname), info.dli_fname);
++    }
++    if (path[0]) lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
++    if (!lib) { fprintf(stderr, "ember-d3dm-up: libEmberUp 없음 — AI 업스케일 끔\n"); return; }
++    *(void **)&eup.abi = dlsym(lib, "emberup_abi_version");
++    *(void **)&eup.create = dlsym(lib, "emberup_create");
++    *(void **)&eup.destroy = dlsym(lib, "emberup_destroy");
++    *(void **)&eup.supported = dlsym(lib, "emberup_supported");
++    *(void **)&eup.post = dlsym(lib, "emberup_post");
++    *(void **)&eup.drain_log = dlsym(lib, "emberup_drain_log");
++    if (!eup.abi || (eup.abi() >> 16) != 1 || !eup.create || !eup.destroy || !eup.supported || !eup.post || !eup.drain_log)
++    {
++        fprintf(stderr, "ember-d3dm-up: libEmberUp ABI 가 맞지 않음 — AI 업스케일 끔\n");
++        memset(&eup, 0, sizeof(eup));
++        dlclose(lib);
++        return;
++    }
++    eup_ok = 1;
++    fprintf(stderr, "ember-d3dm-up: AI 업스케일 켬(libEmberUp)\n");
++}
++static int eup_available(void)
++{
++    pthread_once(&eup_once, eup_load);
++    return eup_ok;
++}
++static void eup_flush_log(void *ctx)
++{
++    char buf[2048];
++    while (ctx && eup.drain_log(ctx, buf, sizeof(buf)) > 0) fputs(buf, stderr);
++}
++
++#pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
++
++static double up_env_factor(void)
++{
++    const char *e = getenv("EMBER_D3DM_UPSCALE_FACTOR");
++    double f = e && *e ? atof(e) : 2.0;
++    if (f > 4.0) f = 4.0;
++    return f;
++}
++
++int ember_up_log(void)
++{
++    static int on = -1;
++    if (on < 0) { const char *e = getenv("EMBER_D3DM_UPSCALE_LOG"); on = e && *e == '1'; }
++    return on;
++}
++
++static int up_bilinear(void)
++{
++    static int on = -1;
++    if (on < 0) { const char *e = getenv("EMBER_D3DM_UPSCALE_MODE"); on = e && !strcmp(e, "bilinear"); }
++    return on;
++}
++
++int ember_up_enabled(void)
++{
++    static int on = -1;
++    if (on < 0)
++    {
++        const char *v = getenv("EMBER_D3DM_UPSCALE"), *b = getenv("CX_ACTIVE_GRAPHICS_BACKEND");
++        on = v && !strcmp(v, "1") && b && !strcmp(b, "d3dmetal") && up_env_factor() > 1.01;
++        if (on && !up_bilinear())
++        {
++            on = 0;
++            if (@available(macOS 13.0, *))
++            {
++                id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
++                if (dev && NSClassFromString(@"MTLFXSpatialScalerDescriptor") && [MTLFXSpatialScalerDescriptor supportsDevice:dev]) on = 1;
++                [dev release];
++            }
++            if (!on) fprintf(stderr, "ember-d3dm-up: MetalFX spatial scaler not supported, upscale off\n");
++        }
++        if (on) fprintf(stderr, "ember-d3dm-up: on, factor %.3f, mode %s\n", up_env_factor(), up_bilinear() ? "bilinear" : "metalfx");
++    }
++    return on;
++}
++
++double ember_up_factor(void)
++{
++    return ember_up_enabled() ? up_env_factor() : 1.0;
++}
++
++/* ---- 레이어 크기·배율 ---- */
++
++static char up_scale_key;   /* 진짜 레이어의 원래 contentsScale(NSNumber) */
++
++CGFloat ember_up_game_scale(CAMetalLayer *real)
++{
++    NSNumber *n = real ? objc_getAssociatedObject(real, &up_scale_key) : nil;
++    return n ? (CGFloat)n.doubleValue : (real ? real.contentsScale : 1.0);
++}
++
++static NSUInteger up_round(double v)
++{
++    NSUInteger r = (NSUInteger)(v + 0.5);
++    if (r > 16384) r = 16384;
++    return r ? r : 1;
++}
++
++static void up_apply_scale(CAMetalLayer *real)
++{
++    CGFloat base = ember_up_game_scale(real), want = base * ember_up_factor();
++    if (!objc_getAssociatedObject(real, &up_scale_key))
++        objc_setAssociatedObject(real, &up_scale_key, [NSNumber numberWithDouble:base], OBJC_ASSOCIATION_RETAIN);
++    if (real.contentsScale != want)
++    {
++        if (ember_up_log()) fprintf(stderr, "ember-d3dm-up: contentsScale %.3f -> %.3f\n", real.contentsScale, want);
++        real.contentsScale = want;
++    }
++}
++
++CGSize ember_up_layer_size(CAMetalLayer *real, CGSize game)
++{
++    CGSize out = game;
++    if (!real || !ember_up_enabled() || game.width < 1 || game.height < 1) return game;
++    out.width = up_round(game.width * up_env_factor());
++    out.height = up_round(game.height * up_env_factor());
++    up_apply_scale(real);
++    if (ember_up_log())
++        fprintf(stderr, "ember-d3dm-up: setDrawableSize game %.0fx%.0f -> screen %.0fx%.0f\n", game.width, game.height, out.width, out.height);
++    return out;
++}
++
++void ember_up_resync_layer(CAMetalLayer *real, CGSize game)
++{
++    CGSize want;
++    if (!real || !ember_up_enabled() || game.width < 1 || game.height < 1) return;
++    up_apply_scale(real);
++    want = CGSizeMake(up_round(game.width * up_env_factor()), up_round(game.height * up_env_factor()));
++    if (!CGSizeEqualToSize(real.drawableSize, want))
++    {
++        if (ember_up_log()) fprintf(stderr, "ember-d3dm-up: resync drawableSize %.0fx%.0f -> %.0fx%.0f\n",
++                                    real.drawableSize.width, real.drawableSize.height, want.width, want.height);
++        real.drawableSize = want;
++    }
++}
++
++/* ---- 스케일러: 커맨드 큐마다 문맥 하나(게임 스레드 큐·보간 보조 큐가 동시에 인코딩해도 서로 안 건드린다) ---- */
++
++#define UP_SCALERS 3   /* 문맥마다 (형식·크기) 조합 몇 개를 들고 있나 — 원본(BGRA8)·MC 결과(RGBA16F)가 번갈아 와도 다시 안 만든다 */
++#define UP_CTXS 4
++/* 스케일러 종류(10-02 upscale 작업, 화질 측정 Tools/dev/upscale):
++ *  NORMAL   : 형식 그대로(8/10비트 감마 부호 → perceptual, 게임 자체 부동소수 HDR → HDR)
++ *  CONV16   : sRGB 원본을 RGBA16F 선형 사본으로 바꾼 것 → Linear 모드(옛 HDR 모드는 선형 [0,1] 값에서 과선명·PSNR -1.8 dB)
++ *  SRGBVIEW : sRGB 원본을 복사 없이 unorm 보기로 → perceptual, 출력은 sRGB 저장 텍스처에 unorm 보기로 쓴다
++ *             (MetalFX 가 sRGB 형식 스케일러를 못 만드는 문제의 기본 해법 — 사본·16F 대역폭이 없어 더 빠르다) */
++#define UP_KIND_NORMAL 0
++#define UP_KIND_CONV16 1
++#define UP_KIND_SRGBVIEW 2
++/* EMBER_D3DM_UPSCALE_SRGB=view(기본)|linear(사본+Linear)|hdr(사본+HDR, 옛 동작) */
++static int up_srgb_mode(void)
++{
++    static int m = -1;
++    if (m < 0)
++    {
++        const char *e = getenv("EMBER_D3DM_UPSCALE_SRGB");
++        m = !e || !*e || !strcmp(e, "view") ? 0 : !strcmp(e, "linear") ? 1 : 2;
++    }
++    return m;
++}
++static MTLPixelFormat up_unorm_of(MTLPixelFormat f)
++{
++    switch (f)
++    {
++    case MTLPixelFormatBGRA8Unorm_sRGB: return MTLPixelFormatBGRA8Unorm;
++    case MTLPixelFormatRGBA8Unorm_sRGB: return MTLPixelFormatRGBA8Unorm;
++    default: return MTLPixelFormatInvalid;
++    }
++}
++static MTLPixelFormat up_srgb_of(MTLPixelFormat f)
++{
++    switch (f)
++    {
++    case MTLPixelFormatBGRA8Unorm: return MTLPixelFormatBGRA8Unorm_sRGB;
++    case MTLPixelFormatRGBA8Unorm: return MTLPixelFormatRGBA8Unorm_sRGB;
++    default: return MTLPixelFormatInvalid;
++    }
++}
++
++struct up_scaler
++{
++    id scaler;                     /* id<MTLFXSpatialScaler> */
++    MTLPixelFormat fmt;            /* 스케일러 입력·출력 형식 */
++    int kind;                      /* UP_KIND_* */
++    NSUInteger in_w, in_h, out_w, out_h;
++    id<MTLTexture> out;            /* 전용 출력(모니터 해상도). SRGBVIEW 면 sRGB 저장 형식(표시 패스가 읽으면 선형) */
++    id<MTLTexture> out_view;       /* SRGBVIEW: out 의 unorm 보기(스케일러가 쓰는 곳) */
++    uint64_t used;
++};
++
++struct up_ctx
++{
++    void *queue;                   /* 키(참조 안 함) */
++    id<MTLDevice> device;
++    struct up_scaler s[UP_SCALERS];
++    id<MTLTexture> scratch;        /* 확대 앞 혼합용(게임 해상도) */
++    id<MTLTexture> conv;           /* MetalFX 가 못 받는 형식(sRGB)을 RGBA16F 로 바꾼 사본 */
++    void *ai;                      /* libEmberUp 문맥(EMBER_UP_AI=1) */
++    int ai_tried;
++    uint64_t used;
++};
++
++static pthread_mutex_t up_lock = PTHREAD_MUTEX_INITIALIZER;
++static struct up_ctx up_ctxs[UP_CTXS];
++static uint64_t up_tick;
++static struct ember_up_info up_info;
++static double up_log_since;
++static unsigned long up_log_frames, up_log_created;
++
++/* 옛 스케일러·텍스처는 지금 커맨드 버퍼가 끝난 뒤 푼다 — D3DMetal 커맨드 버퍼가 참조를 안 붙잡는(unretained) 경우에도
++ * 앞서 낸 프레임이 아직 읽는 중일 수 있다. 같은 큐라 이 버퍼가 끝나면 그 앞 것도 끝났다. */
++static void up_defer_release(id<MTLCommandBuffer> cb, id a, id b)
++{
++    if (!a && !b) return;
++    if (!cb) { [a release]; [b release]; return; }
++    [cb addCompletedHandler:^(id<MTLCommandBuffer> done) { [a release]; [b release]; }];
++}
++
++static void up_scaler_release(struct up_scaler *s, id<MTLCommandBuffer> cb)
++{
++    up_defer_release(cb, s->scaler, s->out);
++    up_defer_release(cb, s->out_view, nil);
++    memset(s, 0, sizeof(*s));
++}
++
++static struct up_ctx *up_ctx_for(id<MTLCommandBuffer> cb)
++{
++    void *q = (void *)cb.commandQueue;
++    struct up_ctx *c = NULL, *old = &up_ctxs[0];
++    int i;
++    for (i = 0; i < UP_CTXS; i++)
++    {
++        if (up_ctxs[i].queue == q && up_ctxs[i].device == cb.device) { c = &up_ctxs[i]; break; }
++        if (up_ctxs[i].used < old->used) old = &up_ctxs[i];
++    }
++    if (!c)
++    {
++        /* 새 큐: 가장 오래 안 쓴 문맥을 비워 쓴다 */
++        c = old;
++        for (i = 0; i < UP_SCALERS; i++) up_scaler_release(&c->s[i], nil);   /* 다른 큐 것 — 오래 안 쓴 문맥만 비운다 */
++        [c->scratch release];
++        [c->conv release];
++        if (c->ai) eup.destroy(c->ai);
++        [c->device release];
++        memset(c, 0, sizeof(*c));
++        c->queue = q;
++        c->device = [cb.device retain];
++    }
++    c->used = ++up_tick;
++    return c;
++}
++
++/* MetalFX 처리 모드: 부동소수(scRGB·EDR, 1 넘는 값) → HDR(가역 톤매핑), sRGB 저장 형식(읽으면 선형) → Linear, 그 밖(감마·PQ 부호화된 8/10비트) → Perceptual */
++static NSInteger up_mode_for(MTLPixelFormat f)
++{
++    if (@available(macOS 13.0, *))
++    {
++        switch (f)
++        {
++        case MTLPixelFormatRGBA16Float: case MTLPixelFormatRGBA32Float: case MTLPixelFormatRG11B10Float: case MTLPixelFormatRGB9E5Float:
++            return MTLFXSpatialScalerColorProcessingModeHDR;
++        case MTLPixelFormatBGRA8Unorm_sRGB: case MTLPixelFormatRGBA8Unorm_sRGB:
++            return MTLFXSpatialScalerColorProcessingModeLinear;
++        default:
++            return MTLFXSpatialScalerColorProcessingModePerceptual;
++        }
++    }
++    return 0;
++}
++
++static BOOL up_make(struct up_ctx *c, id<MTLCommandBuffer> cb, struct up_scaler *s, MTLPixelFormat fmt, int kind, NSUInteger in_w, NSUInteger in_h, NSUInteger out_w, NSUInteger out_h)
++{
++    if (@available(macOS 13.0, *))
++    {
++        MTLFXSpatialScalerDescriptor *d = [[MTLFXSpatialScalerDescriptor alloc] init];
++        MTLTextureDescriptor *td;
++        id<MTLFXSpatialScaler> sc;
++        up_scaler_release(s, cb);
++        d.colorTextureFormat = fmt;
++        d.outputTextureFormat = fmt;
++        d.inputWidth = in_w; d.inputHeight = in_h;
++        d.outputWidth = out_w; d.outputHeight = out_h;
++        d.colorProcessingMode = kind == UP_KIND_SRGBVIEW ? MTLFXSpatialScalerColorProcessingModePerceptual
++                              : kind == UP_KIND_CONV16 && up_srgb_mode() != 2 ? MTLFXSpatialScalerColorProcessingModeLinear
++                              : (MTLFXSpatialScalerColorProcessingMode)up_mode_for(fmt);
++        sc = [d newSpatialScalerWithDevice:c->device];
++        [d release];
++        if (!sc)
++        {
++            fprintf(stderr, "ember-d3dm-up: scaler failed fmt=%lu %lux%lu -> %lux%lu\n", (unsigned long)fmt,
++                    (unsigned long)in_w, (unsigned long)in_h, (unsigned long)out_w, (unsigned long)out_h);
++            s->fmt = fmt; s->kind = kind; s->in_w = in_w; s->in_h = in_h; s->out_w = out_w; s->out_h = out_h;   /* 같은 조합으로 매 프레임 다시 시도하지 않게 */
++            return NO;
++        }
++        td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(kind == UP_KIND_SRGBVIEW ? up_srgb_of(fmt) : fmt)
++                                                              width:out_w height:out_h mipmapped:NO];
++        td.usage = sc.outputTextureUsage | MTLTextureUsageShaderRead | (kind == UP_KIND_SRGBVIEW ? MTLTextureUsagePixelFormatView : 0);
++        td.storageMode = MTLStorageModePrivate;
++        s->out = [c->device newTextureWithDescriptor:td];
++        if (s->out && kind == UP_KIND_SRGBVIEW)
++        {
++            s->out_view = [s->out newTextureViewWithPixelFormat:fmt];
++            if (!s->out_view) { [s->out release]; s->out = nil; }
++        }
++        if (!s->out)
++        {
++            [sc release];
++            s->fmt = fmt; s->kind = kind; s->in_w = in_w; s->in_h = in_h; s->out_w = out_w; s->out_h = out_h;
++            return NO;
++        }
++        s->out.label = @"ember-d3dm-upscaled";
++        s->scaler = sc;
++        s->fmt = fmt; s->kind = kind; s->in_w = in_w; s->in_h = in_h; s->out_w = out_w; s->out_h = out_h;
++        up_info.color_usage = sc.colorTextureUsage;
++        up_info.output_usage = sc.outputTextureUsage;
++        up_info.mode = (int)sc.colorProcessingMode;
++        up_info.created++;
++        up_log_created++;
++        if (ember_up_log())
++            fprintf(stderr, "ember-d3dm-up: scaler fmt=%lu kind=%d mode=%d %lux%lu -> %lux%lu (usage in=%lx out=%lx)\n", (unsigned long)fmt, kind,
++                    (int)sc.colorProcessingMode, (unsigned long)in_w, (unsigned long)in_h, (unsigned long)out_w, (unsigned long)out_h,
++                    (unsigned long)sc.colorTextureUsage, (unsigned long)sc.outputTextureUsage);
++        return YES;
++    }
++    return NO;
++}
++
++static struct up_scaler *up_find(struct up_ctx *c, id<MTLCommandBuffer> cb, MTLPixelFormat fmt, int kind, NSUInteger in_w, NSUInteger in_h,
++                                 NSUInteger out_w, NSUInteger out_h)
++{
++    struct up_scaler *old = &c->s[0];
++    int i;
++    for (i = 0; i < UP_SCALERS; i++)
++    {
++        struct up_scaler *t = &c->s[i];
++        if (t->fmt == fmt && t->kind == kind && t->in_w == in_w && t->in_h == in_h && t->out_w == out_w && t->out_h == out_h)
++        { t->used = ++up_tick; return t; }
++        if (t->used < old->used) old = t;
++    }
++    up_make(c, cb, old, fmt, kind, in_w, in_h, out_w, out_h);
++    old->used = ++up_tick;
++    return old;
++}
++
++/* MetalFX 가 못 받는 형식(실측 M4: BGRA8Unorm_sRGB 는 스케일러 생성 실패)은 RGBA16Float 사본으로 바꿔 키운다.
++ * sRGB 텍스처를 읽으면 선형 값이 나오므로 16F 에 선형으로 담고, 표시 패스가 sRGB drawable 에 쓸 때 다시 부호화된다. */
++static NSString * const up_conv_src =
++    @"#include <metal_stdlib>\n"
++     "using namespace metal;\n"
++     "struct V { float4 pos [[position]]; float2 uv; };\n"
++     "vertex V ember_up_vs(uint id [[vertex_id]]) {\n"
++     "  float2 p = float2((id << 1) & 2, id & 2);\n"
++     "  V o; o.pos = float4(p * 2.0 - 1.0, 0.0, 1.0); o.uv = float2(p.x, 1.0 - p.y); return o; }\n"
++     "fragment float4 ember_up_fs(V in [[stage_in]], texture2d<float> t [[texture(0)]]) {\n"
++     "  constexpr sampler s(filter::nearest, address::clamp_to_edge);\n"
++     "  return t.sample(s, in.uv); }\n";
++static id<MTLRenderPipelineState> up_conv_ps;
++static id<MTLDevice> up_conv_dev;
++
++static id<MTLTexture> up_convert(struct up_ctx *c, id<MTLCommandBuffer> cb, id<MTLTexture> src)
++{
++    MTLRenderPassDescriptor *rp;
++    id<MTLRenderCommandEncoder> enc;
++    if (!up_conv_ps || up_conv_dev != c->device)
++    {
++        NSError *err = nil;
++        id<MTLLibrary> lib = [c->device newLibraryWithSource:up_conv_src options:nil error:&err];
++        MTLRenderPipelineDescriptor *d = [[MTLRenderPipelineDescriptor alloc] init];
++        d.vertexFunction = [[lib newFunctionWithName:@"ember_up_vs"] autorelease];
++        d.fragmentFunction = [[lib newFunctionWithName:@"ember_up_fs"] autorelease];
++        d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
++        [up_conv_ps release];
++        up_conv_ps = lib ? [c->device newRenderPipelineStateWithDescriptor:d error:&err] : nil;
++        up_conv_dev = c->device;
++        [d release];
++        [lib release];
++        if (!up_conv_ps) { fprintf(stderr, "ember-d3dm-up: convert pipeline failed: %s\n", err ? [[err description] UTF8String] : "?"); return nil; }
++    }
++    if (!c->conv || c->conv.width != src.width || c->conv.height != src.height)
++    {
++        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
++                                                                                       width:src.width height:src.height mipmapped:NO];
++        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
++        td.storageMode = MTLStorageModePrivate;
++        up_defer_release(cb, c->conv, nil);
++        c->conv = [c->device newTextureWithDescriptor:td];
++        if (!c->conv) return nil;
++    }
++    rp = [MTLRenderPassDescriptor renderPassDescriptor];
++    rp.colorAttachments[0].texture = c->conv;
++    rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
++    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
++    enc = [cb renderCommandEncoderWithDescriptor:rp];
++    [enc setRenderPipelineState:up_conv_ps];
++    [enc setFragmentTexture:src atIndex:0];
++    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
++    [enc endEncoding];
++    return c->conv;
++}
++
++id<MTLTexture> ember_up_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, NSUInteger out_w, NSUInteger out_h)
++{
++    struct up_ctx *c;
++    struct up_scaler *s;
++    id<MTLTexture> out = nil, view = nil;
++
++    if (!ember_up_enabled() || up_bilinear() || !cb || !src || src.sampleCount > 1) return nil;
++    if (out_w <= src.width || out_h <= src.height) return nil;   /* 줄이거나 같은 크기는 평범한 표시 패스로 */
++    if (!(src.usage & MTLTextureUsageShaderRead)) return nil;
++
++    pthread_mutex_lock(&up_lock);
++    c = up_ctx_for(cb);
++    s = NULL;
++    if (up_srgb_mode() == 0 && up_unorm_of(src.pixelFormat) != MTLPixelFormatInvalid)
++    {
++        /* sRGB 원본: 복사 없이 unorm 보기 → perceptual(감마 부호값 그대로, DXMT·8비트 원본과 같은 화질) */
++        view = [src newTextureViewWithPixelFormat:up_unorm_of(src.pixelFormat)];
++        if (view)
++        {
++            s = up_find(c, cb, view.pixelFormat, UP_KIND_SRGBVIEW, src.width, src.height, out_w, out_h);
++            if (!s->scaler) { [view release]; view = nil; s = NULL; }
++        }
++    }
++    if (!s) s = up_find(c, cb, src.pixelFormat, UP_KIND_NORMAL, src.width, src.height, out_w, out_h);
++    if (!s->scaler && !view && src.pixelFormat != MTLPixelFormatRGBA16Float)
++    {
++        id<MTLTexture> conv = up_convert(c, cb, src);
++        if (conv)
++        {
++            src = conv;
++            s = up_find(c, cb, MTLPixelFormatRGBA16Float, UP_KIND_CONV16, src.width, src.height, out_w, out_h);
++        }
++    }
++    if (@available(macOS 13.0, *))
++    {
++        id<MTLFXSpatialScaler> sc = s->scaler;
++        if (sc && s->out)
++        {
++            sc.colorTexture = view ? view : src;
++            sc.inputContentWidth = src.width;
++            sc.inputContentHeight = src.height;
++            sc.outputTexture = view ? s->out_view : s->out;
++            [sc encodeToCommandBuffer:cb];
++            /* 스케일러가 텍스처를 붙잡고 있지 않게 — 드로어블이 풀리는 것을 막지 않는다 */
++            sc.colorTexture = nil;
++            sc.outputTexture = nil;
++            out = s->out;
++            /* Ember AI 업스케일: 원본이 sRGB 를 바꾼 선형 16F 사본(conv)이면 lo·hi 모두 선형. 게임 자체의 부동소수 HDR 백버퍼는 건너뛴다. */
++            if (eup_available() && (src == c->conv || (src.pixelFormat != MTLPixelFormatRGBA16Float && src.pixelFormat != MTLPixelFormatRGBA32Float)))
++            {
++                uint64_t ai_out = 0;
++                if (!c->ai && !c->ai_tried) { c->ai_tried = 1; c->ai = eup.create((uint64_t)(uintptr_t)c->device); }
++                if (c->ai && eup.supported(c->ai, src.width, src.height, out.width, out.height, (view ? s->out_view : out).pixelFormat) &&
++                    eup.post(c->ai, (uint64_t)(uintptr_t)cb, (uint64_t)(uintptr_t)(view ? view : src),
++                             (uint64_t)(uintptr_t)(view ? s->out_view : out), view ? 4u : src == c->conv ? 3u : 0u, &ai_out) == 0 && ai_out)
++                    out = (id<MTLTexture>)(uintptr_t)ai_out;
++                if (ember_up_log()) eup_flush_log(c->ai);
++            }
++            up_info.encoded++;
++            up_log_frames++;
++        }
++    }
++    if (view) up_defer_release(cb, view, nil);   /* 보기는 이 커맨드 버퍼가 끝난 뒤 푼다 */
++    if (ember_up_log())
++    {
++        double now = CACurrentMediaTime();
++        if (!up_log_since) up_log_since = now;
++        if (now - up_log_since >= 5.0)
++        {
++            fprintf(stderr, "ember-d3dm-up: %.1f upscales/s, scalers created %lu, %lux%lu -> %lux%lu fmt=%lu\n",
++                    up_log_frames / (now - up_log_since), up_log_created, (unsigned long)src.width, (unsigned long)src.height,
++                    (unsigned long)out_w, (unsigned long)out_h, (unsigned long)src.pixelFormat);
++            up_log_since = now; up_log_frames = 0; up_log_created = 0;
++        }
++    }
++    pthread_mutex_unlock(&up_lock);
++    return out;
++}
++
++id<MTLTexture> ember_up_scratch(id<MTLCommandBuffer> cb, id<MTLTexture> like)
++{
++    struct up_ctx *c;
++    id<MTLTexture> t;
++    if (!cb || !like) return nil;
++    pthread_mutex_lock(&up_lock);
++    c = up_ctx_for(cb);
++    if (!c->scratch || c->scratch.width != like.width || c->scratch.height != like.height || c->scratch.pixelFormat != like.pixelFormat)
++    {
++        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:like.pixelFormat
++                                                                                       width:like.width height:like.height mipmapped:NO];
++        td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
++        td.storageMode = MTLStorageModePrivate;
++        up_defer_release(cb, c->scratch, nil);
++        c->scratch = [c->device newTextureWithDescriptor:td];
++    }
++    t = c->scratch;
++    pthread_mutex_unlock(&up_lock);
++    return t;
++}
++
++void ember_up_get_info(struct ember_up_info *info)
++{
++    pthread_mutex_lock(&up_lock);
++    *info = up_info;
++    pthread_mutex_unlock(&up_lock);
++}
+diff --git a/dlls/winemac.drv/gdi.c b/dlls/winemac.drv/gdi.c
+index 7342494..da4fa41 100644
+--- a/dlls/winemac.drv/gdi.c
++++ b/dlls/winemac.drv/gdi.c
+@@ -220,7 +220,7 @@ static INT macdrv_GetDeviceCaps(PHYSDEV dev, INT cap)
+         dev = GET_NEXT_PHYSDEV( dev, pGetDeviceCaps );
+         ret = dev->funcs->pGetDeviceCaps( dev, cap );
+         if ((cap == HORZRES || cap == VERTRES) && retina_on)
+-            ret *= 2;
++            ret = (int)(ret * retina_scale + 0.5);
+         return ret;
+     }
+ 
+diff --git a/dlls/winemac.drv/macdrv_cocoa.h b/dlls/winemac.drv/macdrv_cocoa.h
+index 477efe9..cb2fa42 100644
+--- a/dlls/winemac.drv/macdrv_cocoa.h
++++ b/dlls/winemac.drv/macdrv_cocoa.h
+@@ -144,6 +144,7 @@
+ extern int gl_surface_mode;
+ extern CFDictionaryRef localized_strings;
+ extern bool retina_enabled;  /* Whether Retina mode is enabled via registry setting. */
++extern double retina_scale;  /* Ember: Retina 배율. 기본 2(4K), 4/3 이면 QHD. EMBER_RETINA_SCALE 로 정한다. */
+ extern bool retina_on;       /* Whether Retina mode is currently active (enabled and display is in default mode). */
+ extern bool enable_app_nap;
+ 
+@@ -151,10 +152,10 @@ static inline CGRect cgrect_mac_from_win(CGRect rect)
+ {
+     if (retina_on)
+     {
+-        rect.origin.x /= 2;
+-        rect.origin.y /= 2;
+-        rect.size.width /= 2;
+-        rect.size.height /= 2;
++        rect.origin.x /= retina_scale;
++        rect.origin.y /= retina_scale;
++        rect.size.width /= retina_scale;
++        rect.size.height /= retina_scale;
+     }
+ 
+     return rect;
+@@ -164,10 +165,10 @@ static inline CGRect cgrect_win_from_mac(CGRect rect)
+ {
+     if (retina_on)
+     {
+-        rect.origin.x *= 2;
+-        rect.origin.y *= 2;
+-        rect.size.width *= 2;
+-        rect.size.height *= 2;
++        rect.origin.x *= retina_scale;
++        rect.origin.y *= retina_scale;
++        rect.size.width *= retina_scale;
++        rect.size.height *= retina_scale;
+     }
+ 
+     return rect;
+@@ -177,8 +178,8 @@ static inline CGSize cgsize_mac_from_win(CGSize size)
+ {
+     if (retina_on)
+     {
+-        size.width /= 2;
+-        size.height /= 2;
++        size.width /= retina_scale;
++        size.height /= retina_scale;
+     }
+ 
+     return size;
+@@ -188,8 +189,8 @@ static inline CGSize cgsize_win_from_mac(CGSize size)
+ {
+     if (retina_on)
+     {
+-        size.width *= 2;
+-        size.height *= 2;
++        size.width *= retina_scale;
++        size.height *= retina_scale;
+     }
+ 
+     return size;
+@@ -199,8 +200,8 @@ static inline CGPoint cgpoint_mac_from_win(CGPoint point)
+ {
+     if (retina_on)
+     {
+-        point.x /= 2;
+-        point.y /= 2;
++        point.x /= retina_scale;
++        point.y /= retina_scale;
+     }
+ 
+     return point;
+@@ -210,8 +211,8 @@ static inline CGPoint cgpoint_win_from_mac(CGPoint point)
+ {
+     if (retina_on)
+     {
+-        point.x *= 2;
+-        point.y *= 2;
++        point.x *= retina_scale;
++        point.y *= retina_scale;
+     }
+ 
+     return point;
+@@ -552,6 +553,9 @@ extern void macdrv_order_cocoa_window(macdrv_window w, macdrv_window prev,
+ extern void macdrv_set_view_frame(macdrv_view v, CGRect rect);
+ extern void macdrv_set_view_superview(macdrv_view v, macdrv_view s, macdrv_window w, macdrv_view p, macdrv_view n);
+ extern void macdrv_set_view_hidden(macdrv_view v, bool hidden);
++/* Ember(launch3): GPU 클라이언트 뷰에 GDI 자식 창 자리만큼 구멍(마스크). count 0 이면 마스크 없음. */
++extern void macdrv_set_view_holes(macdrv_view v, const CGRect *holes, int count);
++extern void macdrv_view_fill_hole_for_subview(macdrv_view v);
+ extern void macdrv_add_view_opengl_context(macdrv_view v, macdrv_opengl_context c);
+ extern void macdrv_remove_view_opengl_context(macdrv_view v, macdrv_opengl_context c);
+ extern macdrv_metal_device macdrv_create_metal_device(void);
+diff --git a/dlls/winemac.drv/macdrv_main.c b/dlls/winemac.drv/macdrv_main.c
+index 56e7a77..950e3f0 100644
+--- a/dlls/winemac.drv/macdrv_main.c
++++ b/dlls/winemac.drv/macdrv_main.c
+@@ -59,6 +59,7 @@ bool cursor_clipping_locks_windows = true;
+ bool use_precise_scrolling = true;
+ int gl_surface_mode = GL_SURFACE_IN_FRONT_OPAQUE;
+ bool retina_enabled = false;
++double retina_scale = 2.0;
+ bool enable_app_nap = false;
+ 
+ UINT64 app_icon_callback = 0;
+@@ -394,6 +395,16 @@ static void setup_options(void)
+     if (!get_config_key(hkey, NULL, "RetinaMode", buffer, sizeof(buffer)))
+         retina_enabled = IS_OPTION_TRUE(buffer[0]);
+ 
++    /* Ember: 게임별 해상도 선택. 1 = 화면 논리 해상도(FHD), 4/3 = QHD, 2 = 픽셀 그대로(4K). 레지스트리보다 우선. */
++    {
++        const char *e = getenv("EMBER_RETINA_SCALE");
++        if (e && *e)
++        {
++            double v = atof(e);
++            if (v > 1.01 && v <= 3.0) { retina_enabled = TRUE; retina_scale = v; }
++            else retina_enabled = FALSE;
++        }
++    }
+     retina_on = retina_enabled;
+ 
+     if (appkey) NtClose(appkey);
+diff --git a/dlls/winemac.drv/surface.c b/dlls/winemac.drv/surface.c
+index a849918..f52bc33 100644
+--- a/dlls/winemac.drv/surface.c
++++ b/dlls/winemac.drv/surface.c
+@@ -26,6 +26,10 @@
+ 
+ #include "config.h"
+ 
++#include <fcntl.h>
++#include <stdio.h>
++#include <unistd.h>
++
+ #include "macdrv.h"
+ #include "winuser.h"
+ 
+@@ -77,6 +81,29 @@ static void macdrv_surface_set_clip(struct window_surface *window_surface, const
+ /***********************************************************************
+  *              macdrv_surface_flush
+  */
++/* Ember: EMBER_SURFACE_DUMP=<폴더> 면 창 표면을 BMP 로 남긴다(창마다 1초에 한 번, 덮어씀). 맥 화면이 잠겨 있거나 창이 가려져
++ * 있어도 Wine 이 그린 그대로를 본다 — 화면 캡처 없이 런처 UI 를 확인하는 진단용. 변수가 없으면 비용 0. */
++static void ember_dump_surface(HWND hwnd, const BITMAPINFO *info, const void *bits)
++{
++    static int state = -1; static const char *dir;
++    static struct { HWND hwnd; ULONGLONG t; } last[32];
++    char path[1024]; BITMAPFILEHEADER fh; ULONGLONG now = NtGetTickCount(); int i, slot = -1, fd;
++    if (state < 0) { dir = getenv( "EMBER_SURFACE_DUMP" ); state = dir && *dir; }
++    if (!state || !bits || info->bmiHeader.biBitCount != 32) return;
++    for (i = 0; i < 32; i++) if (last[i].hwnd == hwnd || (!last[i].hwnd && slot < 0)) { slot = i; if (last[i].hwnd == hwnd) break; }
++    if (slot < 0) slot = (UINT_PTR)hwnd % 32;
++    if (last[slot].hwnd == hwnd && now - last[slot].t < 1000) return;
++    last[slot].hwnd = hwnd; last[slot].t = now;
++    snprintf( path, sizeof(path), "%s/surface-%d-%p.bmp", dir, (int)getpid(), hwnd );
++    if ((fd = open( path, O_WRONLY | O_CREAT | O_TRUNC, 0644 )) < 0) return;
++    memset( &fh, 0, sizeof(fh) );
++    fh.bfType = 0x4d42; fh.bfOffBits = sizeof(fh) + sizeof(BITMAPINFOHEADER);
++    fh.bfSize = fh.bfOffBits + info->bmiHeader.biSizeImage;
++    write( fd, &fh, sizeof(fh) ); write( fd, &info->bmiHeader, sizeof(BITMAPINFOHEADER) );
++    write( fd, bits, info->bmiHeader.biSizeImage );
++    close( fd );
++}
++
+ static BOOL macdrv_surface_flush(struct window_surface *window_surface, const RECT *rect, const RECT *dirty,
+                                  const BITMAPINFO *color_info, const void *color_bits, BOOL shape_changed,
+                                  const BITMAPINFO *shape_info, const void *shape_bits)
+@@ -94,6 +121,7 @@ static BOOL macdrv_surface_flush(struct window_surface *window_surface, const RE
+ 
+     macdrv_window_set_color_image(surface->window, image, cgrect_from_rect(*rect), cgrect_from_rect(*dirty));
+     CGImageRelease(image);
++    ember_dump_surface(window_surface->hwnd, color_info, color_bits);
+ 
+     if (shape_changed)
+     {
+diff --git a/dlls/winemac.drv/window.c b/dlls/winemac.drv/window.c
+index 741f7fd..071d5b1 100644
+--- a/dlls/winemac.drv/window.c
++++ b/dlls/winemac.drv/window.c
+@@ -1171,6 +1171,60 @@ static void macdrv_client_surface_detach(struct client_surface *client)
+     }
+ }
+ 
++/* Ember(launch3, 2026-10-03): GPU 로 그리는 창(WS_CLIPCHILDREN)의 보이는 GDI 자식 창 자리를 클라이언트 뷰에서 뚫는다.
++ * 윈도우는 자식 창을 부모 스왑체인 위에 보여 준다. 맥 드라이버는 클라이언트 뷰가 창 표면(자식 창 GDI 그림 포함)을 덮어
++ * EA 앱(Qt 가 ANGLE→D3D11 로 그리는 창 안의 CEF 자식 창) 로그인 화면이 화면에는 비어 보였다(창 표면 덤프에는 정상).
++ * 자기 클라이언트 뷰가 있는 자식(게임 렌더 자식 창 등)·투명·숨은 자식은 빼고, 자식이 없으면 아무 일도 하지 않는다.
++ * EMBER_CHILD_HOLES=0 이면 끈다. */
++static void macdrv_client_surface_update_holes(struct macdrv_client_surface *surface, HWND hwnd, const RECT *client)
++{
++    static int enabled = -1;
++    CGRect holes[32];
++    int count = 0;
++    HWND child;
++    UINT dpi;
++    LONG width = client->right - client->left, height = client->bottom - client->top;
++
++    if (enabled < 0)
++    {
++        const char *e = getenv("EMBER_CHILD_HOLES");
++        enabled = !(e && e[0] == '0');
++    }
++    if (!enabled || !surface->cocoa_view) return;
++
++    dpi = NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI);
++    if (NtUserGetWindowLongW(hwnd, GWL_STYLE) & WS_CLIPCHILDREN)
++    {
++        for (child = NtUserGetWindowRelative(hwnd, GW_CHILD); child && count < ARRAY_SIZE(holes);
++             child = NtUserGetWindowRelative(child, GW_HWNDNEXT))
++        {
++            DWORD style = NtUserGetWindowLongW(child, GWL_STYLE);
++            DWORD ex_style = NtUserGetWindowLongW(child, GWL_EXSTYLE);
++            struct macdrv_win_data *cdata;
++            BOOL gpu = FALSE;
++            RECT rc;
++
++            if (!(style & WS_VISIBLE) || (ex_style & (WS_EX_TRANSPARENT | WS_EX_LAYERED))) continue;
++            if ((cdata = get_win_data(child)))
++            {
++                gpu = cdata->client_view != NULL;
++                release_win_data(cdata);
++            }
++            if (gpu) continue;
++            if (!NtUserGetWindowRect(child, &rc, dpi)) continue;
++            NtUserMapWindowPoints(0, hwnd, (POINT *)&rc, 2, dpi);
++            if (rc.left < 0) rc.left = 0;
++            if (rc.top < 0) rc.top = 0;
++            if (rc.right > width) rc.right = width;
++            if (rc.bottom > height) rc.bottom = height;
++            if (rc.left >= rc.right || rc.top >= rc.bottom) continue;
++            holes[count++] = cgrect_from_rect(rc);
++        }
++    }
++    if (count) TRACE("%p: %d child hole(s), first %s\n", hwnd, count, wine_dbgstr_cgrect(holes[0]));
++    macdrv_set_view_holes(surface->cocoa_view, holes, count);
++}
++
+ static void macdrv_client_surface_update(struct client_surface *client)
+ {
+     struct macdrv_client_surface *surface = impl_from_client_surface(client);
+@@ -1188,6 +1242,7 @@ static void macdrv_client_surface_update(struct client_surface *client)
+     macdrv_set_view_frame(surface->cocoa_view, cgrect_from_rect(rect));
+     macdrv_set_view_superview(surface->cocoa_view, toplevel == hwnd ? NULL : data->client_view, data->cocoa_window, NULL, NULL);
+     release_win_data(data);
++    macdrv_client_surface_update_holes(surface, hwnd, &rect);
+ }
+ 
+ static void macdrv_client_surface_present(struct client_surface *client, HDC hdc)
+@@ -1203,6 +1258,9 @@ static void macdrv_client_surface_present(struct client_surface *client, HDC hdc
+         if (data->client_view) macdrv_set_view_hidden(data->client_view, TRUE);
+         macdrv_set_view_hidden(surface->cocoa_view, FALSE);
+         data->client_view = surface->cocoa_view;
++        /* Ember(launch3): 자식 창이 이제 GPU 로 그린다 — 부모 클라이언트 뷰에 낸 그 자리 구멍을 메운다. */
++        if (NtUserGetAncestor(surface->client.hwnd, GA_ROOT) != surface->client.hwnd)
++            macdrv_view_fill_hole_for_subview(surface->cocoa_view);
+     }
+     release_win_data(data);
+ }

@@ -1,0 +1,136 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 3/6] src-dxso: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/dxvk (DXVK 1.10.3)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/src/dxso/dxso_compiler.cpp b/src/dxso/dxso_compiler.cpp
+index 7cd6f72..ad233ce 100644
+--- a/src/dxso/dxso_compiler.cpp
++++ b/src/dxso/dxso_compiler.cpp
+@@ -253,7 +253,7 @@ namespace dxvk {
+     info.inputMask = m_inputMask;
+     info.outputMask = m_outputMask;
+     info.pushConstOffset = m_pushConstOffset;
+-    info.pushConstSize = m_pushConstOffset;
++    info.pushConstSize = m_pushConstSize;  /* Ember: 원래 m_pushConstOffset(오타) — PS 범위가 0 이라 MoltenVK(단계별 푸시 상수)에서 알파 기준·안개 색이 0 */
+ 
+     return new DxvkShader(info, m_module.compile());
+   }
+@@ -820,6 +820,11 @@ namespace dxvk {
+ 
+     const bool implicit = m_programInfo.majorVersion() < 2 || m_moduleInfo.options.forceSamplerTypeSpecConstants;
+ 
++    // Ember: 그림자 변수는 따로 된 슬롯(computeShadowSlotId 설명 참고)
++    const uint32_t shadowBinding = computeShadowSlotId(m_programInfo.type(), idx);
++    bool shadowDeclared = false;
++    std::vector<std::pair<uint32_t, VkImageViewType>> implicitSlots;
++
+     if (!implicit) {
+       DxsoSamplerType samplerType = 
+         SamplerTypeFromTextureType(type);
+@@ -828,19 +833,38 @@ namespace dxvk {
+ 
+       if (samplerType != SamplerTypeTexture3D) {
+         // We could also be depth compared!
+-        DclSampler(idx, binding, samplerType, true, implicit);
++        DclSampler(idx, shadowBinding, samplerType, true, implicit);
++        shadowDeclared = true;
+       }
+     }
+     else {
+       // Could be any of these!
+       // We will check with the spec constant at sample time.
++      // Ember: 형식마다 따로 된 바인딩(dxso_util.h computeImplicitSlotId).
++      const auto stage = m_programInfo.type();
+       for (uint32_t i = 0; i < SamplerTypeCount; i++) {
+         auto samplerType = static_cast<DxsoSamplerType>(i);
+ 
+-        DclSampler(idx, binding, samplerType, false, implicit);
++        uint32_t colorBinding = binding;
++        VkImageViewType colorView = VK_IMAGE_VIEW_TYPE_2D;
++        if (samplerType == SamplerTypeTextureCube) {
++          colorBinding = computeImplicitSlotId(stage, idx, 0);
++          colorView = VK_IMAGE_VIEW_TYPE_CUBE;
++        } else if (samplerType == SamplerTypeTexture3D) {
++          colorBinding = computeImplicitSlotId(stage, idx, 1);
++          colorView = VK_IMAGE_VIEW_TYPE_3D;
++        }
++
++        DclSampler(idx, colorBinding, samplerType, false, implicit);
++        if (colorBinding != binding)
++          implicitSlots.push_back({ colorBinding, colorView });
+ 
+-        if (samplerType != SamplerTypeTexture3D)
+-          DclSampler(idx, binding, samplerType, true, implicit);
++        if (samplerType != SamplerTypeTexture3D) {
++          uint32_t depthBinding = samplerType == SamplerTypeTextureCube
++            ? computeImplicitSlotId(stage, idx, 2) : shadowBinding;
++          DclSampler(idx, depthBinding, samplerType, true, implicit);
++          implicitSlots.push_back({ depthBinding, colorView });
++        }
+       }
+     }
+ 
+@@ -855,9 +879,22 @@ namespace dxvk {
+     DxvkResourceSlot resource;
+     resource.slot   = binding;
+     resource.type   = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+-    resource.view   = implicit ? VK_IMAGE_VIEW_TYPE_MAX_ENUM : viewType;
++    resource.view   = implicit ? VK_IMAGE_VIEW_TYPE_2D : viewType;
+     resource.access = VK_ACCESS_SHADER_READ_BIT;
+     m_resourceSlots.push_back(resource);
++
++    if (shadowDeclared) {
++      DxvkResourceSlot shadow = resource;
++      shadow.slot = shadowBinding;
++      m_resourceSlots.push_back(shadow);
++    }
++
++    for (const auto& s : implicitSlots) {
++      DxvkResourceSlot extra = resource;
++      extra.slot = s.first;
++      extra.view = s.second;
++      m_resourceSlots.push_back(extra);
++    }
+   }
+ 
+ 
+diff --git a/src/dxso/dxso_util.h b/src/dxso/dxso_util.h
+index 3a94acf..f557658 100644
+--- a/src/dxso/dxso_util.h
++++ b/src/dxso/dxso_util.h
+@@ -53,6 +53,32 @@ namespace dxvk {
+     return DxsoConstantBuffers::VSCount + caps::MaxTexturesVS + DxsoConstantBuffers::PSCount + caps::MaxTexturesPS + 1; // From last pixel shader slot, above.
+   }
+ 
++  // Ember: 깊이 비교(그림자) 샘플러용 별도 슬롯. 원래 DXVK 는 같은 샘플러 번호의 일반·그림자 변수를 한 바인딩에 겹쳐
++  // 선언하는데(별칭), MoltenVK→Metal 은 한 텍스처 자리에 두 인자를 못 둔다("cannot reserve 'texture' resource location",
++  // 인자 버퍼 모드에선 "undeclared identifier sN_2d_shadowSmplr") → 파이프라인 실패 → VK_ERROR_DEVICE_LOST.
++  // (레프트 4 데드 2 등 그림자 맵을 쓰는 DX9 게임이 검은 화면.) 그림자 변수만 SWVP 슬롯 뒤의 따로 된 슬롯에 두고,
++  // 장치는 같은 텍스처·샘플러를 두 슬롯에 함께 묶는다.
++  constexpr uint32_t computeShadowSlotId(
++        DxsoProgramType shaderStage,
++        uint32_t        bindingIndex) {
++    return getSWVPBufferSlot() + 1
++         + (shaderStage == DxsoProgramType::PixelShader ? caps::MaxTexturesVS : 0)
++         + bindingIndex;
++  }
++
++  // Ember: 암시형 셰이더(SM1 등, 샘플러 형식을 모름)는 2d/cube/3d·그림자 변수를 모두 선언하고 실행 때 고른다.
++  // 원래는 전부 한 바인딩에 겹쳐 Metal 에서 셰이더가 안 만들어졌다(ps_1_1: "undeclared identifier s0_3dSmplr").
++  // 2d 는 원래 슬롯, 그림자 2d 는 computeShadowSlotId, 나머지는 여기: variant 0 = cube, 1 = 3d, 2 = 그림자 cube.
++  constexpr uint32_t computeImplicitSlotId(
++        DxsoProgramType shaderStage,
++        uint32_t        bindingIndex,
++        uint32_t        variant) {
++    return getSWVPBufferSlot() + 1
++         + (caps::MaxTexturesVS + caps::MaxTexturesPS) * (1 + variant)
++         + (shaderStage == DxsoProgramType::PixelShader ? caps::MaxTexturesVS : 0)
++         + bindingIndex;
++  }
++
+   uint32_t RegisterLinkerSlot(DxsoSemantic semantic);
+ 
+ }
+\ No newline at end of file

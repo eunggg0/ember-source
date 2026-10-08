@@ -1,0 +1,45 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 8/12] dlls-winecoreaudio.drv: Ember changes
+
+Base: wine-11.0.tar.xz
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/winecoreaudio.drv/coreaudio.c b/dlls/winecoreaudio.drv/coreaudio.c
+index da2ae2d..4950dfc 100644
+--- a/dlls/winecoreaudio.drv/coreaudio.c
++++ b/dlls/winecoreaudio.drv/coreaudio.c
+@@ -505,9 +505,24 @@ static AudioComponentInstance get_audiounit(EDataFlow dataflow, AudioDeviceID ad
+     AudioComponentDescription desc;
+     OSStatus sc;
+ 
++    BOOL follow_default = FALSE;
++
++    /* Ember: 기본 출력 장치로 연 재생 스트림은 기본 장치 변경을 따라가게 한다.
++     * 원본은 장치 번호에 고정해서, 게임 중 이어폰을 꽂아도 소리가 스피커로 계속 나갔다(2026-09-24 사용자 보고).
++     * 윈도우에서는 기본 장치로 연 소리가 새 기본 장치로 옮겨 간다. DefaultOutput 유닛은 macOS 가 알아서 옮겨 준다. */
++    if(dataflow == eRender){
++        AudioObjectPropertyAddress addr = { kAudioHardwarePropertyDefaultOutputDevice,
++                                            kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
++        AudioDeviceID default_id = 0;
++        UInt32 size = sizeof(default_id);
++        if(AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, &size, &default_id) == noErr &&
++           default_id == adevid)
++            follow_default = TRUE;
++    }
++
+     memset(&desc, 0, sizeof(desc));
+     desc.componentType = kAudioUnitType_Output;
+-    desc.componentSubType = kAudioUnitSubType_HALOutput;
++    desc.componentSubType = follow_default ? kAudioUnitSubType_DefaultOutput : kAudioUnitSubType_HALOutput;
+     desc.componentManufacturer = kAudioUnitManufacturer_Apple;
+ 
+     if(!(comp = AudioComponentFindNext(NULL, &desc))){
+@@ -543,6 +558,8 @@ static AudioComponentInstance get_audiounit(EDataFlow dataflow, AudioDeviceID ad
+         }
+     }
+ 
++    if(follow_default) return unit;   /* DefaultOutput 유닛에는 장치를 지정하지 않는다 */
++
+     sc = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
+             kAudioUnitScope_Global, 0, &adevid, sizeof(adevid));
+     if(sc != noErr){

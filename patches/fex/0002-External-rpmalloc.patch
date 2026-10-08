@@ -1,0 +1,26 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 2/5] External-rpmalloc: Ember changes
+
+Base: FEX-Emu/FEX 48d7175 (+ submodules)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/External/rpmalloc/rpmalloc/rpmalloc.c b/External/rpmalloc/rpmalloc/rpmalloc.c
+index eb416d9..9cf7bdf 100644
+--- a/External/rpmalloc/rpmalloc/rpmalloc.c
++++ b/External/rpmalloc/rpmalloc/rpmalloc.c
+@@ -618,7 +618,14 @@ heap_page_free_decommit(heap_t* heap, uint32_t page_type, uint32_t page_retain_c
+ //! Fast thread ID
+ static inline uintptr_t
+ get_thread_id(void) {
+-#if defined(_WIN32)
++#if defined(_WIN32) && defined(__aarch64__)
++	/* Wine on macOS: x18 (NtCurrentTeb) is cleared by the kernel and reads as 0 for every thread,
++	 * which makes every heap look thread-local and corrupts the free lists. The pthread TSD base
++	 * in TPIDRRO_EL0 (low 3 bits = CPU number) is unique per thread and always valid. */
++	uintptr_t tsd;
++	__asm__ volatile("mrs %0, tpidrro_el0" : "=r"(tsd));
++	return tsd & ~(uintptr_t)7;
++#elif defined(_WIN32)
+ 	return (uintptr_t)((void*)NtCurrentTeb());
+ #elif !defined(__APPLE__) && !defined(__CYGWIN__) &&                                                \
+     ((defined(__clang__) && (__clang_major__ >= 7)) || ((defined(__GNUC__) && (__GNUC__ >= 5)))) && \

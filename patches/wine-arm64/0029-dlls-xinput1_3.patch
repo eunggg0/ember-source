@@ -1,0 +1,34 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 29/34] dlls-xinput1_3: Ember changes
+
+Base: wine-11.18.tar.xz
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/xinput1_3/main.c b/dlls/xinput1_3/main.c
+index 8530b02..83ec0bb 100644
+--- a/dlls/xinput1_3/main.c
++++ b/dlls/xinput1_3/main.c
+@@ -237,17 +237,17 @@ static BOOL controller_check_caps(struct xinput_controller *controller, HANDLE d
+     free(value_caps);
+ 
+     if (!controller->hid.lt_caps.UsagePage) WARN("Missing axis LeftTrigger\n");
+-    else caps->Gamepad.bLeftTrigger = (1u << (sizeof(caps->Gamepad.bLeftTrigger) + 1)) - 1;
++    else caps->Gamepad.bLeftTrigger = 0xff;
+     if (!controller->hid.rt_caps.UsagePage) WARN("Missing axis RightTrigger\n");
+-    else caps->Gamepad.bRightTrigger = (1u << (sizeof(caps->Gamepad.bRightTrigger) + 1)) - 1;
++    else caps->Gamepad.bRightTrigger = 0xff;
+     if (!controller->hid.lx_caps.UsagePage) WARN("Missing axis ThumbLX\n");
+-    else caps->Gamepad.sThumbLX = (1u << (sizeof(caps->Gamepad.sThumbLX) + 1)) - 1;
++    else caps->Gamepad.sThumbLX = -1;
+     if (!controller->hid.ly_caps.UsagePage) WARN("Missing axis ThumbLY\n");
+-    else caps->Gamepad.sThumbLY = (1u << (sizeof(caps->Gamepad.sThumbLY) + 1)) - 1;
++    else caps->Gamepad.sThumbLY = -1;
+     if (!controller->hid.rx_caps.UsagePage) WARN("Missing axis ThumbRX\n");
+-    else caps->Gamepad.sThumbRX = (1u << (sizeof(caps->Gamepad.sThumbRX) + 1)) - 1;
++    else caps->Gamepad.sThumbRX = -1;
+     if (!controller->hid.ry_caps.UsagePage) WARN("Missing axis ThumbRY\n");
+-    else caps->Gamepad.sThumbRY = (1u << (sizeof(caps->Gamepad.sThumbRY) + 1)) - 1;
++    else caps->Gamepad.sThumbRY = -1;
+ 
+     caps->Type = XINPUT_DEVTYPE_GAMEPAD;
+     caps->SubType = XINPUT_DEVSUBTYPE_GAMEPAD;

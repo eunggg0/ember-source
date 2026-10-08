@@ -1,0 +1,6 @@
+prefix=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr
+Name: bzip2
+Description: macOS system bzip2
+Version: 1.0.8
+Libs: -lbz2
+Cflags:

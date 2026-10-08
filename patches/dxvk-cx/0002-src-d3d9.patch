@@ -1,0 +1,289 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 2/6] src-d3d9: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/dxvk (DXVK 1.10.3)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/src/d3d9/d3d9_adapter.cpp b/src/d3d9/d3d9_adapter.cpp
+index ce0f4c1..a9d5146 100644
+--- a/src/d3d9/d3d9_adapter.cpp
++++ b/src/d3d9/d3d9_adapter.cpp
+@@ -18,7 +18,7 @@ namespace dxvk {
+       default:
+       case DxvkGpuVendor::Nvidia: return "nvd3dum.dll";
+ 
+-#if defined(__x86_64__) || defined(_M_X64)
++#if defined(__x86_64__) || defined(_M_X64) || defined(__arm64ec__) || defined(__aarch64__)
+       case DxvkGpuVendor::Amd:    return "aticfx64.dll";
+       case DxvkGpuVendor::Intel:  return "igdumd64.dll";
+ #else
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index 23b0a6f..4dec6eb 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -3915,8 +3915,9 @@ namespace dxvk {
+     DxvkDeviceFeatures enabled = {};
+ 
+     // Geometry shaders are used for some meta ops
+-    enabled.core.features.geometryShader = VK_TRUE;
+-    enabled.core.features.robustBufferAccess = VK_TRUE;
++    // Ember: MoltenVK(Metal)에는 지오메트리 셰이더가 없다. 있을 때만 켠다(없으면 레이어 메타 복사만 못 쓴다).
++    enabled.core.features.geometryShader = supported.core.features.geometryShader;
++    enabled.core.features.robustBufferAccess = supported.core.features.robustBufferAccess;  // Ember: MoltenVK 에 없는 기능은 끈다
+     enabled.extRobustness2.robustBufferAccess2 = supported.extRobustness2.robustBufferAccess2;
+ 
+     enabled.extMemoryPriority.memoryPriority = supported.extMemoryPriority.memoryPriority;
+@@ -3933,34 +3934,34 @@ namespace dxvk {
+     enabled.core.features.vertexPipelineStoresAndAtomics = supported.core.features.vertexPipelineStoresAndAtomics;
+ 
+     // DXVK Meta
+-    enabled.core.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+-    enabled.core.features.imageCubeArray = VK_TRUE;
++    enabled.core.features.shaderStorageImageWriteWithoutFormat = supported.core.features.shaderStorageImageWriteWithoutFormat;  // Ember: MoltenVK 에 없는 기능은 끈다
++    enabled.core.features.imageCubeArray = supported.core.features.imageCubeArray;  // Ember: MoltenVK 에 없는 기능은 끈다
+ 
+     // SM1 level hardware
+-    enabled.core.features.depthClamp = VK_TRUE;
+-    enabled.core.features.depthBiasClamp = VK_TRUE;
+-    enabled.core.features.fillModeNonSolid = VK_TRUE;
++    enabled.core.features.depthClamp = supported.core.features.depthClamp;  // Ember: MoltenVK 에 없는 기능은 끈다
++    enabled.core.features.depthBiasClamp = supported.core.features.depthBiasClamp;  // Ember: MoltenVK 에 없는 기능은 끈다
++    enabled.core.features.fillModeNonSolid = supported.core.features.fillModeNonSolid;  // Ember: MoltenVK 에 없는 기능은 끈다
+     enabled.core.features.pipelineStatisticsQuery = supported.core.features.pipelineStatisticsQuery;
+-    enabled.core.features.sampleRateShading = VK_TRUE;
++    enabled.core.features.sampleRateShading = supported.core.features.sampleRateShading;  // Ember: MoltenVK 에 없는 기능은 끈다
+     enabled.core.features.samplerAnisotropy = supported.core.features.samplerAnisotropy;
+-    enabled.core.features.shaderClipDistance = VK_TRUE;
+-    enabled.core.features.shaderCullDistance = VK_TRUE;
++    enabled.core.features.shaderClipDistance = supported.core.features.shaderClipDistance;  // Ember: MoltenVK 에 없는 기능은 끈다
++    enabled.core.features.shaderCullDistance = supported.core.features.shaderCullDistance;  // Ember: MoltenVK 에 없는 기능은 끈다
+ 
+     // Ensure we support real BC formats and unofficial vendor ones.
+-    enabled.core.features.textureCompressionBC = VK_TRUE;
++    enabled.core.features.textureCompressionBC = supported.core.features.textureCompressionBC;  // Ember: MoltenVK 에 없는 기능은 끈다
+ 
+     enabled.extDepthClipEnable.depthClipEnable = supported.extDepthClipEnable.depthClipEnable;
+     enabled.extHostQueryReset.hostQueryReset = VK_TRUE;
+ 
+     // SM2 level hardware
+-    enabled.core.features.occlusionQueryPrecise = VK_TRUE;
++    enabled.core.features.occlusionQueryPrecise = supported.core.features.occlusionQueryPrecise;  // Ember: MoltenVK 에 없는 기능은 끈다
+ 
+     // SM3 level hardware
+-    enabled.core.features.multiViewport = VK_TRUE;
+-    enabled.core.features.independentBlend = VK_TRUE;
++    enabled.core.features.multiViewport = supported.core.features.multiViewport;  // Ember: MoltenVK 에 없는 기능은 끈다
++    enabled.core.features.independentBlend = supported.core.features.independentBlend;  // Ember: MoltenVK 에 없는 기능은 끈다
+ 
+     // D3D10 level hardware supports this in D3D9 native.
+-    enabled.core.features.fullDrawIndexUint32 = VK_TRUE;
++    enabled.core.features.fullDrawIndexUint32 = supported.core.features.fullDrawIndexUint32;  // Ember: MoltenVK 에 없는 기능은 끈다
+ 
+     // Enable depth bounds test if we support it.
+     enabled.core.features.depthBounds = supported.core.features.depthBounds;
+@@ -4843,7 +4844,10 @@ namespace dxvk {
+   void D3D9DeviceEx::SetupFPU() {
+     // Should match d3d9 float behaviour.
+ 
+-#if defined(_MSC_VER)
++#if defined(__arm64ec__) || defined(__aarch64__)
++    // Ember: ARM64EC(FEX) 빌드 — x64 빌드의 fldcw 는 x87 만 바꿔 DXVK 의 SSE 계산에 영향이 없다. 여기서 _controlfp 로
++    // 호스트 FPCR 을 바꾸면 오히려 계산이 달라진다(d9check "diffuse" 가 안 그려짐) → x64 와 같게 아무것도 안 한다.
++#elif defined(_MSC_VER)
+     // For MSVC we can use these cross arch and platform funcs to set the FPU.
+     // This will work on any platform, x86, x64, ARM, etc.
+ 
+@@ -5633,6 +5637,23 @@ namespace dxvk {
+       }
+     }
+ 
++    // Ember: 첨부가 하나도 없는 렌더 패스를 만들지 않는다. 색 쓰기를 끈 렌더 타깃은 위에서 빠지고 깊이 검사도 꺼져 있으면
++    // (Source 엔진 HDR·가시성 질의 단계 등) 첨부 0개 패스가 되는데, Apple GPU 는 첨부 없는 Metal 렌더 인코더에서 검증 없이
++    // 명령 버퍼를 버린다(MoltenVK "execution failed (code 1): Internal Error (0000010d)" → VK_ERROR_DEVICE_LOST,
++    // 레프트 4 데드 2 c1m1_hotel 로딩 중 실측). 그럴 땐 첫 렌더 타깃을 그대로 붙인다 — 쓰기 마스크가 0 이라 아무것도 쓰지 않는다.
++    bool anyAttachment = attachments.depth.view != nullptr;
++    for (uint32_t i = 0; i < MaxNumRenderTargets && !anyAttachment; i++)
++      anyAttachment = attachments.color[i].view != nullptr;
++
++    if (!anyAttachment) {
++      for (uint32_t i : bit::BitMask(m_boundRTs)) {
++        attachments.color[i] = {
++          m_state.renderTargets[i]->GetRenderTargetView(srgb),
++          m_state.renderTargets[i]->GetRenderTargetLayout() };
++        break;
++      }
++    }
++
+     // Create and bind the framebuffer object to the context
+     EmitCs([
+       cAttachments = std::move(attachments)
+@@ -5964,14 +5985,20 @@ namespace dxvk {
+     const uint32_t slot = computeResourceSlotId(
+       samplerInfo.first, DxsoBindingType::Image,
+       samplerInfo.second);
++    // Ember: 그림자 변수 슬롯에도 같은 샘플러(dxso_util.h computeShadowSlotId)
++    const uint32_t shadowSlot = computeShadowSlotId(samplerInfo.first, samplerInfo.second);
+ 
+     EmitCs([this,
+       cSlot = slot,
++      cShadowSlot = shadowSlot,
+       cKey  = key
+     ] (DxvkContext* ctx) {
+       auto pair = m_samplers.find(cKey);
+       if (pair != m_samplers.end()) {
+         ctx->bindResourceSampler(cSlot, pair->second);
++        ctx->bindResourceSampler(cShadowSlot, pair->second);
++        for (uint32_t v = 0; v < 3; v++)
++          ctx->bindResourceSampler(cShadowSlot + (caps::MaxTexturesVS + caps::MaxTexturesPS) * (1 + v), pair->second);
+         return;
+       }
+ 
+@@ -6012,6 +6039,9 @@ namespace dxvk {
+         auto sampler = m_dxvkDevice->createSampler(info);
+ 
+         m_samplers.insert(std::make_pair(cKey, sampler));
++        ctx->bindResourceSampler(cShadowSlot, sampler);
++        for (uint32_t v = 0; v < 3; v++)
++          ctx->bindResourceSampler(cShadowSlot + (caps::MaxTexturesVS + caps::MaxTexturesPS) * (1 + v), sampler);
+         ctx->bindResourceSampler(cSlot, std::move(sampler));
+ 
+         m_samplerCount++;
+@@ -6037,9 +6067,14 @@ namespace dxvk {
+ 
+     EmitCs([
+       cSlot = slot,
++      cShadowSlot = computeShadowSlotId(shaderSampler.first, uint32_t(shaderSampler.second)),
+       cImageView = commonTex->GetSampleView(srgb)
+     ](DxvkContext* ctx) {
+       ctx->bindResourceView(cSlot, cImageView, nullptr);
++      ctx->bindResourceView(cShadowSlot, cImageView, nullptr);
++      // 암시형 셰이더의 cube·3d·그림자 cube 슬롯(형식이 안 맞으면 DXVK 가 빈 자원으로 바꾼다)
++      for (uint32_t v = 0; v < 3; v++)
++        ctx->bindResourceView(cShadowSlot + (caps::MaxTexturesVS + caps::MaxTexturesPS) * (1 + v), cImageView, nullptr);
+     });
+   }
+ 
+@@ -6055,6 +6090,9 @@ namespace dxvk {
+           DxsoBindingType::Image, uint32_t(shaderSampler.second));
+ 
+         ctx->bindResourceView(slot, nullptr, nullptr);
++        for (uint32_t v = 0; v < 4; v++)
++          ctx->bindResourceView(computeShadowSlotId(shaderSampler.first, uint32_t(shaderSampler.second))
++            + (caps::MaxTexturesVS + caps::MaxTexturesPS) * v, nullptr, nullptr);
+       }
+     });
+   }
+@@ -6529,7 +6567,8 @@ namespace dxvk {
+     const     uint32_t regCountHardware = DetermineHardwareRegCount<ProgramType, ConstantType>();
+     constexpr uint32_t regCountSoftware = DetermineSoftwareRegCount<ProgramType, ConstantType>();
+ 
+-    if (unlikely(StartRegister + Count > regCountSoftware))
++    // Ember: StartRegister=-1(0xFFFFFFFF)+Count 가 32비트로 넘쳐 검사를 통과하고 fConsts[0xFFFFFFFF] 에 썼다
++    if (unlikely(StartRegister > regCountSoftware || Count > regCountSoftware - StartRegister))
+       return D3DERR_INVALIDCALL;
+ 
+     Count = UINT(
+@@ -7296,6 +7335,9 @@ namespace dxvk {
+         auto samplerInfo = RemapStateSamplerShader(DWORD(i));
+         uint32_t slot = computeResourceSlotId(samplerInfo.first, DxsoBindingType::Image, uint32_t(samplerInfo.second));
+         ctx->bindResourceView(slot, nullptr, nullptr);
++        for (uint32_t v = 0; v < 4; v++)
++          ctx->bindResourceView(computeShadowSlotId(samplerInfo.first, uint32_t(samplerInfo.second))
++            + (caps::MaxTexturesVS + caps::MaxTexturesPS) * v, nullptr, nullptr);
+       }
+     });
+ 
+diff --git a/src/d3d9/d3d9_device.h b/src/d3d9/d3d9_device.h
+index cec4829..a245151 100644
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -1061,7 +1061,8 @@ namespace dxvk {
+         const     uint32_t regCountHardware = DetermineHardwareRegCount<ProgramType, ConstantType>();
+         constexpr uint32_t regCountSoftware = DetermineSoftwareRegCount<ProgramType, ConstantType>();
+ 
+-        if (StartRegister + Count > regCountSoftware)
++        // Ember: StartRegister=-1(0xFFFFFFFF)+Count 가 32비트로 넘쳐 검사를 통과하고 fConsts[0xFFFFFFFF] 에 썼다
++        if (StartRegister > regCountSoftware || Count > regCountSoftware - StartRegister)
+           return D3DERR_INVALIDCALL;
+ 
+         Count = UINT(
+diff --git a/src/d3d9/d3d9_fixed_function.cpp b/src/d3d9/d3d9_fixed_function.cpp
+index 8ed8062..5f49821 100644
+--- a/src/d3d9/d3d9_fixed_function.cpp
++++ b/src/d3d9/d3d9_fixed_function.cpp
+@@ -721,7 +721,7 @@ namespace dxvk {
+     info.inputMask = m_inputMask;
+     info.outputMask = m_outputMask;
+     info.pushConstOffset = m_pushConstOffset;
+-    info.pushConstSize = m_pushConstOffset;
++    info.pushConstSize = m_pushConstSize;  /* Ember: 원래 m_pushConstOffset(오타) — PS 범위가 0 이라 MoltenVK(단계별 푸시 상수)에서 알파 기준·안개 색이 0 */
+ 
+     return new DxvkShader(info, m_module.compile());
+   }
+diff --git a/src/d3d9/d3d9_include.h b/src/d3d9/d3d9_include.h
+index 8762265..7d44b5c 100644
+--- a/src/d3d9/d3d9_include.h
++++ b/src/d3d9/d3d9_include.h
+@@ -79,10 +79,7 @@
+ 
+ // MinGW headers are broken. Who'dve guessed?
+ #ifndef _MSC_VER
+-typedef struct _D3DDEVINFO_RESOURCEMANAGER
+-{
+-  char dummy;
+-} D3DDEVINFO_RESOURCEMANAGER, * LPD3DDEVINFO_RESOURCEMANAGER;
++/* Ember: 최신 mingw 헤더(llvm-mingw 2026)에는 이미 있다. */
+ 
+ #ifndef __WINE__
+ extern "C" WINUSERAPI WINBOOL WINAPI SetProcessDPIAware(VOID);
+diff --git a/src/d3d9/d3d9_options.cpp b/src/d3d9/d3d9_options.cpp
+index 29d2c60..1a87379 100644
+--- a/src/d3d9/d3d9_options.cpp
++++ b/src/d3d9/d3d9_options.cpp
+@@ -43,7 +43,13 @@ namespace dxvk {
+     this->maxFrameRate                  = config.getOption<int32_t>     ("d3d9.maxFrameRate",                  0);
+     this->presentInterval               = config.getOption<int32_t>     ("d3d9.presentInterval",               -1);
+     this->shaderModel                   = config.getOption<int32_t>     ("d3d9.shaderModel",                   3);
++#ifdef _WIN64
+     this->evictManagedOnUnlock          = config.getOption<bool>        ("d3d9.evictManagedOnUnlock",          false);
++#else
++    /* Ember: 32비트는 MANAGED 텍스처의 시스템 메모리 사본을 올린 뒤 버린다(WineD3D 와 같게). 안 그러면 1.6GB 올렸을 때
++     * 주소 공간이 388MB 남아(d9mem, 2026-09-26) 텍스처 많은 옛 게임이 메모리 부족으로 죽는다. */
++    this->evictManagedOnUnlock          = config.getOption<bool>        ("d3d9.evictManagedOnUnlock",          true);
++#endif
+     this->dpiAware                      = config.getOption<bool>        ("d3d9.dpiAware",                      true);
+     this->strictConstantCopies          = config.getOption<bool>        ("d3d9.strictConstantCopies",          false);
+     this->strictPow                     = config.getOption<bool>        ("d3d9.strictPow",                     true);
+diff --git a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
+index 29e3b6e..99c4630 100644
+--- a/src/d3d9/d3d9_swapchain.cpp
++++ b/src/d3d9/d3d9_swapchain.cpp
+@@ -814,6 +814,28 @@ namespace dxvk {
+ 
+ 
+   void D3D9SwapChainEx::PresentImage(UINT SyncInterval) {
++    // Ember: EMBER_FPS_LOG=1 — 5초마다 present 수(DXMT·D3DMetal 미터와 같은 형식, 변환기 비교·자동 측정용).
++    // GUI 게임은 CRT 환경이 비어 있을 수 있어 Windows 환경 변수로 읽고, 출력은 DXVK 로거(게임 폴더 <exe>_d3d9.log + stderr).
++    {
++      static int fpsLog = -1;
++      if (fpsLog < 0) fpsLog = env::getEnvVar("EMBER_FPS_LOG") == "1";
++      if (fpsLog) {
++        static dxvk::high_resolution_clock::time_point since{}, last{};
++        static uint32_t n = 0; static double maxdt = 0;
++        auto t = dxvk::high_resolution_clock::now();
++        if (last.time_since_epoch().count()) maxdt = std::max(maxdt, std::chrono::duration<double>(t - last).count());
++        last = t;
++        if (!since.time_since_epoch().count()) since = t;
++        n++;
++        double el = std::chrono::duration<double>(t - since).count();
++        if (el >= 5.0) {
++          Logger::info(str::format("ember-fps: dxvk ", uint32_t(n / el * 10) / 10.0, "/s max=", uint32_t(maxdt * 10000) / 10.0,
++            "ms ", m_presentParams.BackBufferWidth, "x", m_presentParams.BackBufferHeight));
++          n = 0; maxdt = 0; since = t;
++        }
++      }
++    }
++
+     m_parent->Flush();
+ 
+     // Retrieve the image and image view to present

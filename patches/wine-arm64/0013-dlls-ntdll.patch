@@ -1,0 +1,4047 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 13/34] dlls-ntdll: Ember changes
+
+Base: wine-11.18.tar.xz
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index b0b2392..04a0d94 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -2408,7 +2408,7 @@ static BOOL convert_to_pe64( HMODULE module, const SECTION_IMAGE_INFORMATION *in
+     memcpy( &hdr64, &hdr32, offsetof( IMAGE_OPTIONAL_HEADER64, SizeOfStackReserve ));
+     hdr64.Magic               = IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+     hdr64.AddressOfEntryPoint = 0;
+-    hdr64.ImageBase           = hdr32.ImageBase;
++    hdr64.ImageBase           = (ULONG_PTR)module;  /* Ember: 4GB 위에 매핑되면 32비트 ImageBase 는 잘린 값 */
+     hdr64.SizeOfStackReserve  = hdr32.SizeOfStackReserve;
+     hdr64.SizeOfStackCommit   = hdr32.SizeOfStackCommit;
+     hdr64.SizeOfHeapReserve   = hdr32.SizeOfHeapReserve;
+diff --git a/dlls/ntdll/locale.c b/dlls/ntdll/locale.c
+index a100a93..993032f 100644
+--- a/dlls/ntdll/locale.c
++++ b/dlls/ntdll/locale.c
+@@ -27,6 +27,7 @@
+ #include "winbase.h"
+ #include "winnls.h"
+ #include "ntdll_misc.h"
++#include "wine/wow64base.h"
+ #include "locale_private.h"
+ #include "wine/debug.h"
+ 
+@@ -366,18 +367,18 @@ void locale_init(void)
+ 
+     NtGetNlsSectionPtr( 10, 0, NULL, &case_ptr, &size );
+     NtCurrentTeb()->Peb->UnicodeCaseTableData = case_ptr;
+-    if (peb64) peb64->UnicodeCaseTableData = PtrToUlong( case_ptr );
++    if (peb64) peb64->UnicodeCaseTableData = wine_wow64_h64( case_ptr );  /* fex32 */
+     if (ansi_cp != CP_UTF8)
+     {
+         NtGetNlsSectionPtr( 11, ansi_cp, NULL, &ansi_ptr, &size );
+         NtCurrentTeb()->Peb->AnsiCodePageData = ansi_ptr;
+-        if (peb64) peb64->AnsiCodePageData = PtrToUlong( ansi_ptr );
++        if (peb64) peb64->AnsiCodePageData = wine_wow64_h64( ansi_ptr );  /* fex32 */
+     }
+     if (oem_cp != CP_UTF8)
+     {
+         NtGetNlsSectionPtr( 11, oem_cp, NULL, &oem_ptr, &size );
+         NtCurrentTeb()->Peb->OemCodePageData = oem_ptr;
+-        if (peb64) peb64->OemCodePageData = PtrToUlong( oem_ptr );
++        if (peb64) peb64->OemCodePageData = wine_wow64_h64( oem_ptr );  /* fex32 */
+     }
+     RtlInitNlsTables( ansi_ptr, oem_ptr, case_ptr, &nls_info );
+     NlsAnsiCodePage     = nls_info.AnsiTableInfo.CodePage;
+diff --git a/dlls/ntdll/signal_arm64.c b/dlls/ntdll/signal_arm64.c
+index e560718..1698030 100644
+--- a/dlls/ntdll/signal_arm64.c
++++ b/dlls/ntdll/signal_arm64.c
+@@ -363,7 +363,10 @@ __ASM_GLOBAL_FUNC( KiUserCallbackDispatcher,
+                    ".seh_handler user_callback_handler, @except\n\t"
+                    "ldr x0, [sp]\n\t"             /* args */
+                    "ldp w1, w2, [sp, #0x08]\n\t"  /* len, id */
+-                   "ldr x3, [x18, 0x60]\n\t"      /* peb */
++                   "mrs x16, tpidrro_el0\n\t"          /* macOS: x18 을 못 쓴다 */
++                   "and x16, x16, #~7\n\t"
++                   "ldr x16, [x16, #6136]\n\t"      /* TEB */
++                   "ldr x3, [x16, #0x60]\n\t"      /* peb */
+                    "ldr x3, [x3, 0x58]\n\t"       /* peb->KernelCallbackTable */
+                    "ldr x15, [x3, x2, lsl #3]\n\t"
+                    "blr x15\n\t"
+@@ -764,7 +767,10 @@ __ASM_GLOBAL_FUNC( RtlRaiseException,
+                    "ldr w2, [x1]\n\t"            /* context->ContextFlags */
+                    "orr w2, w2, #0x20000000\n\t" /* CONTEXT_UNWOUND_TO_CALL */
+                    "str w2, [x1]\n\t"
+-                   "ldr x3, [x18, #0x60]\n\t"    /* peb */
++                   "mrs x16, tpidrro_el0\n\t"          /* macOS: x18 을 못 쓴다 */
++                   "and x16, x16, #~7\n\t"
++                   "ldr x16, [x16, #6136]\n\t"      /* TEB */
++                   "ldr x3, [x16, #0x60]\n\t"    /* peb */
+                    "ldrb w2, [x3, #2]\n\t"       /* peb->BeingDebugged */
+                    "cbnz w2, 1f\n\t"
+                    "bl dispatch_exception\n"
+@@ -868,7 +874,10 @@ __ASM_GLOBAL_FUNC( DbgUiRemoteBreakin,
+                    ".seh_save_fplr_x 16\n\t"
+                    ".seh_endprologue\n\t"
+                    ".seh_handler DbgUiRemoteBreakin_handler, @except\n\t"
+-                   "ldr x0, [x18, #0x60]\n\t"       /* NtCurrentTeb()->Peb */
++                   "mrs x16, tpidrro_el0\n\t"          /* macOS: x18 을 못 쓴다 */
++                   "and x16, x16, #~7\n\t"
++                   "ldr x16, [x16, #6136]\n\t"      /* TEB */
++                   "ldr x0, [x16, #0x60]\n\t"       /* NtCurrentTeb()->Peb */
+                    "ldrb w0, [x0, 0x02]\n\t"        /* peb->BeingDebugged */
+                    "cbz w0, 1f\n\t"
+                    "bl DbgBreakPoint\n"
+diff --git a/dlls/ntdll/signal_arm64ec.c b/dlls/ntdll/signal_arm64ec.c
+index 24d3b6d..8ad10b4 100644
+--- a/dlls/ntdll/signal_arm64ec.c
++++ b/dlls/ntdll/signal_arm64ec.c
+@@ -719,9 +719,16 @@ NTSTATUS SYSCALL_API NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_
+ NTSTATUS SYSCALL_API NtGetContextThread( HANDLE handle, CONTEXT *context )
+ {
+     ARM64_NT_CONTEXT arm_ctx = { .ContextFlags = ctx_flags_x64_to_arm( context->ContextFlags ) };
++    DWORD requested = context->ContextFlags;
+     NTSTATUS status = syscall_NtGetContextThread( handle, &arm_ctx );
+ 
+-    if (!status) context_arm_to_x64( (ARM64EC_NT_CONTEXT *)context, &arm_ctx );
++    if (!status)
++    {
++        context_arm_to_x64( (ARM64EC_NT_CONTEXT *)context, &arm_ctx );
++        /* Ember: 세그먼트는 늘 채우고 Dr0~7 은 0 이다. 요청한 플래그를 그대로 돌려준다(윈도우처럼 CONTEXT_ALL 이 CONTEXT_ALL 로).
++         * 전엔 0x10000b 만 돌아와 미니덤프·크래시 보고기·디버그 레지스터 확인 코드가 "없음"으로 봤다. */
++        context->ContextFlags |= requested & (CONTEXT_SEGMENTS | CONTEXT_DEBUG_REGISTERS);
++    }
+     return status;
+ }
+ 
+@@ -1372,7 +1379,10 @@ __ASM_GLOBAL_FUNC( "#KiUserCallbackDispatcher",
+                    ".seh_handler user_callback_handler, @except\n\t"
+                    "ldr x0, [sp]\n\t"             /* args */
+                    "ldp w1, w2, [sp, #0x08]\n\t"  /* len, id */
+-                   "ldr x3, [x18, 0x60]\n\t"      /* peb */
++                   "mrs x16, tpidrro_el0\n\t"   /* macOS: x18 은 커널이 지운다 */
++                   "and x16, x16, #~7\n\t"
++                   "ldr x16, [x16, #6136]\n\t"  /* pthread TSD 슬롯의 TEB */
++                   "ldr x3, [x16, #0x60]\n\t"      /* peb */
+                    "ldr x3, [x3, 0x58]\n\t"       /* peb->KernelCallbackTable */
+                    "ldr x15, [x3, x2, lsl #3]\n\t"
+                    "blr x15\n\t"
+@@ -1898,7 +1908,10 @@ static void __attribute__((naked)) arm64x_check_call(void)
+     asm( ".seh_proc \"#arm64x_check_call\"\n\t"
+          ".seh_endprologue\n\t"
+          /* check for EC code */
+-         "ldr x16, [x18, #0x60]\n\t"        /* peb */
++         "mrs x16, tpidrro_el0\n\t"   /* macOS: x18 은 커널이 지운다 */
++         "and x16, x16, #~7\n\t"
++         "ldr x16, [x16, #6136]\n\t"  /* pthread TSD 슬롯의 TEB */
++         "ldr x16, [x16, #0x60]\n\t"        /* peb */
+          "lsr x17, x11, #18\n\t"            /* dest / page_size / 64 */
+          "ldr x16, [x16, #0x368]\n\t"       /* peb->EcCodeBitMap */
+          "lsr x9, x11, #12\n\t"             /* dest / page_size */
+@@ -1972,9 +1985,15 @@ static void __attribute__((naked)) arm64x_check_call(void)
+          ".Lsyscall_seq:\n\t"
+          ".byte 0x4c, 0x8b, 0xd1\n\t"       /* mov  %rcx,%r10 */
+          ".byte 0xb8, 0, 0, 0, 0\n\t"       /* mov  $xxx,%eax */
+-         ".byte 0xf6, 0x04, 0x25, 0x08\n\t" /* testb $0x1,0x7ffe0308 */
+-         ".byte 0x03, 0xfe, 0x7f, 0x01\n\t"
+-         ".byte 0x75, 0x03\n\t"             /* jne 1f */
++         /* 윈도우 원본은 여기서 KUSER_SHARED_DATA(0x7ffe0308)를 읽는다.
++          * macOS ARM64 는 하위 4GB 가 __PAGEZERO 로 막혀 있어 그 주소를 아예
++          * 매핑할 수 없다(Wine 도 USD 를 0x17ffe0000 으로 옮겼다). 이 스텁을
++          * 직접 실행하는 x64 코드(크로미엄 계열이 그렇게 한다)가 그 자리에서
++          * 죽으므로, 메모리를 건드리지 않고 ZF 만 세워 syscall 로 떨어지게 한다.
++          * 길이와 앞 8바이트는 그대로 두어야 스텁을 읽어 가는 쪽이 헷갈리지 않는다. */
++         ".byte 0xf6, 0xc4, 0x00\n\t"       /* testb $0,%ah  → ZF=1 */
++         ".byte 0x90, 0x90, 0x90, 0x90, 0x90\n\t"
++         ".byte 0x75, 0x03\n\t"             /* jne 1f (여기서는 안 뛴다) */
+          ".byte 0x0f, 0x05\n\t"             /* syscall */
+          ".byte 0xc3\n\t"                   /* ret */
+          ".byte 0xcd, 0x2e\n\t"             /* 1: int $0x2e */
+@@ -2058,7 +2077,10 @@ void __attribute((naked)) RtlRaiseException( EXCEPTION_RECORD *rec )
+          "add x1, sp, #0x20\n\t"       /* context pointer */
+          "ldr x2, [x1, #0xf8]\n\t"     /* ctx->Rip */
+          "str x2, [x0, #0x10]\n\t"     /* rec->ExceptionAddress */
+-         "ldr x3, [x18, #0x60]\n\t"    /* peb */
++         "mrs x3, tpidrro_el0\n\t"   /* macOS: x18 은 커널이 지운다 */
++         "and x3, x3, #~7\n\t"
++         "ldr x3, [x3, #6136]\n\t"  /* pthread TSD 슬롯의 TEB */
++         "ldr x3, [x3, #0x60]\n\t"    /* peb */
+          "ldrb w2, [x3, #2]\n\t"       /* peb->BeingDebugged */
+          "cbnz w2, 1f\n\t"
+          "bl \"#dispatch_exception\"\n"
+@@ -2162,7 +2184,10 @@ void __attribute__((naked)) DbgUiRemoteBreakin( void *arg )
+          ".seh_save_fplr_x 16\n\t"
+          ".seh_endprologue\n\t"
+          ".seh_handler DbgUiRemoteBreakin_handler, @except\n\t"
+-         "ldr x0, [x18, #0x60]\n\t"  /* NtCurrentTeb()->Peb */
++         "mrs x0, tpidrro_el0\n\t"   /* macOS: x18 은 커널이 지운다 */
++         "and x0, x0, #~7\n\t"
++         "ldr x0, [x0, #6136]\n\t"  /* pthread TSD 슬롯의 TEB */
++         "ldr x0, [x0, #0x60]\n\t"  /* NtCurrentTeb()->Peb */
+          "ldrb w0, [x0, 0x02]\n\t"   /* peb->BeingDebugged */
+          "cbz w0, 1f\n\t"
+          "bl \"#DbgBreakPoint\"\n"
+diff --git a/dlls/ntdll/thread.c b/dlls/ntdll/thread.c
+index 1c25c8f..c432a5c 100644
+--- a/dlls/ntdll/thread.c
++++ b/dlls/ntdll/thread.c
+@@ -29,13 +29,14 @@
+ #include "ntdll_misc.h"
+ #include "ddk/wdm.h"
+ #include "wine/exception.h"
++#include "wine/usdaddr.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(thread);
+ WINE_DECLARE_DEBUG_CHANNEL(relay);
+ WINE_DECLARE_DEBUG_CHANNEL(pid);
+ WINE_DECLARE_DEBUG_CHANNEL(timestamp);
+ 
+-struct _KUSER_SHARED_DATA *user_shared_data = (void *)0x7ffe0000;
++struct _KUSER_SHARED_DATA *user_shared_data = (void *)(ULONG_PTR)WINE_USD_ADDR;
+ 
+ struct debug_info
+ {
+@@ -692,6 +693,14 @@ void WINAPI DECLSPEC_HOTPATCH RtlProcessFlsData( void *teb_fls_data, ULONG flags
+ 
+     if (flags & 1)
+     {
++        /* Ember: 콜백은 fls_section 을 놓고 부른다. 콜백(CRT _freefls 등)이 로더 잠금을 잡는 동안, 다른 스레드가
++         * 로더 잠금을 쥔 채(DllMain THREAD_ATTACH) FlsSetValue 로 fls_section 을 기다리면 교착이다.
++         * 실측(2026-09-24, 로아 FEX): fls_section 을 쥔 스레드 하나에 4개가 60초 넘게 막히고 loader_section 까지
++         * 얽혀 게임이 종료됐다. 먼저 잠금 안에서 (콜백, 인자) 쌍을 모으고 목록에서 뺀 뒤, 잠금 밖에서 호출한다. */
++        struct fls_call { PFLS_CALLBACK_FUNCTION callback; void *arg; };
++        struct fls_call stack_calls[64], *calls = stack_calls;
++        unsigned int ncalls = 0, cap = ARRAY_SIZE(stack_calls);
++
+         lock_fls_data();
+         for (i = 0; i < ARRAY_SIZE(fls->fls_data_chunks); ++i)
+         {
+@@ -702,24 +711,36 @@ void WINAPI DECLSPEC_HOTPATCH RtlProcessFlsData( void *teb_fls_data, ULONG flags
+             for (index = 0; index < fls_chunk_size( i ); ++index)
+             {
+                 PFLS_CALLBACK_FUNCTION callback = fls_data.fls_callback_chunks[i]->callbacks[index].callback;
++                void *arg = fls->fls_data_chunks[i][index + 1];
+ 
+-                if (!fls->fls_data_chunks[i][index + 1])
+-                    continue;
+-
+-                if (callback && callback != (void *)~(ULONG_PTR)0)
++                if (!arg) continue;
++                fls->fls_data_chunks[i][index + 1] = NULL;
++                if (!callback || callback == (void *)~(ULONG_PTR)0) continue;
++                if (ncalls == cap)
+                 {
+-                    TRACE_(relay)("Calling FLS callback %p, arg %p.\n", callback,
+-                            fls->fls_data_chunks[i][index + 1]);
+-
+-                    callback( fls->fls_data_chunks[i][index + 1] );
++                    struct fls_call *grown = RtlAllocateHeap( GetProcessHeap(), 0, cap * 2 * sizeof(*calls) );
++                    if (!grown) continue;
++                    memcpy( grown, calls, ncalls * sizeof(*calls) );
++                    if (calls != stack_calls) RtlFreeHeap( GetProcessHeap(), 0, calls );
++                    calls = grown;
++                    cap *= 2;
+                 }
+-                fls->fls_data_chunks[i][index + 1] = NULL;
++                calls[ncalls].callback = callback;
++                calls[ncalls].arg = arg;
++                ncalls++;
+             }
+         }
+         /* Not using RemoveEntryList() as Windows does not zero list entry here. */
+         fls->fls_list_entry.Flink->Blink = fls->fls_list_entry.Blink;
+         fls->fls_list_entry.Blink->Flink = fls->fls_list_entry.Flink;
+         unlock_fls_data();
++
++        for (i = 0; i < ncalls; ++i)
++        {
++            TRACE_(relay)("Calling FLS callback %p, arg %p.\n", calls[i].callback, calls[i].arg);
++            calls[i].callback( calls[i].arg );
++        }
++        if (calls != stack_calls) RtlFreeHeap( GetProcessHeap(), 0, calls );
+     }
+ 
+     if (flags & 2)
+diff --git a/dlls/ntdll/time.c b/dlls/ntdll/time.c
+index 5a96a1e..de881fa 100644
+--- a/dlls/ntdll/time.c
++++ b/dlls/ntdll/time.c
+@@ -29,6 +29,9 @@
+ #include <string.h>
+ #include <limits.h>
+ #include <time.h>
++#if defined(__x86_64__) && !defined(__arm64ec__)
++#include <intrin.h>
++#endif
+ 
+ #include "ntstatus.h"
+ #include "windef.h"
+@@ -379,8 +382,133 @@ LONGLONG WINAPI RtlGetSystemTimePrecise( void )
+ /******************************************************************************
+  *  RtlQueryPerformanceCounter   [NTDLL.@]
+  */
++/* Ember perfpush2: QueryPerformanceCounter 를 시스템 호출 없이 읽는다.
++ * Wine 은 매번 NtQueryPerformanceCounter(유닉스 쪽 mach_continuous_time)를 불러 로제타 58ns·FEX 21ns 가 들었다(timeGetTime 도 이 길).
++ *  - x86_64(로제타, CPUID 상표 "VirtualApple"): rdtsc 가 1GHz(mach 시계, 7ns) → rdtsc/100 + 치우침.
++ *  - ARM64/ARM64EC: cntvct_el0(24MHz, mach 시계의 바탕) → ×10⁷/cntfrq + 치우침.
++ * 치우침 = 유닉스 단조 시계 − 하드웨어 시계. 처음에 한 번 재고, user_shared_data->InterruptTime(서버가 16ms 마다 같은 단조 시계로 씀)보다
++ * 50ms 넘게 뒤지면(맥이 잠들었다 깨 연속 시계만 앞서 간 것) 다시 잰다 — 치우침은 늘기만 해서 값이 뒤로 가지 않는다.
++ * 처음 잴 때 두 번 맞춰 봐서 1us 넘게 어긋나면 옛 길(시스템 호출). EMBER_QPC=0 이면 옛 길. */
++#if defined(__x86_64__) || defined(__aarch64__) || defined(__arm64ec__)
++static LONGLONG ember_qpc_bias;
++static int ember_qpc_mode;            /* 0 = 아직, 1 = 하드웨어 시계, -1 = 시스템 호출 */
++#if defined(__aarch64__) || defined(__arm64ec__)
++static ULONGLONG ember_qpc_freq, ember_qpc_mul;   /* 틱 = (cntvct × mul) >> 64, mul = 10⁷·2⁶⁴ / cntfrq */
++#endif
++
++static inline ULONGLONG ember_qpc_raw(void)
++{
++#if defined(__aarch64__) || defined(__arm64ec__)
++    ULONGLONG c;
++    __asm__ __volatile__( "isb" ::: "memory" );   /* 앞선 읽기보다 먼저 시계를 읽지 않게(스레드 간 단조성) */
++    c = __builtin_arm_rsr64( "cntvct_el0" );
++    return (ULONGLONG)(((unsigned __int128)c * ember_qpc_mul) >> 64);
++#else
++    return __rdtsc() / 100;
++#endif
++}
++
++static inline ULONGLONG ember_qpc_interrupt_time(void)
++{
++    ULONG high, low;
++    do
++    {
++        high = user_shared_data->InterruptTime.High1Time;
++        low = user_shared_data->InterruptTime.LowPart;
++    }
++    while (high != user_shared_data->InterruptTime.High2Time);
++    return (ULONGLONG)high << 32 | low;
++}
++
++static void ember_qpc_resync(void)
++{
++    LARGE_INTEGER c;
++    LONGLONG bias;
++    NtQueryPerformanceCounter( &c, NULL );
++    bias = c.QuadPart - (LONGLONG)ember_qpc_raw();
++    if (bias > ember_qpc_bias) ember_qpc_bias = bias;    /* 늘기만(뒤로 가지 않게) */
++}
++
++static void ember_qpc_init(void)
++{
++    int mode = -1;
++    WCHAR buf[4];
++    SIZE_T len = 0;
++
++    if (!RtlQueryEnvironmentVariable( NULL, L"EMBER_QPC", 9, buf, ARRAY_SIZE(buf), &len ) && len && buf[0] == '0')
++        mode = -1;
++    else
++    {
++#if defined(__aarch64__) || defined(__arm64ec__)
++        ember_qpc_freq = __builtin_arm_rsr64( "cntfrq_el0" );
++        if (ember_qpc_freq >= 1000000 && ember_qpc_freq > TICKSPERSEC)
++        {
++            ember_qpc_mul = (ULONGLONG)(((unsigned __int128)TICKSPERSEC << 64) / ember_qpc_freq);
++            mode = 1;
++        }
++#else
++        int regs[4];
++        char brand[49];
++        unsigned int i;
++        __cpuid( regs, 0x80000000 );
++        if ((unsigned int)regs[0] >= 0x80000004)
++        {
++            for (i = 0; i < 3; i++) __cpuid( (int *)(brand + 16 * i), 0x80000002 + i );
++            brand[48] = 0;
++            if (strstr( brand, "VirtualApple" )) mode = 1;
++        }
++#endif
++        if (mode > 0)
++        {
++            LARGE_INTEGER c;
++            LONGLONG d;
++            int k, ok = 0;
++            ember_qpc_bias = LLONG_MIN;
++            for (k = 0; k < 3; k++) ember_qpc_resync();   /* 사이에 선점되면 치우침이 작게 나온다 → 최댓값 */
++            {
++                /* 반올림 위상이 시스템 호출판과 달라 1틱 뒤지는 일이 있다(32비트 로제타에서 잦음) → 뒤진 만큼(최대 1us) 올린다 */
++                LONGLONG deficit = 0;
++                for (k = 0; k < 16; k++)
++                {
++                    NtQueryPerformanceCounter( &c, NULL );
++                    d = c.QuadPart - ((LONGLONG)ember_qpc_raw() + ember_qpc_bias);
++                    if (d > deficit) deficit = d;
++                }
++#if defined(__aarch64__) || defined(__arm64ec__)
++                /* 24MHz→100ns 양자화 경계가 유닉스 쪽(×125/3÷100)과 어긋나 드물게(0.1%) 1틱 뒤진다 — 한 틱 앞당겨 둔다(뒤쪽 여유는 늘 1틱 있음) */
++                if (!deficit) deficit = 1;
++#endif
++                if (deficit <= 10) ember_qpc_bias += deficit;
++            }
++            for (k = 0; k < 4 && !ok; k++)                 /* 맞는지 확인(한 번이라도 1us 안이면 통과) */
++            {
++                NtQueryPerformanceCounter( &c, NULL );
++                d = (LONGLONG)ember_qpc_raw() + ember_qpc_bias - c.QuadPart;
++                if (d <= 10 && d >= -10) ok = 1;
++            }
++            if (!ok) mode = -1;
++        }
++    }
++    ember_qpc_mode = mode;
++}
++#endif
++
+ BOOL WINAPI DECLSPEC_HOTPATCH RtlQueryPerformanceCounter( LARGE_INTEGER *counter )
+ {
++#if defined(__x86_64__) || defined(__aarch64__) || defined(__arm64ec__)
++    if (__builtin_expect( !ember_qpc_mode, 0 )) ember_qpc_init();
++    if (ember_qpc_mode > 0)
++    {
++        LONGLONG v = (LONGLONG)ember_qpc_raw() + ember_qpc_bias;
++        if (__builtin_expect( v + 500000 < (LONGLONG)ember_qpc_interrupt_time(), 0 ))
++        {
++            ember_qpc_resync();
++            v = (LONGLONG)ember_qpc_raw() + ember_qpc_bias;
++        }
++        counter->QuadPart = v;
++        return TRUE;
++    }
++#endif
+     NtQueryPerformanceCounter( counter, NULL );
+     return TRUE;
+ }
+diff --git a/dlls/ntdll/unix/env.c b/dlls/ntdll/unix/env.c
+index bd888b9..8232929 100644
+--- a/dlls/ntdll/unix/env.c
++++ b/dlls/ntdll/unix/env.c
+@@ -1062,6 +1062,34 @@ static void add_dynamic_environment( WCHAR **env, SIZE_T *pos, SIZE_T *size )
+ }
+ 
+ 
++/* Ember: 부모(이미 떠 있는 스팀·배틀넷·STOVE)가 만든 윈도우 환경은 Ember 가 exec 직전에 유닉스 쪽에 입힌 게임별 규칙
++ * (ember_exe_env_child, process.c)을 모른다. 그러면 윈도우 쪽에서 설정을 읽는 변환기(DXMT 의 DXMT_CONFIG 등)가
++ * 옛 런처의 값을 받는다(2026-09-28 실측: 떠 있는 스팀으로 띄운 게임에 EMBER_FPS_LOG 가 안 닿음).
++ * EMBER_EXE_ENV_FILE 로 규칙이 입혀진 프로세스에서만, 아래 이름들의 유닉스 값을 윈도우 환경에 그대로 옮긴다(없으면 지운다). */
++static void ember_sync_pe_environment( WCHAR **env, SIZE_T *pos, SIZE_T *size )
++{
++    static const char *names[] = { "DXMT_CONFIG", "DXMT_METALFX_SPATIAL_SWAPCHAIN", "DXVK_CONFIG_FILE",
++                                   "DXVK_HUD", "EMBER_FPS_LOG", "EMBER_FG_LOG", "EMBER_FG_MODE",
++                                   "EMBER_LOW_LATENCY", "EMBER_DRAWABLES", "EMBER_FG_QUEUE_GUARD", "EMBER_FG_PROBE",
++                                   /* (coremove 10-08) Ember Tone·Flare: DXMT 연결부는 윈도우 환경에서 읽는다 — 앱 규칙 줄이 있어도
++                                    * 떠 있는 STOVE·스팀이 띄운 게임(로아 등)엔 안 닿아 AI 화질·자동 HDR 이 꺼져 있었다 */
++                                   "EMBER_NEURAL", "EMBER_NEURAL_STRENGTH", "EMBER_NEURAL_RES", "EMBER_NEURAL_MODEL",
++                                   "EMBER_NEURAL_UNITS", "EMBER_NEURAL_GUARD", "EMBER_NEURAL_LOG",
++                                   "EMBER_AUTOHDR", "EMBER_AUTOHDR_STRENGTH", "EMBER_AUTOHDR_PEAK", "EMBER_AUTOHDR_GAMMA",
++                                   "EMBER_AUTOHDR_LOG",
++                                   /* (fexcompat1 10-08) 앱이 규칙 파일(.ember-exe-env)에 적는 값 중 윈도우 쪽(DXMT PE·kernelbase)이 읽는 나머지 —
++                                    * 보간 세부(박자·가드·링·VRR·MC·최소 fps…)·DXMT 박자(EMBER_D11_PACE)·CEF 인자(kernelbase 가 자식 CEF 에 붙임) */
++                                   "EMBER_D11_PACE", "EMBER_VSYNC_TRACE", "EMBER_FG_CADENCE", "EMBER_FG_DUMP", "EMBER_FG_DUMP_AT",
++                                   "EMBER_FG_DUMP_COUNT", "EMBER_FG_GUARD_MODE", "EMBER_FG_MAX_COST", "EMBER_FG_MC", "EMBER_FG_MC_MIN_FPS",
++                                   "EMBER_FG_MIN_FPS", "EMBER_FG_PRE_UPSCALE", "EMBER_FG_RING", "EMBER_FG_VRR", "EMBER_FG_GAME_CAP",
++                                   "EMBER_FG_NN", "EMBER_FG_NN_AUTO", "EMBER_D3DM_FG_LOG", "EMBER_D3DM_FG_MODE", "EMBER_MODELS_DIR",
++                                   "EMBER_RETINA_SCALE", "EMBER_UP_AI", "EMBER_CEF_EXE", "EMBER_CEF_ARGS" };
++    unsigned int i;
++
++    if (!getenv( "EMBER_EXE_ENV_FILE" ) || !getenv( "EMBER_EXE_ENV_APPLIED" )) return;
++    for (i = 0; i < ARRAY_SIZE(names); i++) append_envA( env, pos, size, names[i], getenv( names[i] ) );
++}
++
+ static WCHAR *expand_value( WCHAR *env, SIZE_T size, const WCHAR *src, SIZE_T src_len )
+ {
+     SIZE_T len, retlen = src_len + 1, count = 0;
+@@ -2032,6 +2060,7 @@ void init_startup_info(void)
+     memcpy( env, (char *)info + info_size, env_size * sizeof(WCHAR) );
+     env_pos = env_size - 1;
+     add_dynamic_environment( &env, &env_pos, &env_size );
++    ember_sync_pe_environment( &env, &env_pos, &env_size );
+     is_prefix_bootstrap = !!find_env_var( env, env_pos, bootstrapW, ARRAY_SIZE(bootstrapW) );
+     env[env_pos++] = 0;
+ 
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index ebfb6af..de3c6b4 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -37,6 +37,8 @@
+ #include <sys/stat.h>
+ #include <sys/mman.h>
+ #include <sys/wait.h>
++#include <sys/socket.h>
++#include <sys/un.h>
+ #include <unistd.h>
+ #include <dlfcn.h>
+ #ifdef HAVE_PWD_H
+@@ -295,13 +297,25 @@ static WORD get_alt_machine( WORD machine )
+ static void set_dll_path(void)
+ {
+     char *p, *path = getenv( "WINEDLLPATH" );
++    /* Ember: 게임(보틀)별 빌트인 DLL 우선 경로. ':' 로 나눈다. Wine 트리(dll_dir)보다 먼저 찾는다.
++     * DXMT 처럼 "Wine builtin DLL" 서명이 있는 DLL 은 system32 에 native 로 넣어도 로더가 트리의 것을
++     * 대신 쓰므로(load_builtin), 트리를 건드리지 않고 게임마다 다른 변환기를 고르려면 이 길이 필요하다. */
++    char *pre = getenv( "EMBER_DLLPATH" );
+     int i, count = 0;
+ 
+     if (path) for (p = path, count = 1; *p; p++) if (*p == ':') count++;
++    if (pre) for (p = pre, count++; *p; p++) if (*p == ':') count++;
+ 
+     dll_paths = malloc( (count + 2) * sizeof(*dll_paths) );
+     count = 0;
+ 
++    if (pre && *pre)
++    {
++        pre = strdup( pre );
++        for (p = strtok( pre, ":" ); p; p = strtok( NULL, ":" )) dll_paths[count++] = strdup( p );
++        free( pre );
++    }
++
+     if (!build_dir) dll_paths[count++] = dll_dir;
+ 
+     if (path)
+@@ -451,19 +465,435 @@ static void preloader_exec( char **argv )
+ #endif
+     execv( argv[0], argv );
+     free( argv[0] );
++#endif
++#if defined(__APPLE__)
++    {
++        /* macOS 에서 Wine 이 만든 자식 프로세스의 exec 이 EFAULT 로 실패한다.
++         *
++         * Wine 은 시스템콜을 자기 커널 스택 위에서 처리하고, 프로세스 생성은 그
++         * 상태에서 fork 한다. 포크된 자식에서는 그 스택을 커널이 읽지 못해
++         * execve 의 인자 복사가 실패한다. 실측: 같은 자식에서 정적 버퍼로 넘기면
++         * 성공하고, 스택 버퍼로 넘기면 EFAULT 가 난다.
++         *
++         * 그래서 경로·인자·환경을 전부 정적 영역으로 옮겨서 넘긴다.
++         * exec 은 프로세스를 대체하므로 정적 버퍼를 재사용해도 문제가 없다. */
++        static char strbuf[32768];
++        static char *sargv[256];
++        static char *senvp[512];
++        char **e = *_NSGetEnviron();
++        size_t pos = 0;
++        int i, n = 0, en = 0;
++
++        for (i = 1; argv[i] && n < 255; i++)
++        {
++            size_t len = strlen( argv[i] ) + 1;
++            if (pos + len > sizeof(strbuf)) break;
++            memcpy( strbuf + pos, argv[i], len );
++            sargv[n++] = strbuf + pos;
++            pos += len;
++        }
++        if (!argv[i])           /* 인자를 전부 담았을 때만 쓴다 */
++        {
++            sargv[n] = NULL;
++            if (e)
++            {
++                for (int j = 0; e[j] && en < 511; j++)
++                {
++                    size_t len = strlen( e[j] ) + 1;
++                    if (pos + len > sizeof(strbuf)) break;
++                    memcpy( strbuf + pos, e[j], len );
++                    senvp[en++] = strbuf + pos;
++                    pos += len;
++                }
++            }
++            senvp[en] = NULL;
++            execve( sargv[0], sargv, senvp );
++        }
++    }
+ #endif
+     execv( argv[1], argv + 1 );
+ }
+ 
++/* Ember: 게임 프로세스를 앱 번들의 주 실행파일(Wine 로더 복사본)로 exec 한다.
++ * macOS 는 번들 주 실행파일인 프로세스만 "앱"으로 취급하므로, 그래야 게임 모드·Dock·앱 전환기
++ * 정체가 게임 프로세스에 붙는다. 호스트 옆에는 ntdll.so 심볼릭 링크가 있어 로더가 그대로 뜬다.
++ *   EMBER_HOST_LOADER  호스트 실행파일 절대 경로
++ *   EMBER_HOST_ROUTE   "1" 이면 이 프로세스를 호스트로 보낸다. 자식은 spawn_process 가
++ *                      ImagePathName 을 EMBER_HOST_EXE 목록과 비교해 매번 다시 정한다. */
++/* Ember: 호스트·도우미 번들 로더는 옆의 ntdll.so 심볼릭 링크로 런타임을 연다. 링크가 끊겼으면(앱 위치·구조가 바뀐 뒤
++ * 옛 규칙 파일이 가리키는 번들 — 2026-10-02 EmberCLI.app 구조 변경 뒤 Data/Apps 번들 30개가 끊김) exec 는 성공해도
++ * 로더가 ntdll 을 못 열고 죽어 CreateProcess 가 실패했다(스팀: OS Error 731). 그런 번들은 건너뛰고 일반 로더로 간다. */
++static int ember_loader_has_ntdll( const char *loader )
++{
++    char buf[1024];
++    const char *slash = strrchr( loader, '/' );
++    struct stat st;
++    size_t len;
++
++    if (!slash) return 0;
++    len = slash - loader + 1;
++    if (len + sizeof("ntdll.so") > sizeof(buf)) return 0;
++    memcpy( buf, loader, len );
++    memcpy( buf + len, "ntdll.so", sizeof("ntdll.so") );
++    if (stat( buf, &st ) || !S_ISREG( st.st_mode )) return 0;
++    /* 링크가 살아 있어도 다른 런타임의 ntdll 이면 안 된다. 게임 번들(Data/Apps/<게임>.app)은 엔진과 상관없이 게임 이름 하나라,
++     * 로제타로 띄우면 x86_64 CX 로더로 다시 만들어지고 FEX 보틀의 옛 규칙이 그 번들을 가리킨다 → 이미 떠 있는 FEX 스팀이
++     * 게임을 띄우면 다른 아키텍처 로더가 떠서 실패했다(2026-10-02 발헤임, 스팀 OS Error 731). 지금 ntdll 과 같은 것만 쓴다.
++     * fork 뒤라 malloc 하지 않는 realpath(버퍼 지정)만 쓴다. */
++    if (ntdll_dir)
++    {
++        char real[PATH_MAX];
++        size_t n = strlen( ntdll_dir );
++
++        if (!realpath( buf, real )) return 0;
++        if (strncmp( real, ntdll_dir, n ) || real[n] != '/' || strcmp( real + n + 1, "ntdll.so" )) return 0;
++    }
++    return 1;
++}
++
++static const char *ember_host_loader(void)
++{
++    const char *host = getenv( "EMBER_HOST_LOADER" ), *route = getenv( "EMBER_HOST_ROUTE" );
++    struct stat st;
++
++    if (!host || host[0] != '/' || !route || strcmp( route, "1" )) return NULL;
++    if (stat( host, &st ) || !S_ISREG( st.st_mode ) || !(st.st_mode & S_IXUSR)) return NULL;
++    if (!ember_loader_has_ntdll( host )) return NULL;
++    return host;
++}
++
++/* Ember: 게임 호스트로 가지 않는 프로세스(런처·도구)를 실행 도우미 번들의 주 실행파일로 exec 한다.
++ * macOS 는 번들 주 실행파일이 아닌 GUI 프로세스를 부모 앱의 정체로 등록한다 — Ember 가 띄운 런처는 번들 ID 가
++ * dev.eung.ember 가 되고, Ember 가 꺼진 동안 사용자가 Ember 를 열면 새로 뜨지 않고 그 Wine 프로세스가 앞으로 왔다
++ * (2026-09-30 실측, lsappinfo). 첫 프로세스가 도우미 번들이면 자식도 그 정체를 따른다.
++ *   EMBER_WINE_LOADER  도우미 실행파일 절대 경로(옆에 ntdll.so 심볼릭 링크). 없으면 예전 그대로. */
++static const char *ember_wine_loader(void)
++{
++    const char *p = getenv( "EMBER_WINE_LOADER" );
++    struct stat st;
++
++    if (!p || p[0] != '/') return NULL;
++    if (stat( p, &st ) || !S_ISREG( st.st_mode ) || !(st.st_mode & S_IXUSR)) return NULL;
++    if (!ember_loader_has_ntdll( p )) return NULL;
++    return p;
++}
++
++/* Ember: 게임 호스트를 exec 대신 LaunchServices 로 띄우는 도우미(런타임 bin/ember-lsopen, EmberCore/lsopen).
++ * 2026-10-02 실측: fork/exec 로 뜬 게임은 부모(스팀→Ember·터미널)의 coalition 에 묶이고 RunningBoard 에서 anon<> 이라
++ * 게임 모드(CLPC DPS 2)가 P코어를 2868MHz 로 묶는다(스텔라 4K P 4299→2847MHz, p99 18.6→29.0ms). LS 로 띄우면 새 coalition·app<>
++ * 정체가 되어 게임 모드가 게임 쪽 클럭을 올린다(네이티브 대조: 직접 P 4402→2807, LS P 2941→4138).
++ *   EMBER_HOST_LS  "0" 이면 끔(예전처럼 exec), 그 밖(없음 포함)은 켬. 도우미 파일이 없으면 끔.
++ *   EMBER_LS_HELPER  도우미 경로(시험용, 없으면 런타임 bin/ember-lsopen). */
++static const char *ember_ls_helper(void)
++{
++    static char *path;
++    static int checked;
++    const char *v = getenv( "EMBER_HOST_LS" );
++    struct stat st;
++
++    if (v && !strcmp( v, "0" )) return NULL;
++    if (!checked)
++    {
++        const char *over = getenv( "EMBER_LS_HELPER" );  /* 시험용: 도우미 경로를 직접 준다 */
++        checked = 1;
++        if (over && over[0] == '/') path = strdup( over );
++        else if (bin_dir && (path = malloc( strlen( bin_dir ) + sizeof("/ember-lsopen") )))
++        {
++            strcpy( path, bin_dir );
++            strcat( path, "/ember-lsopen" );
++        }
++        if (path && (stat( path, &st ) || !S_ISREG( st.st_mode ) || !(st.st_mode & S_IXUSR))) { free( path ); path = NULL; }
++    }
++    return path;
++}
++
++/* Ember: ember-lsopen 이 LaunchServices 로 띄운 호스트 쪽. EMBER_LS_HANDOFF 소켓에 붙어 Wine 자식이 갖고 있던
++ * cwd·환경·fd(번호 그대로 — WINESERVERSOCKET 포함)를 받아 그 자리를 이어받는다. 실패하면 바로 끝낸다(도우미가 예전 경로로 다시 띄움). */
++static int ember_ls_read( int s, void *buf, size_t n )
++{
++    char *p = buf;
++    while (n)
++    {
++        ssize_t r = read( s, p, n );
++        if (r < 0 && errno == EINTR) continue;
++        if (r <= 0) return 0;
++        p += r; n -= r;
++    }
++    return 1;
++}
++
++static char *ember_ls_read_str( int s )
++{
++    uint32_t n;
++    char *str;
++    if (!ember_ls_read( s, &n, 4 ) || n > (1u << 20) || !(str = malloc( n + 1 ))) return NULL;
++    if (!ember_ls_read( s, str, n )) { free( str ); return NULL; }
++    str[n] = 0;
++    return str;
++}
++
++/* 도우미에 종료 코드를 알릴 파이프(목표 번호 -2 로 받는다). 도우미는 이 값으로 끝나 Ember 가 보던 프로세스(=도우미 pid)의
++ * 종료 코드·시간이 예전 exec 때와 같다. 신호로 죽으면 파이프만 닫혀 도우미는 1 로 끝난다. */
++static int ember_ls_status_fd = -1;
++
++void ember_ls_report_exit( int code )
++{
++    if (ember_ls_status_fd >= 0)
++    {
++        ssize_t r = write( ember_ls_status_fd, &code, sizeof(code) );
++        (void)r;
++        close( ember_ls_status_fd );
++        ember_ls_status_fd = -1;
++    }
++}
++
++/* 한 번에 받을 수 있는 fd 수의 상한(도우미 ember-lsopen 과 같은 값). 도우미는 64개씩 나눠 보낸다(예전 도우미는 64개 이하 한 번).
++ * 이보다 많으면 도우미가 LS 를 포기하고 예전 exec 로 띄운다. 이 판 이전 ntdll 은 64 를 넘으면 그냥 끝나므로(도우미가 예전 exec 로
++ * 다시 띄움) 도우미·ntdll 판이 어긋나도 안전하다. */
++#define EMBER_LS_MAX_FDS 4096
++#define EMBER_LS_CHUNK   64
++
++/* 받을 fd 번호(최대 maxnum)와 개수를 담을 만큼 RLIMIT_NOFILE 소프트 한도를 올린다. LS 로 뜬 앱은 소프트 한도가 256 이라
++ * 부모(STOVE·CEF 등)에서 809 같은 높은 번호였던 wineserver 소켓을 그 번호에 못 앉혔다(dup2 EBADF → "Bad server socket 809",
++ * 2026-10-02 로스트아크). __wine_main 이 조금 뒤에 하는 set_max_limit 과 같은 값으로 미리 올린다. */
++static int ember_ls_raise_nofile( rlim_t need )
++{
++    struct rlimit rl;
++
++    if (getrlimit( RLIMIT_NOFILE, &rl )) return 0;
++    if (rl.rlim_cur == RLIM_INFINITY || rl.rlim_cur >= need) return 1;
++    set_max_limit( RLIMIT_NOFILE );
++    if (getrlimit( RLIMIT_NOFILE, &rl )) return 0;
++    if (rl.rlim_cur == RLIM_INFINITY || rl.rlim_cur >= need) return 1;
++    /* set_max_limit 이 못 올렸으면 필요한 만큼만 시도 */
++    if (rl.rlim_max != RLIM_INFINITY && rl.rlim_max < need) return 0;
++    rl.rlim_cur = need;
++    return !setrlimit( RLIMIT_NOFILE, &rl );
++}
++
++static void ember_ls_handoff(void)
++{
++    static const char *num_envs[] = { "WINESERVERSOCKET", "WINE_WAIT_CHILD_PIPE" };
++    const char *v = getenv( "EMBER_LS_HANDOFF" );
++    struct sockaddr_un sa;
++    char magic[5], *cwd, *e, *eq, cbuf[CMSG_SPACE(sizeof(int) * EMBER_LS_CHUNK)], dummy;
++    uint32_t ne, nfd, i;
++    int s, k, maxt = 2, base, ngot = 0, srv_target = -1, *targets, *got, *high;
++    struct iovec iov;
++    struct msghdr msg;
++    struct cmsghdr *c;
++    unsigned int j;
++
++    if (!v || !*v) return;
++    memset( &sa, 0, sizeof(sa) );
++    sa.sun_family = AF_UNIX;
++    if (strlen( v ) >= sizeof(sa.sun_path)) _exit( 1 );
++    strcpy( sa.sun_path, v );
++    unsetenv( "EMBER_LS_HANDOFF" );
++    if ((s = socket( AF_UNIX, SOCK_STREAM, 0 )) < 0) _exit( 1 );
++    for (k = 0; k < 100; k++)
++    {
++        if (!connect( s, (struct sockaddr *)&sa, sizeof(sa) )) break;
++        usleep( 20000 );
++    }
++    if (k == 100) _exit( 1 );
++    if (!ember_ls_read( s, magic, 5 ) || memcmp( magic, "EMLS1", 5 )) _exit( 1 );
++    if (!(cwd = ember_ls_read_str( s ))) _exit( 1 );
++    if (!ember_ls_read( s, &ne, 4 ) || ne > 100000) _exit( 1 );
++    for (i = 0; i < ne; i++)
++    {
++        if (!(e = ember_ls_read_str( s ))) _exit( 1 );
++        if ((eq = strchr( e, '=' )) && strncmp( e, "EMBER_LS_HANDOFF=", 17 ))
++        {
++            *eq = 0;
++            setenv( e, eq + 1, 1 );
++        }
++        free( e );
++    }
++    if (!ember_ls_read( s, &nfd, 4 ) || nfd > EMBER_LS_MAX_FDS) _exit( 1 );
++    if (!(targets = malloc( sizeof(int) * (nfd + 1) )) || !(got = malloc( sizeof(int) * (nfd + 1) )) ||
++        !(high = malloc( sizeof(int) * (nfd + 1) ))) _exit( 1 );
++    if (nfd && !ember_ls_read( s, targets, sizeof(int) * nfd )) _exit( 1 );
++    for (i = 0; i < nfd; i++) if (targets[i] > maxt) maxt = targets[i];
++    if ((e = getenv( "WINESERVERSOCKET" ))) srv_target = atoi( e );
++
++    /* 받기 전에 fd 한도부터: 목표 번호 최댓값 위로 받은 fd 를 잠시 옮겨 둘 자리까지. 못 올리면 넘겨받기를 포기한다
++     * (응답 'K' 전이라 도우미가 예전 exec 로 다시 띄운다). */
++    if (!ember_ls_raise_nofile( (rlim_t)maxt + 1 + nfd + 64 )) _exit( 1 );
++
++    /* fd 는 64개씩 여러 번에 나눠 온다(각 1바이트 'F' + SCM_RIGHTS) */
++    while (ngot < (int)nfd)
++    {
++        int n = 0;
++        iov.iov_base = &dummy; iov.iov_len = 1;
++        memset( &msg, 0, sizeof(msg) );
++        msg.msg_iov = &iov; msg.msg_iovlen = 1;
++        msg.msg_control = cbuf; msg.msg_controllen = sizeof(cbuf);
++        for (;;)
++        {
++            ssize_t r = recvmsg( s, &msg, 0 );
++            if (r == 1) break;
++            if (r < 0 && errno == EINTR) continue;
++            _exit( 1 );
++        }
++        for (c = CMSG_FIRSTHDR( &msg ); c; c = CMSG_NXTHDR( &msg, c ))
++            if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS)
++            {
++                n = (c->cmsg_len - CMSG_LEN(0)) / sizeof(int);
++                if (n > EMBER_LS_CHUNK || ngot + n > (int)nfd) _exit( 1 );
++                memcpy( got + ngot, CMSG_DATA( c ), sizeof(int) * n );
++                ngot += n;
++            }
++        if (!n || (msg.msg_flags & MSG_CTRUNC)) _exit( 1 );
++    }
++    if (chdir( cwd )) chdir( "/" );
++    free( cwd );
++
++    /* 받은 fd 와 소켓을 모두 목표 번호 최댓값 위로 옮긴다 — 받은 번호·소켓 번호가 다른 목표와 겹칠 수 있다. */
++    base = maxt + 1;
++    if ((k = fcntl( s, F_DUPFD_CLOEXEC, base )) < 0) _exit( 1 );
++    close( s );
++    s = k;
++    for (k = 0; k < ngot; k++)
++    {
++        if ((high[k] = fcntl( got[k], F_DUPFD, base )) < 0) _exit( 1 );
++        close( got[k] );
++    }
++
++    /* 1차: 목표 번호에 앉힌다. 0·1·2 는 번호 그대로. 그 밖의 번호는 이 프로세스에서 벌써 다른 것(Rosetta 런타임 등)이 쓰고
++     * 있을 수 있다 — 덮어쓰면 그쪽이 나중에 닫으면서 wineserver 소켓이 끊겨 서버가 프로세스를 죽였다(exit_code=1, 10-02 시험).
++     * 그래서 비어 있을 때만 앉히고, 쓰는 중이거나 dup2 가 실패하면(반환값 확인) 2차에서 새 번호로. */
++    for (k = 0; k < ngot; k++)
++    {
++        if (targets[k] == -2)  /* 종료 코드 파이프: 높은 번호 그대로, 자식에게는 안 물려준다 */
++        {
++            fcntl( high[k], F_SETFD, FD_CLOEXEC );
++            ember_ls_status_fd = high[k];
++            high[k] = -1;
++            continue;
++        }
++        if (targets[k] < 0) { close( high[k] ); high[k] = -1; continue; }
++        if (targets[k] > 2 && fcntl( targets[k], F_GETFD ) != -1) continue;
++        if (dup2( high[k], targets[k] ) == targets[k] || targets[k] <= 2)
++        {
++            close( high[k] );
++            high[k] = -1;
++        }
++    }
++    /* 2차: 자리를 못 잡은 것은 빈 낮은 번호로 옮기고 번호를 담은 환경 변수를 고친다. 서버 소켓을 못 옮기면 포기. */
++    for (k = 0; k < ngot; k++)
++    {
++        char num[16];
++        int nfdn;
++
++        if (high[k] < 0) continue;
++        nfdn = fcntl( high[k], F_DUPFD, 3 );
++        close( high[k] );
++        high[k] = -1;
++        if (nfdn < 0)
++        {
++            if (targets[k] == srv_target) _exit( 1 );
++            continue;
++        }
++        snprintf( num, sizeof(num), "%d", nfdn );
++        for (j = 0; j < ARRAY_SIZE(num_envs); j++)
++            if ((e = getenv( num_envs[j] )) && atoi( e ) == targets[k]) setenv( num_envs[j], num, 1 );
++    }
++    free( targets );
++    free( got );
++    free( high );
++    /* 다 앉힌 뒤에 받았다고 알린다 — 그 전에 실패하면 도우미가 예전 exec 로 띄운다 */
++    dummy = 'K';
++    if (write( s, &dummy, 1 ) != 1) _exit( 1 );
++    close( s );
++}
++
++/* Ember: 경로·인자·환경을 정적 영역에 복사해 execve 한다(실패하면 돌아온다).
++ * preloader_exec 의 우회와 같은 이유 — Wine 이 자기 커널 스택 위에서 fork 한 자식에서는 그 스택(exec_wineloader 의 socket_env·
++ * preloader_reserve 를 putenv 로 넣은 곳)을 커널이 못 읽어 execve 가 EFAULT 로 실패한다. ARM64(FEX)에서 주 스레드가 CreateProcess
++ * 하면 호스트·LS 도우미 exec 가 이렇게 실패해 조용히 일반 로더로 떴다(LS·호스트 정체 없음, 2026-10-02 gmfd 실측). 작업 스레드는 됐다. */
++#ifdef __APPLE__
++static void ember_execv_static( const char *path, char **argv )
++{
++    static char strbuf[262144];
++    static char *sargv[1024];
++    static char *senvp[4096];
++    char **e = *_NSGetEnviron(), *spath;
++    size_t pos = 0, len;
++    int i, n = 0, en = 0;
++
++    len = strlen( path ) + 1;
++    if (len > sizeof(strbuf)) goto plain;
++    spath = memcpy( strbuf, path, len );
++    pos = len;
++    for (i = 0; argv[i]; i++)
++    {
++        len = strlen( argv[i] ) + 1;
++        if (n >= (int)ARRAY_SIZE(sargv) - 1 || pos + len > sizeof(strbuf)) goto plain;
++        sargv[n++] = memcpy( strbuf + pos, argv[i], len );
++        pos += len;
++    }
++    sargv[n] = NULL;
++    for (i = 0; e && e[i]; i++)
++    {
++        len = strlen( e[i] ) + 1;
++        if (en >= (int)ARRAY_SIZE(senvp) - 1 || pos + len > sizeof(strbuf)) goto plain;
++        senvp[en++] = memcpy( strbuf + pos, e[i], len );
++        pos += len;
++    }
++    senvp[en] = NULL;
++    execve( spath, sargv, senvp );
++    return;
++plain:  /* 다 못 담으면 예전처럼 */
++    execv( path, argv );
++}
++#endif
++
+ /* exec the appropriate wine loader for the specified machine */
+ static NTSTATUS loader_exec( char **argv, WORD machine )
+ {
+     static char noexec[] = "WINELOADERNOEXEC=1";
++    const char *host;
+ 
+     putenv( noexec );
+ 
++    if ((host = ember_host_loader()))
++    {
++        const char *ls = ember_ls_helper();
++        /* Ember: 게임 모드용 — LaunchServices 로 띄워 자기 coalition·app<> 정체를 받게 한다(ember-lsopen 이 fd·env·cwd 를 넘김).
++         * 도우미가 실패하면 도우미가 스스로 호스트로 exec 한다. 도우미 exec 자체가 실패하면 아래 예전 경로. */
++        if (ls)
++        {
++            argv[0] = strdup( ls );
++            argv[1] = strdup( host );
++#ifdef __APPLE__
++            ember_execv_static( argv[0], argv );
++#else
++            execv( argv[0], argv );
++#endif
++            free( argv[0] );
++            free( argv[1] );
++        }
++        /* 호스트에는 프리로더가 없다. 실패하면 아래 일반 경로로 계속 간다. */
++        argv[1] = strdup( host );
++#ifdef __APPLE__
++        ember_execv_static( argv[1], argv + 1 );
++#else
++        execv( argv[1], argv + 1 );
++#endif
++        free( argv[1] );
++    }
++
+     if (((argv[1] = get_alternate_wineloader( machine )))) preloader_exec( argv );
+ 
++    if ((host = ember_wine_loader()))
++    {
++        /* preloader_exec 는 fork 된 자식의 EFAULT 를 피해 정적 버퍼로 execve 한다. 돌아오면 실패 — 일반 경로로. */
++        argv[1] = strdup( host );
++        preloader_exec( argv );
++        free( argv[1] );
++    }
++
+     argv[1] = strdup( wineloader );
+     preloader_exec( argv );
+     return STATUS_INVALID_IMAGE_FORMAT;
+@@ -1464,8 +1894,15 @@ NTSTATUS load_main_exe( UNICODE_STRING *nt_name, USHORT load_machine )
+     case STATUS_NOT_SUPPORTED:
+         /* if path is in system dir, we can load the builtin even if the file itself doesn't exist */
+         if (loadorder != LO_NATIVE && is_prefix_bootstrap && is_system_dir)
+-            status = find_builtin_dll( nt_name, NULL, &main_module, &size, &main_image_info, 0, 0,
++        {
++            ULONG_PTR limit_high = 0;
++#if defined(__APPLE__) && defined(__aarch64__)
++            /* fex32b: 32비트면 게스트 창 안으로(virtual_map_main_module 과 같은 제한) */
++            if (load_machine && !is_machine_64bit( load_machine )) limit_high = virtual_fex32_prepare_main32();
++#endif
++            status = find_builtin_dll( nt_name, NULL, &main_module, &size, &main_image_info, 0, limit_high,
+                                        search_machine, load_machine, FALSE, 0 );
++        }
+         break;
+     }
+     return status;
+@@ -2092,6 +2529,24 @@ static void check_command_line( int argc, char *argv[] )
+ }
+ 
+ 
++#ifdef __APPLE__
++/* Ember (gmgain): optional game-mode boost. EmberCore's libEmberGM.dylib (proprietary, outside this LGPL tree) sits
++ * next to ntdll.so; it checks whether this process is the game host (its executable == EMBER_HOST_LOADER) and does
++ * nothing otherwise. A missing library just leaves the feature off. EMBER_GM_BOOST=0 disables it. */
++static void ember_gm_load(void)
++{
++    char path[PATH_MAX];
++    const char *v = getenv( "EMBER_GM_BOOST" );
++    void *handle;
++    int (*start)(void);
++
++    if (!ntdll_dir || !getenv( "EMBER_HOST_LOADER" ) || (v && !strcmp( v, "0" ))) return;
++    snprintf( path, sizeof(path), "%s/libEmberGM.dylib", ntdll_dir );
++    if (!(handle = dlopen( path, RTLD_NOW | RTLD_LOCAL ))) return;
++    if ((start = dlsym( handle, "ember_gm_host_start" ))) start();
++}
++#endif
++
+ /***********************************************************************
+  *           __wine_main
+  *
+@@ -2099,10 +2554,14 @@ static void check_command_line( int argc, char *argv[] )
+  */
+ DECLSPEC_EXPORT void __wine_main( int argc, char *argv[] )
+ {
++    ember_ls_handoff();  /* Ember: LaunchServices 로 띄워졌으면 Wine 자식 자리(fd·env·cwd)를 먼저 이어받는다 */
+     main_argc = argc;
+     main_argv = argv;
+ 
+     init_paths();
++#ifdef __APPLE__
++    ember_gm_load();
++#endif
+     if (!getenv( "WINELOADERNOEXEC" ) || argc <= 1) check_command_line( argc, argv );
+     unsetenv( "WINELOADERNOEXEC" );
+ 
+diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
+index 9dad6c3..34fed0d 100644
+--- a/dlls/ntdll/unix/process.c
++++ b/dlls/ntdll/unix/process.c
+@@ -32,6 +32,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <strings.h>
+ #include <time.h>
+ #include <sys/socket.h>
+ #include <sys/time.h>
+@@ -39,6 +40,8 @@
+ # include <sys/times.h>
+ #endif
+ #include <sys/types.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
+ #include <sys/wait.h>
+ #ifdef HAVE_SYS_SYSCTL_H
+ # include <sys/sysctl.h>
+@@ -396,6 +399,149 @@ static BOOL is_unix_console_handle( HANDLE handle )
+ }
+ 
+ 
++/* Ember: 유니코드 경로에 ASCII 조각이 (대소문자·구분자 무시하고) 들어 있는가 */
++static int ember_path_contains( const WCHAR *path, const WCHAR *end, const char *frag, size_t len )
++{
++    size_t i;
++    const WCHAR *p;
++
++    for (p = path; p + len <= end; p++)
++    {
++        for (i = 0; i < len; i++)
++        {
++            WCHAR a = p[i];
++            unsigned char b = frag[i];
++            if (a == '/') a = '\\';
++            if (b == '/') b = '\\';
++            if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
++            if (b >= 'A' && b <= 'Z') b += 'a' - 'A';
++            if (a != b) break;
++        }
++        if (i == len) return 1;
++    }
++    return 0;
++}
++
++/* Ember: 이 자식이 게임 실행파일이면 호스트(앱 번들 주 실행파일)로 exec 하게 표시한다.
++ * EMBER_HOST_EXE 는 ';' 로 나눈 파일 이름 목록(대소문자 무시). 표시는 자식마다 새로 정하므로
++ * 런처(STOVE 등)는 보통 로더로, 게임만 호스트로 간다. fork 뒤 exec 전 단계에서만 부른다. */
++static void ember_route_child( const UNICODE_STRING *image )
++{
++    const char *list = getenv( "EMBER_HOST_EXE" ), *s;
++    const WCHAR *p, *name, *end;
++    char buf[256];
++    unsigned int i, n;
++
++    unsetenv( "EMBER_HOST_ROUTE" );
++    if (!list || !*list || !image->Buffer) return;
++    end = image->Buffer + image->Length / sizeof(WCHAR);
++    for (p = name = image->Buffer; p < end; p++) if (*p == '\\' || *p == '/') name = p + 1;
++    n = end - name;
++    if (!n || n >= sizeof(buf)) return;
++    for (i = 0; i < n; i++)
++    {
++        WCHAR c = name[i];
++        if (c > 127) return;
++        buf[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c;
++    }
++    buf[n] = 0;
++    for (s = list; *s; )
++    {
++        const char *e = strchr( s, ';' );
++        size_t len = e ? (size_t)(e - s) : strlen( s );
++        if (len == n && !strncasecmp( s, buf, len )) { setenv( "EMBER_HOST_ROUTE", "1", 1 ); return; }
++        /* '\' 로 시작하면 경로 조각: 전체 경로에 포함되면 게임으로 본다(예: \steamapps\common\ — 스팀이 띄우는 게임 전부) */
++        if (len > 1 && (s[0] == '\\' || s[0] == '/') && ember_path_contains( image->Buffer, end, s, len ))
++        {
++            setenv( "EMBER_HOST_ROUTE", "1", 1 );
++            return;
++        }
++        s += len;
++        if (*s == ';') s++;
++    }
++}
++
++/* Ember: 실행파일별 환경 규칙. EMBER_EXE_ENV_FILE 이 가리키는 파일의 각 줄이
++ *   <조각>\t<이름>=<값>
++ * 이다. <조각>이 '\' 로 시작하면 전체 경로에 들어 있는지(대소문자·구분자 무시), 아니면 파일 이름이 같은지 본다.
++ * 맞으면 그 변수를 설정한다(값이 비면 지운다). 크로스오버가 비공개 호환 DB 로 실행파일마다 설정을 주는 것과 같은 일.
++ * 이미 떠 있는 스팀이 게임을 띄울 때도 Ember 가 게임별로 고른 그래픽 설정을 입히려고 쓴다. fork 뒤 exec 전에만 부른다. */
++static void ember_exe_env_child( const UNICODE_STRING *image )
++{
++    const char *path = getenv( "EMBER_EXE_ENV_FILE" );
++    const WCHAR *p, *name, *end;
++    char buf[256], stackdata[16384], *data = stackdata, *line, *next, bottle_rules[1024];
++    unsigned int i, n;
++    ssize_t len, got;
++    size_t cap = sizeof(stackdata), maplen = 0;
++    struct stat st;
++    int fd;
++
++    if ((!path || !*path) && !getenv( "EMBER_DLLPATH" ) && !getenv( "CX_ACTIVE_GRAPHICS_BACKEND" ) && config_dir)
++    {
++        /* Ember: 그래픽 설정이 하나도 없는 평범한 부모(보조 명령이 먼저 연 세션의 services.exe 등)가 띄우는 프로세스는
++         * 보틀의 규칙 파일(<보틀>/.ember-exe-env)을 본다. 에픽 런처는 끌 때 업데이트를 서비스(services.exe →
++         * EpicGamesLauncher.exe -Commandlet=selfupdateinstall -RanAsService)로 까는데, 그 서비스가 DXMT 없이
++         * WineD3D 로 떠 D3D11 장치를 못 만들고(0x80004005) 널 포인터로 죽어 업데이트가 끝없이 되풀이됐다(2026-10-02). */
++        size_t dl = strlen( config_dir );
++        static const char rules_name[] = "/.ember-exe-env";
++        if (dl + sizeof(rules_name) <= sizeof(bottle_rules))
++        {
++            memcpy( bottle_rules, config_dir, dl );
++            memcpy( bottle_rules + dl, rules_name, sizeof(rules_name) );
++            path = bottle_rules;
++        }
++    }
++    if (!path || !*path || !image->Buffer) return;
++    if ((fd = open( path, O_RDONLY )) == -1) return;
++    /* 규칙 파일은 게임마다 57줄씩 쌓여 16KB 를 쉽게 넘는다(스팀 보틀 7개 게임 = 28KB). 전엔 앞 16KB 만 읽어
++     * 뒤쪽 게임(발헤임·원스 휴먼·스텔라 블레이드…)의 규칙이 통째로 빠지고 경계의 줄은 잘렸다.
++     * fork 뒤라 malloc 대신 mmap 으로 파일 크기만큼 잡는다. */
++    if (!fstat( fd, &st ) && st.st_size >= (off_t)cap && st.st_size < (64 << 20))
++    {
++        void *m = mmap( NULL, (size_t)st.st_size + 1, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0 );
++        if (m != MAP_FAILED) { data = m; maplen = (size_t)st.st_size + 1; cap = maplen; }
++    }
++    for (len = 0; len < (ssize_t)cap - 1; len += got)
++        if ((got = read( fd, data + len, cap - 1 - len )) <= 0) break;
++    close( fd );
++    if (len <= 0) { if (maplen) munmap( data, maplen ); return; }
++    data[len] = 0;
++
++    end = image->Buffer + image->Length / sizeof(WCHAR);
++    for (p = name = image->Buffer; p < end; p++) if (*p == '\\' || *p == '/') name = p + 1;
++    n = end - name;
++    if (n >= sizeof(buf)) n = 0;
++    for (i = 0; i < n; i++) buf[i] = name[i] > 127 ? '?' : (char)name[i];
++    buf[n] = 0;
++
++    for (line = data; line && *line; line = next)
++    {
++        char *tab, *eq;
++        size_t flen;
++
++        if ((next = strchr( line, '\n' ))) *next++ = 0;
++        if (!(tab = strchr( line, '\t' ))) continue;
++        *tab = 0;
++        flen = tab - line;
++        if (!flen) continue;
++        if (line[0] == '\\' || line[0] == '/')
++        {
++            if (!ember_path_contains( image->Buffer, end, line, flen )) continue;
++        }
++        else if (flen != n || strncasecmp( line, buf, flen )) continue;
++        if (!(eq = strchr( tab + 1, '=' )) || eq == tab + 1) continue;
++        *eq = 0;
++        if (eq[1]) setenv( tab + 1, eq + 1, 1 );
++        else unsetenv( tab + 1 );
++        /* 규칙이 하나라도 입혀졌다 — 새 프로세스의 윈도우 환경도 맞추게 표시(env.c ember_sync_pe_environment) */
++        setenv( "EMBER_EXE_ENV_APPLIED", "1", 1 );
++        /* 보틀 규칙 파일로 입혔으면 이 프로세스부터는 규칙 파일을 아는 세션처럼(윈도우 환경 동기화·자손 규칙) 다룬다 */
++        if (path == bottle_rules) setenv( "EMBER_EXE_ENV_FILE", bottle_rules, 1 );
++    }
++    if (maplen) munmap( data, maplen );
++}
++
+ /***********************************************************************
+  *           spawn_process
+  */
+@@ -439,6 +585,9 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+                 fchdir( unixdir );
+                 close( unixdir );
+             }
++            /* Ember: 규칙 먼저(규칙이 호스트를 지정할 수 있다) — CX 트리와 같은 순서 */
++            ember_exe_env_child( &params->ImagePathName );
++            ember_route_child( &params->ImagePathName );
+             argv = build_argv( &params->CommandLine, 2 );
+ 
+             exec_wineloader( argv, socketfd, pe_info );
+@@ -472,14 +621,8 @@ NTSTATUS WINAPI __wine_unix_spawnvp( char * const argv[], int wait )
+     pid_t pid, wret;
+     int fd[2], status, err;
+ 
+-#ifdef HAVE_PIPE2
+-    if (pipe2( fd, O_CLOEXEC ) == -1)
+-#endif
+-    {
+-        if (pipe(fd) == -1) return STATUS_TOO_MANY_OPENED_FILES;
+-        fcntl( fd[0], F_SETFD, FD_CLOEXEC );
+-        fcntl( fd[1], F_SETFD, FD_CLOEXEC );
+-    }
++    /* Ember: pipe2 는 macOS 27 에만 있다. server_pipe 가 OS 를 보고 고른다. */
++    if (server_pipe( fd ) == -1) return STATUS_TOO_MANY_OPENED_FILES;
+ 
+     if (!(pid = fork()))
+     {
+@@ -568,14 +711,8 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
+     char **argv;
+     NTSTATUS status = STATUS_SUCCESS;
+ 
+-#ifdef HAVE_PIPE2
+-    if (pipe2( fd, O_CLOEXEC ) == -1)
+-#endif
+-    {
+-        if (pipe(fd) == -1) return STATUS_TOO_MANY_OPENED_FILES;
+-        fcntl( fd[0], F_SETFD, FD_CLOEXEC );
+-        fcntl( fd[1], F_SETFD, FD_CLOEXEC );
+-    }
++    /* Ember: pipe2 는 macOS 27 에만 있다. server_pipe 가 OS 를 보고 고른다. */
++    if (server_pipe( fd ) == -1) return STATUS_TOO_MANY_OPENED_FILES;
+ 
+     if (wine_server_handle_to_fd( params->hStdInput, FILE_READ_DATA, &stdin_fd, NULL ) &&
+         isatty(0) && is_unix_console_handle( params->hStdInput ))
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index fa9138d..4a2522b 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -326,8 +326,10 @@ NTSTATUS unixcall_wine_server_call( void *args )
+  */
+ void server_enter_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset )
+ {
++    struct thread_data *data;
+     pthread_sigmask( SIG_BLOCK, &server_block_set, sigset );
+     mutex_lock( mutex );
++    if ((data = get_thread_data())) { data->vm_lock_depth++; data->vm_lock_site = __builtin_return_address(0); }
+ }
+ 
+ 
+@@ -336,6 +338,8 @@ void server_enter_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigse
+  */
+ void server_leave_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset )
+ {
++    struct thread_data *data = get_thread_data();
++    if (data) data->vm_lock_depth--;
+     mutex_unlock( mutex );
+     pthread_sigmask( SIG_SETMASK, sigset, NULL );
+ }
+@@ -727,6 +731,10 @@ unsigned int server_select( const union select_op *select_op, data_size_t size,
+     sigset_t old_set;
+     int signaled;
+     data_size_t reply_size;
++
++    if (data->vm_lock_depth)
++        ERR( "잠금 깊이 %d (마지막 잡은 곳 %p) 인 채로 server_select 진입 — 잠금이 새고 있다\n",
++             data->vm_lock_depth, data->vm_lock_site );
+     struct
+     {
+         union apc_call call;
+@@ -1285,8 +1293,17 @@ int server_pipe( int fd[2] )
+ 
+     if (have_pipe2)
+     {
+-        if (!(ret = pipe2( fd, O_CLOEXEC ))) return ret;
+-        if (errno == ENOSYS || errno == EINVAL) have_pipe2 = FALSE;  /* don't try again */
++#ifdef __APPLE__
++        /* Ember: pipe2 는 macOS 27 에서 생겼다. 낮은 minos 로 빌드하면 약한 심볼이라 옛 macOS 에선 NULL 을 부른다. */
++        if (__builtin_available(macOS 27.0, *))
++#endif
++        {
++            if (!(ret = pipe2( fd, O_CLOEXEC ))) return ret;
++            if (errno == ENOSYS || errno == EINVAL) have_pipe2 = FALSE;  /* don't try again */
++        }
++#ifdef __APPLE__
++        else have_pipe2 = FALSE;
++#endif
+     }
+ #endif
+     if (!(ret = pipe( fd )))
+@@ -1784,6 +1801,7 @@ void server_init_thread( struct thread_data *data )
+ 
+     data->pthread_id = pthread_self();
+     pthread_setspecific( thread_data_key, data );
++    set_teb_tsd_slot( data->teb );
+ 
+     reply_pipe = init_thread_pipe( data );
+     SERVER_START_REQ( init_thread )
+diff --git a/dlls/ntdll/unix/signal_arm64.c b/dlls/ntdll/unix/signal_arm64.c
+index 576f76b..0b382e2 100644
+--- a/dlls/ntdll/unix/signal_arm64.c
++++ b/dlls/ntdll/unix/signal_arm64.c
+@@ -34,6 +34,15 @@
+ #include <stdio.h>
+ #include <sys/types.h>
+ #include <unistd.h>
++#include <time.h>
++#ifdef __APPLE__
++#include <mach-o/dyld.h>
++#include <dlfcn.h>
++#include <mach/mach.h>
++#include <mach/mach_vm.h>
++#include <sys/time.h>
++#include <string.h>
++#endif
+ #ifdef HAVE_SYS_PARAM_H
+ # include <sys/param.h>
+ #endif
+@@ -441,7 +450,10 @@ NTSTATUS WINAPI NtSetContextThread( HANDLE handle, const CONTEXT *context )
+         frame->sp    = context->Sp;
+         frame->pc    = context->Pc;
+         frame->cpsr  = context->Cpsr;
+-        if (is_emulated_code( frame->pc )) flags |= RESTORE_FLAGS_EMULATION;
++        if (is_emulated_code( frame->pc ))
++        {
++            flags |= RESTORE_FLAGS_EMULATION;
++        }
+         else frame->restore_flags &= ~RESTORE_FLAGS_EMULATION;
+     }
+     if (flags & CONTEXT_FLOATING_POINT)
+@@ -766,12 +778,79 @@ NTSTATUS get_thread_wow64_context( HANDLE handle, void *ctx, ULONG size )
+ }
+ 
+ 
++/***********************************************************************
++ *           ember_exc_stats
++ *
++ * Ember 진단: 사용자 모드로 넘기는 예외를 (코드, 읽기/쓰기, 폴트 페이지)별로 세어 5초마다 stderr 에 찍는다.
++ * EMBER_EXC_STATS=1 일 때만. FEX 에서 예외 한 번은 시그널 + 문맥 변환 + SEH + NtContinue(SIGUSR2)라 매우 비싸다.
++ * 실측(2026-09-24): STOVE CEF 렌더러가 게임 중에도 코어 하나를 예외 왕복에 썼다 — 정체를 찾기 위한 것.
++ * 시그널 핸들러 안이라 잠금 없이 CAS 로만 센다.
++ */
++struct ember_exc_slot { ULONG64 key; LONG count; ULONG_PTR last_pc; };
++static struct ember_exc_slot ember_exc_table[64];
++static LONG ember_exc_total;
++
++static void ember_exc_stats( const EXCEPTION_RECORD *rec )
++{
++    static int enabled = -1;
++    static ULONG64 last_ns;
++    struct timespec ts;
++    ULONG64 key, now;
++    unsigned int i, h;
++
++    if (enabled < 0) { const char *e = getenv( "EMBER_EXC_STATS" ); enabled = e && *e == '1'; }
++    if (!enabled) return;
++
++    key = (ULONG64)rec->ExceptionCode << 32;
++    if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2)
++        key |= ((rec->ExceptionInformation[0] & 0xf) << 28) | ((rec->ExceptionInformation[1] >> 14) & 0x0fffffff);
++    else  /* 그 밖의 예외는 일어난 코드 위치(16K 페이지)로 묶는다. rw=f 로 표시 */
++        key |= (0xfull << 28) | (((ULONG_PTR)rec->ExceptionAddress >> 14) & 0x0fffffff);
++    InterlockedIncrement( &ember_exc_total );
++    h = (unsigned int)((key * 0x9e3779b97f4a7c15ull) >> 58);
++    for (i = 0; i < ARRAY_SIZE(ember_exc_table); i++)
++    {
++        struct ember_exc_slot *slot = &ember_exc_table[(h + i) % ARRAY_SIZE(ember_exc_table)];
++        ULONG64 cur = __atomic_load_n( &slot->key, __ATOMIC_RELAXED );
++        if (cur == key || (!cur && __atomic_compare_exchange_n( &slot->key, &cur, key, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED )) || cur == key)
++        {
++            InterlockedIncrement( &slot->count );
++            slot->last_pc = (ULONG_PTR)rec->ExceptionAddress;
++            break;
++        }
++    }
++
++    clock_gettime( CLOCK_MONOTONIC, &ts );
++    now = ts.tv_sec * 1000000000ull + ts.tv_nsec;
++    if (!last_ns) { last_ns = now; return; }
++    if (now - last_ns < 5000000000ull) return;
++    last_ns = now;
++    {
++        char buf[2048];
++        int len = snprintf( buf, sizeof(buf), "ember-exc-stats (5s, pid %d): total=%d;", getpid(),
++                            (int)InterlockedExchange( &ember_exc_total, 0 ) );
++        for (i = 0; i < ARRAY_SIZE(ember_exc_table) && len < (int)sizeof(buf) - 64; i++)
++        {
++            LONG n = InterlockedExchange( &ember_exc_table[i].count, 0 );
++            ULONG64 k = ember_exc_table[i].key;
++            if (n < 20) continue;
++            len += snprintf( buf + len, sizeof(buf) - len, " code=%08x rw=%x page=%#llx n=%d pc=%p;", (unsigned int)(k >> 32),
++                             (unsigned int)((k >> 28) & 0xf), (unsigned long long)((k & 0x0fffffff) << 14), (int)n,
++                             (void *)ember_exc_table[i].last_pc );
++        }
++        buf[len++] = '\n';
++        write( 2, buf, len );
++    }
++}
++
++
+ /***********************************************************************
+  *           setup_raise_exception
+  */
+ static void setup_raise_exception( struct thread_data *data, ucontext_t *sigcontext,
+                                    EXCEPTION_RECORD *rec, CONTEXT *context )
+ {
++    ember_exc_stats( rec );
+     CHPE_V2_CPU_AREA_INFO *chpe = data->teb->ChpeV2CpuAreaInfo;
+     struct exc_stack_layout *stack;
+     void *stack_ptr = (void *)(SP_sig(sigcontext) & ~15);
+@@ -904,19 +983,20 @@ __ASM_GLOBAL_FUNC( call_user_mode_callback,
+                    "stp d12, d13, [x29, #0x80]\n\t"
+                    "stp d14, d15, [x29, #0x90]\n\t"
+                    "stp x1, x2, [x29, #0xa0]\n\t" /* ret_ptr, ret_len */
+-                   "mov x18, x4\n\t"              /* teb */
++                   "mov x18, x4\n\t"              /* teb — 윈도우 ABI 상 관례. macOS 에선 곧 지워진다 */
+                    "mrs x1, fpcr\n\t"
+                    "mrs x2, fpsr\n\t"
+                    "bfi x1, x2, #0, #32\n\t"
+-                   "ldr x2, [x18]\n\t"            /* teb->Tib.ExceptionList */
++                   /* 아래는 x18 대신 인자로 받은 x4 를 쓴다. x18 은 선점 때 지워진다. */
++                   "ldr x2, [x4]\n\t"             /* teb->Tib.ExceptionList */
+                    "stp x1, x2, [x29, #0xb0]\n\t"
+ 
+-                   "ldr x7, [x18, #0x378]\n\t"    /* thread_data->syscall_frame */
++                   "ldr x7, [x4, #0x378]\n\t"     /* thread_data->syscall_frame */
+                    "sub x1, sp, #0x330\n\t"       /* sizeof(struct syscall_frame) */
+-                   "str x1, [x18, #0x378]\n\t"    /* thread_data->syscall_frame */
++                   "str x1, [x4, #0x378]\n\t"     /* thread_data->syscall_frame */
+                    "add x8, x29, #0xd0\n\t"
+                    "stp x7, x8, [x1, #0x110]\n\t" /* frame->prev_frame,syscall_cfa */
+-                   "ldr w11, [x18, #0x380]\n\t"   /* thread_data->syscall_trace */
++                   "ldr w11, [x4, #0x380]\n\t"    /* thread_data->syscall_trace */
+                    "cbnz x11, 2f\n\t"
+                    /* switch to user stack */
+                    "1:mov sp, x0\n\t"             /* user_sp */
+@@ -1128,6 +1208,116 @@ static BOOL handle_syscall_fault( struct thread_data *data, ucontext_t *context,
+  *
+  * Handler for SIGSEGV and related errors.
+  */
++
++#if defined(__APPLE__)
++/***********************************************************************
++ *           fixup_lost_x18
++ *
++ * macOS 는 x18 을 "플랫폼 예약" 으로 두고 예외에서 복귀할 때마다 0 으로 지운다.
++ * 시스템콜이나 시그널만이 아니라 타이머 선점만으로도 지워진다(실측: 2~4ms).
++ * 윈도우 ARM64 ABI 는 x18 에 TEB 를 두므로, PE 코드는 선점 직후 x18 로 TEB 를
++ * 읽다가 낮은 주소에서 폴트한다.
++ *
++ * **시그널 문맥의 x18 에 값을 써 넣는 것은 소용이 없다.** 커널이 복귀할 때
++ * 다시 지우기 때문에 같은 명령이 끝없이 폴트한다(실측 확인). 그래서 여기서는
++ * 폴트를 낸 명령을 **대신 실행해 주고** PC 를 다음으로 넘긴다.
++ *
++ * 다루는 것은 두 가지다.
++ *   1) `ldr xN|wN, [x18, #imm]`  — Wine 과 FEX 의 ARM64EC 경로가 쓰는 형태.
++ *      대신 읽어 주고 PC 를 넘긴다.
++ *   2) `mov xN, x18` 로 옮겨 놓고 `ldr ..., [xN, #imm]` 로 읽는 형태
++ *      — llvm-mingw 의 _CRT_INIT 이 이렇게 한다(실측: DXMT ARM64EC 의
++ *      winemetal.dll 이 여기서 죽었다). 이 경우는 xN 에 TEB 를 넣고 다시
++ *      실행시킨다. 일반 레지스터는 복귀해도 지워지지 않으므로 그 뒤로도 멀쩡하다.
++ * 그 밖의 형태는 가리지 말고 진짜 폴트로 올려서 드러나게 한다.
++ */
++/* macOS 자신의 라이브러리가 들어 있는 dyld 공유 캐시 범위.
++ * 그 안에서 난 폴트는 손대지 않는다. 시스템 코드의 x18 은 우리 것이 아니다. */
++extern const void *_dyld_get_shared_cache_range( size_t *length ) __attribute__((weak_import));
++
++static BOOL pc_in_shared_cache( ULONG_PTR pc )
++{
++    static ULONG_PTR cache_base, cache_end;
++
++    if (!cache_end)
++    {
++        size_t len = 0;
++        const void *base = _dyld_get_shared_cache_range ? _dyld_get_shared_cache_range( &len ) : NULL;
++        cache_base = (ULONG_PTR)base;
++        cache_end = cache_base + len;
++        if (!len) cache_end = ~(ULONG_PTR)0;   /* 못 구하면 아예 끄는 쪽이 안전하다 */
++    }
++    return pc >= cache_base && pc < cache_end;
++}
++
++extern BOOL virtual_handle_jit_fault( void *addr, void *pc, void *lr, BOOL exec );
++
++static BOOL fixup_lost_x18( struct thread_data *data, ucontext_t *sigcontext, siginfo_t *siginfo )
++{
++    ULONG_PTR addr = (ULONG_PTR)siginfo->si_addr;
++    UINT instr, rn, rt, imm;
++    const char *teb = (const char *)(data ? data->teb : NULL);
++
++    if (!teb) return FALSE;
++    /* TEB 크기 밖이면 진짜 널 참조다. 가리지 않는다. */
++    if (addr >= 0x2000) return FALSE;
++    if (pc_in_shared_cache( PC_sig(sigcontext) )) return FALSE;
++    if (REGn_sig( 18, sigcontext ) != 0) return FALSE;
++
++    instr = *(UINT *)PC_sig(sigcontext);
++    rn = (instr >> 5) & 0x1f;
++    rt = instr & 0x1f;
++
++    /* 컴파일러가 x18 을 다른 레지스터에 복사해 두고 그걸로 읽는 경우가 있다
++     * (llvm-mingw 의 _CRT_INIT: `mov x8, x18` 뒤 `ldr x25, [x8, #8]`).
++     * 그 레지스터는 0 이 돼 있으니, 바로 앞 명령이 x18 복사였는지 보고
++     * 그 레지스터에 TEB 를 넣어 준 뒤 같은 명령을 다시 실행시킨다.
++     * x18 과 달리 일반 레지스터는 복귀해도 값이 지워지지 않는다. */
++    if (rn != 18 && rn != 31 && !REGn_sig( rn, sigcontext ))
++    {
++        const UINT *pc = (const UINT *)PC_sig(sigcontext);
++        int i;
++
++        /* mov xN, x18  ==  orr xN, xzr, x18. 복사와 사용 사이에 다른 명령이
++         * 끼어 있을 수 있어 몇 칸 되짚는다(llvm-mingw 는 adrp 를 사이에 둔다). */
++        for (i = 1; i <= 8; i++)
++        {
++            UINT prev = pc[-i];
++            if (prev == (0xaa1203e0u | rn))
++            {
++                REGn_sig( rn, sigcontext ) = (ULONG_PTR)teb;
++                return TRUE;                         /* PC 는 그대로. 다시 실행한다 */
++            }
++            /* 사이 명령이 xN 을 바꿨을 수 있으면(`add x8, x8, #imm` 등) TEB 만 넣고 다시 실행하면 틀린 주소를 읽는다 —
++             * 튕기는 쪽이 낫다. 보수적으로: 목적 칸(비트 4:0)이 xN 이거나 LDP 의 둘째 목적(비트 14:10)이 xN 이면 포기. */
++            if ((prev & 0x1f) == rn) break;
++            if ((prev & 0x3a400000) == 0x28400000 && ((prev >> 10) & 0x1f) == rn) break;
++        }
++    }
++    if (rn != 18) return FALSE;
++
++    if ((instr & 0xffc00000) == 0xf9400000)          /* ldr xT, [x18, #imm*8] */
++    {
++        imm = ((instr >> 10) & 0xfff) * 8;
++        if (imm != addr) return FALSE;
++        if (rt != 31) REGn_sig( rt, sigcontext ) = *(const ULONG_PTR *)(teb + imm);
++    }
++    else if ((instr & 0xffc00000) == 0xb9400000)     /* ldr wT, [x18, #imm*4] */
++    {
++        imm = ((instr >> 10) & 0xfff) * 4;
++        if (imm != addr) return FALSE;
++        if (rt != 31) REGn_sig( rt, sigcontext ) = *(const UINT *)(teb + imm);
++    }
++    else return FALSE;
++
++    PC_sig(sigcontext) += 4;                         /* 명령을 대신 실행했으니 넘어간다 */
++    return TRUE;
++}
++#endif
++
++extern ULONG_PTR wow_guest_base;
++static void prof_name( ULONG_PTR addr, char *buf, size_t len );
++
+ static void segv_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
+ {
+     ucontext_t *sigcontext = _sigcontext;
+@@ -1136,6 +1326,92 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
+     EXCEPTION_RECORD rec = { .ExceptionAddress = (void *)PC_sig(sigcontext) };
+     DWORD64 esr = get_fault_esr( sigcontext );
+ 
++    /* fex32: macOS arm64 프로세스는 4GB 아래에 아무것도 없다. wow64 프로세스에서 호스트 코드가
++     * [64K, 4G) 를 건드리면 창으로 안 푼 게스트 포인터다 → 베이스 레지스터에 창 기준을 OR 하고 같은 명령을 다시 실행한다
++     * (일반 레지스터는 시그널 복귀 후에도 남는다. x18 만 지워진다). 고칠 곳을 찾을 수 있게 TRACE(seh) 로 남긴다. */
++    if (wow_guest_base && (ULONG_PTR)siginfo->si_addr < 0x100000000ull && (ULONG_PTR)siginfo->si_addr >= 0x10000 &&
++        !(PC_sig( sigcontext ) & 3))
++    {
++        ULONG insn = *(ULONG *)PC_sig( sigcontext );
++        if ((insn & 0x0a000000) == 0x08000000)  /* 적재·저장 계열 */
++        {
++            unsigned int rn = (insn >> 5) & 31;
++            ULONG_PTR base = rn == 31 ? 0 : REGn_sig( rn, sigcontext );
++            ULONG_PTR addr = (ULONG_PTR)siginfo->si_addr;
++            if (rn != 31 && base >= 0x10000 && base < 0x100000000ull && addr - base + 0x10000 < 0x20000)
++            {
++                if (TRACE_ON(seh))
++                {
++                    char n1[256], n2[256];
++                    prof_name( PC_sig(sigcontext), n1, sizeof(n1) );
++                    prof_name( LR_sig(sigcontext), n2, sizeof(n2) );
++                    TRACE( "fex32 rebase x%u %p pc %s lr %s\n", rn, (void *)base, n1, n2 );
++                }
++                REGn_sig( rn, sigcontext ) = base | wow_guest_base;
++                {
++                    /* fex32b: WINESIGSTAT=1 이면 안전망 횟수를 1만 번마다(안 푼 포인터가 많은 곳 찾기) */
++                    static LONG rebase_count; static int rebase_stat = -1;
++                    if (rebase_stat < 0) rebase_stat = !!getenv( "WINESIGSTAT" );
++                    if (rebase_stat && (InterlockedIncrement( &rebase_count ) % 10000) == 0)
++                    {
++                        char n1[256], n2[256];
++                        prof_name( PC_sig(sigcontext), n1, sizeof(n1) );
++                        prof_name( LR_sig(sigcontext), n2, sizeof(n2) );
++                        fprintf( stderr, "fex32stat: rebase n=%ld pc %s lr %s\n", (long)rebase_count, n1, n2 );
++                    }
++                }
++                return;
++            }
++        }
++        if (TRACE_ON(seh))
++        {
++            char n1[256], n2[256];
++            prof_name( PC_sig(sigcontext), n1, sizeof(n1) );
++            prof_name( LR_sig(sigcontext), n2, sizeof(n2) );
++            TRACE( "fex32 SEGV low addr %p pc %s lr %s\n", siginfo->si_addr, n1, n2 );
++        }
++    }
++
++#if defined(__APPLE__)
++    {
++        /* WINESIGSTAT=1 : 시그널 폭풍 진단용 — 5만 번마다 한 줄 */
++        static LONG sig_count; static int sig_stat = -1;
++        if (sig_stat < 0) sig_stat = !!getenv( "WINESIGSTAT" );
++        if (sig_stat && (InterlockedIncrement( &sig_count ) % 50000) == 0)
++        {
++            unsigned long long tsd; void *slot;
++            __asm__ __volatile__( "mrs %0, tpidrro_el0" : "=r" (tsd) );
++            slot = ((void **)(tsd & ~7ull))[WINE_MACOS_TEB_TSD_SLOT];
++            {
++                const UINT *ip = (const UINT *)PC_sig(sigcontext);
++                fprintf( stderr, "sigstat: tid=%04x n=%ld sig=%d pc=%p addr=%p esr=%llx x18=%p teb=%p slot=%p tsd=%llx code=%08x %08x %08x %08x [%08x] %08x\n", data ? data->tid : 0, (long)sig_count, signal,
++                         (void *)PC_sig(sigcontext), siginfo->si_addr, (unsigned long long)esr, (void *)REGn_sig(18, sigcontext), data ? (void *)data->teb : NULL, slot, tsd,
++                         ip[-4], ip[-3], ip[-2], ip[-1], ip[0], ip[1] );
++            }
++        }
++    }
++    /* 코코아 메인 스레드는 초기 스레드라 thread_data 키가 남아 있지만 teb 가 비어 있다. 그걸 Wine 스레드로 보고
++     * setup_raise_exception 에 들어가면 data->teb 에서 다시 폴트 → 무한 반복(100% CPU, 2026-09-25 실측). */
++    if (data && !data->teb) data = NULL;
++    if (!data)
++    {
++        /* Wine 스레드가 아니거나(프레임워크 작업 스레드) TEB 슬롯이 이미 비워진 스레드의 폴트.
++         * 아래 코드는 data 를 참조하므로 여기서 계속 가면 핸들러 안에서 또 폴트가 나고,
++         * SIGSEGV 가 막힌 상태라 커널이 같은 명령을 끝없이 재실행한다(실측). 기본 동작으로 죽인다. */
++        fprintf( stderr, "wine: TEB 없는 스레드에서 치명적 시그널 %d pc=%p addr=%p lr=%p\n", signal,
++                 (void *)PC_sig(sigcontext), siginfo->si_addr, (void *)LR_sig(sigcontext) );
++        {
++            struct sigaction dfl = { .sa_handler = SIG_DFL };
++            sigaction( signal, &dfl, NULL );
++        }
++        return;
++    }
++    if (fixup_lost_x18( data, sigcontext, siginfo )) return;
++    /* MAP_JIT 아레나(FEX 코드 버퍼)의 W^X 폴트는 스레드별 토글로 끝난다 */
++    if (virtual_handle_jit_fault( siginfo->si_addr, (void *)PC_sig(sigcontext), (void *)REGn_sig(30, sigcontext),
++                                  PC_sig(sigcontext) == (ULONG_PTR)siginfo->si_addr )) return;
++#endif
++
+     switch (ESR_ELx_EC(esr))
+     {
+     case ESR_ELx_EC_IABT_LOW:
+@@ -1200,6 +1476,13 @@ static void ill_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
+         }
+     }
+ 
++    if (TRACE_ON(seh))
++    {
++        char n1[256], n2[256];
++        prof_name( PC_sig(sigcontext), n1, sizeof(n1) );
++        prof_name( LR_sig(sigcontext), n2, sizeof(n2) );
++        TRACE( "fex32 SIGILL pc %s lr %s\n", n1, n2 );
++    }
+     save_context( &context, sigcontext );
+     setup_raise_exception( data, sigcontext, &rec, &context );
+ }
+@@ -1219,6 +1502,13 @@ static void trap_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
+                              .ExceptionAddress = (void *)PC_sig(sigcontext) };
+     DWORD64 esr = 0;
+ 
++    if (TRACE_ON(seh))
++    {
++        char n1[256], n2[256];
++        prof_name( PC_sig(sigcontext), n1, sizeof(n1) );
++        prof_name( LR_sig(sigcontext), n2, sizeof(n2) );
++        TRACE( "fex32 SIGTRAP pc %s lr %s\n", n1, n2 );
++    }
+     save_context( &context, sigcontext );
+ 
+ #ifdef linux
+@@ -1417,6 +1707,10 @@ static void usr1_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
+ {
+     ucontext_t *sigcontext = _sigcontext;
+     struct thread_data *data = get_thread_data();
++
++    if (data && data->vm_lock_depth)
++        ERR( "SIGUSR1(정지) 가 잠금 깊이 %d (마지막 잡은 곳 %p) 인 스레드에 왔다 pc %p sp %p\n",
++             data->vm_lock_depth, data->vm_lock_site, (void *)PC_sig(sigcontext), (void *)SP_sig(sigcontext) );
+     CHPE_V2_CPU_AREA_INFO *chpe;
+     CONTEXT context;
+ 
+@@ -1565,6 +1859,159 @@ void signal_free_thread( TEB *teb )
+ /**********************************************************************
+  *		signal_init_process
+  */
++#ifdef __APPLE__
++/***********************************************************************
++ * WINEPROF=<ms> : 호스트 수준 프로파일러. ITIMER_PROF(사용자+시스템 시간)로 SIGPROF 를
++ * 받아 잡힌 스레드의 PC/LR 을 모으고, 500 틱마다 상위 항목을 dladdr 이름과 함께 찍는다.
++ * 특권 없이(sample/lldb 는 인증 프롬프트에 막힌다) 어느 스레드가 어디서 도는지 보기 위한 것.
++ */
++#define PROF_SLOTS 64
++static struct { ULONG_PTR pc, lr; unsigned int count; } prof_slots[PROF_SLOTS];
++static LONG prof_ticks;
++
++static void prof_name( ULONG_PTR addr, char *buf, size_t len )
++{
++    Dl_info info;
++    if (dladdr( (void *)addr, &info ) && info.dli_sname)
++        snprintf( buf, len, "%s+0x%lx", info.dli_sname, (unsigned long)(addr - (ULONG_PTR)info.dli_saddr) );
++    else if (dladdr( (void *)addr, &info ) && info.dli_fname)
++        snprintf( buf, len, "%s+0x%lx", strrchr( info.dli_fname, '/' ) ? strrchr( info.dli_fname, '/' ) + 1 : info.dli_fname,
++                  (unsigned long)(addr - (ULONG_PTR)info.dli_fbase) );
++    else
++        snprintf( buf, len, "%p", (void *)addr );
++}
++
++static void prof_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
++{
++    ucontext_t *sigcontext = _sigcontext;
++    ULONG_PTR pc = PC_sig(sigcontext), lr = LR_sig(sigcontext);
++    struct thread_data *data = get_thread_data();
++    unsigned int i, free_slot = PROF_SLOTS;
++    LONG n;
++
++    for (i = 0; i < PROF_SLOTS; i++)
++    {
++        if (prof_slots[i].count && prof_slots[i].pc == pc && prof_slots[i].lr == lr) { prof_slots[i].count++; break; }
++        if (!prof_slots[i].count && free_slot == PROF_SLOTS) free_slot = i;
++    }
++    if (i == PROF_SLOTS && free_slot < PROF_SLOTS)
++    {
++        prof_slots[free_slot].pc = pc; prof_slots[free_slot].lr = lr; prof_slots[free_slot].count = 1;
++    }
++    n = InterlockedIncrement( &prof_ticks );
++    if (n % 500 == 0)
++    {
++        char a[160], b[160];
++        fprintf( stderr, "prof: %ld 틱 (이 틱 tid=%04x pc=%p) 상위 항목:\n", (long)n, data ? data->tid : 0, (void *)pc );
++        for (i = 0; i < PROF_SLOTS; i++)
++        {
++            if (prof_slots[i].count * 20 < (unsigned int)n) continue;   /* 5% 이상만 */
++            prof_name( prof_slots[i].pc, a, sizeof a ); prof_name( prof_slots[i].lr, b, sizeof b );
++            fprintf( stderr, "prof:   %5u  pc=%p %s  lr=%p %s\n", prof_slots[i].count, (void *)prof_slots[i].pc, a, (void *)prof_slots[i].lr, b );
++        }
++    }
++}
++
++/* 감시 스레드: 5초마다 같은 태스크의 mach 스레드를 훑어 시스템시간이 가장 많이 는 스레드의
++ * 사용자 상태(커널 진입 시점의 PC/LR)를 찍는다. 커널 안에서 도는 스레드도 이걸로 보인다. */
++static void segv_handler( int signal, siginfo_t *siginfo, void *_sigcontext );
++static void *prof_watchdog( void *arg )
++{
++    static struct { thread_t th; uint64_t sys; uint64_t usr; } prev[256];
++    static unsigned int prev_count;
++    for (;;)
++    {
++        thread_act_array_t threads; mach_msg_type_number_t count, i;
++        sleep( 5 );
++        if (task_threads( mach_task_self(), &threads, &count )) continue;
++        for (i = 0; i < count; i++)
++        {
++            thread_basic_info_data_t bi; mach_msg_type_number_t bc = THREAD_BASIC_INFO_COUNT;
++            uint64_t sys, usr, dsys = 0, dusr = 0; unsigned int j;
++            if (thread_info( threads[i], THREAD_BASIC_INFO, (thread_info_t)&bi, &bc )) continue;
++            sys = (uint64_t)bi.system_time.seconds * 1000000 + bi.system_time.microseconds;
++            usr = (uint64_t)bi.user_time.seconds * 1000000 + bi.user_time.microseconds;
++            for (j = 0; j < prev_count; j++) if (prev[j].th == threads[i]) { dsys = sys - prev[j].sys; dusr = usr - prev[j].usr; break; }
++            if (j == prev_count && prev_count < 256) { prev[prev_count].th = threads[i]; prev[prev_count].sys = sys; prev[prev_count].usr = usr; prev_count++; }
++            else if (j < prev_count) { prev[j].sys = sys; prev[j].usr = usr; }
++            if (dsys + dusr > 2000000 || getenv( "WINEPROF_ALL" ))   /* 5초 중 2초 이상 (WINEPROF_ALL=1 이면 전부) */
++            {
++                arm_thread_state64_t st; mach_msg_type_number_t sc = ARM_THREAD_STATE64_COUNT;
++                char a[160], b[160];
++                if (thread_get_state( threads[i], ARM_THREAD_STATE64, (thread_state_t)&st, &sc ) == KERN_SUCCESS)
++                {
++                    ULONG_PTR pc = arm_thread_state64_get_pc( st ), lr = arm_thread_state64_get_lr( st );
++                    prof_name( pc, a, sizeof a ); prof_name( lr, b, sizeof b );
++                    thread_extended_info_data_t ei; mach_msg_type_number_t ec = THREAD_EXTENDED_INFO_COUNT;
++                    const char *name = "?";
++                    if (!thread_info( threads[i], THREAD_EXTENDED_INFO, (thread_info_t)&ei, &ec )) name = ei.pth_name;
++                    fprintf( stderr, "watchdog: pid=%u mach 스레드 %u '%s' 상태=%d sys+%llums usr+%llums pc=%p %s lr=%p %s x0=%llx x1=%llx x2=%llx x8=%llx x16=%llx x18=%llx x19=%llx x20=%llx x21=%llx x22=%llx x23=%llx x24=%llx sp=%llx\n",
++                             getpid(), threads[i], name, bi.run_state, (unsigned long long)dsys / 1000, (unsigned long long)dusr / 1000,
++                             (void *)pc, a, (void *)lr, b, (unsigned long long)st.__x[0], (unsigned long long)st.__x[1],
++                             (unsigned long long)st.__x[2], (unsigned long long)st.__x[8], (unsigned long long)st.__x[16], (unsigned long long)st.__x[18],
++                             (unsigned long long)st.__x[19], (unsigned long long)st.__x[20], (unsigned long long)st.__x[21], (unsigned long long)st.__x[22],
++                             (unsigned long long)st.__x[23], (unsigned long long)st.__x[24], (unsigned long long)arm_thread_state64_get_sp( st ) );
++                    {
++                        /* x0/x19 가 가리키는 32비트 값 (스핀락 상태 등) — 자기 태스크라 특권 불필요 */
++                        uint32_t v0 = 0, v19 = 0; mach_vm_size_t outsz;
++                        int ok0 = mach_vm_read_overwrite( mach_task_self(), st.__x[0], 4, (mach_vm_address_t)&v0, &outsz ) == KERN_SUCCESS;
++                        int ok19 = mach_vm_read_overwrite( mach_task_self(), st.__x[19], 4, (mach_vm_address_t)&v19, &outsz ) == KERN_SUCCESS;
++                        fprintf( stderr, "watchdog:   [x0]=%s%08x [x19]=%s%08x\n", ok0 ? "" : "?", v0, ok19 ? "" : "?", v19 );
++                    }
++                    if (getenv( "WINEPROF_BT" ))   /* 프레임포인터 사슬로 12단계 역추적 */
++                    {
++                        ULONG_PTR fp = arm_thread_state64_get_fp( st ), frame[2]; mach_vm_size_t outsz; int k;
++                        for (k = 0; k < 12 && fp > 0x10000; k++)
++                        {
++                            if (mach_vm_read_overwrite( mach_task_self(), fp, 16, (mach_vm_address_t)frame, &outsz ) != KERN_SUCCESS) break;
++                            prof_name( frame[1], a, sizeof a );
++                            fprintf( stderr, "watchdog:     #%d %p %s\n", k, (void *)frame[1], a );
++                            if (frame[0] <= fp) break;
++                            fp = frame[0];
++                        }
++                    }
++                    /* segv_handler 안에서 멈춘 스레드면 x19 = 원래 폴트의 ucontext, x21 = siginfo */
++                    if (pc >= (ULONG_PTR)segv_handler && pc < (ULONG_PTR)segv_handler + 0x1000 && st.__x[19] > 0x10000)
++                    {
++                        ucontext_t *uc = (ucontext_t *)st.__x[19]; siginfo_t *si = (siginfo_t *)st.__x[21];
++                        prof_name( PC_sig(uc), a, sizeof a ); prof_name( LR_sig(uc), b, sizeof b );
++                        fprintf( stderr, "watchdog:   원래 폴트 pc=%p %s lr=%p %s sp=%p x18=%llx x0=%llx x8=%llx | si_signo=%d si_code=%d si_addr=%p\n",
++                                 (void *)PC_sig(uc), a, (void *)LR_sig(uc), b, (void *)SP_sig(uc), (unsigned long long)REGn_sig(18, uc),
++                                 (unsigned long long)REGn_sig(0, uc), (unsigned long long)REGn_sig(8, uc),
++                                 si > (siginfo_t *)0x10000 ? si->si_signo : -1, si > (siginfo_t *)0x10000 ? si->si_code : -1, si > (siginfo_t *)0x10000 ? si->si_addr : NULL );
++                    }
++                }
++            }
++            mach_port_deallocate( mach_task_self(), threads[i] );
++        }
++        vm_deallocate( mach_task_self(), (vm_address_t)threads, count * sizeof(*threads) );
++    }
++    return NULL;
++}
++
++static void prof_init(void)
++{
++    const char *env = getenv( "WINEPROF" );
++    struct sigaction sa;
++    struct itimerval it;
++    int ms;
++
++    if (!env || !(ms = atoi( env ))) return;
++    sa.sa_sigaction = prof_handler;
++    sa.sa_flags = SA_SIGINFO | SA_RESTART | SA_ONSTACK;
++    sigemptyset( &sa.sa_mask );
++    sigaction( SIGPROF, &sa, NULL );
++    it.it_interval.tv_sec = it.it_value.tv_sec = ms / 1000;
++    it.it_interval.tv_usec = it.it_value.tv_usec = (ms % 1000) * 1000;
++    setitimer( ITIMER_PROF, &it, NULL );
++    {
++        pthread_t t; pthread_attr_t attr;
++        pthread_attr_init( &attr ); pthread_attr_setdetachstate( &attr, PTHREAD_CREATE_DETACHED );
++        pthread_create( &t, &attr, prof_watchdog, NULL );
++    }
++}
++#endif
++
+ void signal_init_process( TEB *teb )
+ {
+     struct sigaction sig_act;
+@@ -1594,6 +2041,9 @@ void signal_init_process( TEB *teb )
+     if (sigaction( SIGSEGV, &sig_act, NULL ) == -1) goto error;
+     sig_act.sa_sigaction = ill_handler;
+     if (sigaction( SIGILL, &sig_act, NULL ) == -1) goto error;
++#ifdef __APPLE__
++    prof_init();
++#endif
+     return;
+ 
+  error:
+@@ -1658,6 +2108,8 @@ void init_syscall_frame( LPTHREAD_START_ROUTINE entry, void *arg, TEB *teb )
+ 
+     if (data->suspend)
+     {
++        if (data->vm_lock_depth)
++            ERR( "새 스레드가 잠금 깊이 %d (마지막 잡은 곳 %p) 인 채로 시작 정지 대기\n", data->vm_lock_depth, data->vm_lock_site );
+         context.ContextFlags |= CONTEXT_EXCEPTION_REPORTING | CONTEXT_EXCEPTION_ACTIVE;
+         wait_suspend( &context );
+     }
+@@ -1716,13 +2168,29 @@ __ASM_GLOBAL_FUNC( signal_start_thread,
+                    "b " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_return") )
+ 
+ 
++
++#if defined(__APPLE__)
++/* macOS 는 x18 을 예외 복귀마다(선점 포함) 0 으로 지운다. 윈도우 ABI 의 "x18 = TEB" 를
++ * 지킬 수 없으므로, PE 에서 넘어오는 지점마다 TPIDRRO_EL0 의 TSD 슬롯에서 다시 채운다.
++ * 그 사이에 선점이 끼어 x18 이 지워지는 경우는 segv_handler 가 되살린다. */
++/* TEB 를 지정한 레지스터에 담는다. x18 은 선점 때마다 지워지므로 쓰지 않는다. */
++#define LOAD_TEB(r) \
++    "mrs " r ", tpidrro_el0\n\t" \
++    "and " r ", " r ", #~7\n\t" \
++    "ldr " r ", [" r ", #6136]\n\t"   /* WINE_MACOS_TEB_TSD_SLOT * 8 */
++#define LOAD_TEB_X18 LOAD_TEB("x17")
++#else
++#define LOAD_TEB_X18
++#endif
++
+ /***********************************************************************
+  *           __wine_syscall_dispatcher
+  */
+ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
+                    "hint 34\n\t" /* bti c */
+-                   "ldr x10, [x18, #0x378]\n\t" /* thread_data->syscall_frame */
+-                   "stp x18, x19, [x10, #0x90]\n\t"
++                   LOAD_TEB_X18
++                   "ldr x10, [x17, #0x378]\n\t" /* thread_data->syscall_frame */
++                   "stp x17, x19, [x10, #0x90]\n\t"  /* CONTEXT.X18 자리에 TEB 를 넣는다 */
+                    "stp x20, x21, [x10, #0xa0]\n\t"
+                    "stp x22, x23, [x10, #0xb0]\n\t"
+                    "stp x24, x25, [x10, #0xc0]\n\t"
+@@ -1735,7 +2203,16 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
+                    "str w8, [x10, #0x120]\n\t"
+                    "mrs x12, FPCR\n\t"
+                    "str w12, [x10, #0x128]\n\t"
+-                   "mrs x12, FPSR\n\t"
++                   /* Ember: FEX 가 AFP(AH|NEP) 를 켠 채 네이티브(DXMT)로 나온 경우 유닉스 쪽(macOS 프레임워크)용으로 끈다 — 돌아갈 때 되돌림.
++                    * ntdll 표(0번) syscall 은 건너뛴다: ntdll.so 에는 부동소수 명령이 없고(objdump 로 0개 확인), QPC·대기 같은
++                    * FEX 빠른 API 가 여기서 msr 두 번(16ns)을 다시 내게 된다. win32u(Cocoa)·유닉스 호출(Metal)만 끈다. */
++                   "tst w8, #0x3000\n\t"
++                   "b.eq 9f\n\t"
++                   "tst x12, #6\n\t"
++                   "b.eq 9f\n\t"
++                   "bic x12, x12, #6\n\t"
++                   "msr FPCR, x12\n"
++                   "9:\tmrs x12, FPSR\n\t"
+                    "str w12, [x10, #0x12c]\n\t"
+                    "stp q0,  q1,  [x10, #0x130]\n\t"
+                    "stp q2,  q3,  [x10, #0x150]\n\t"
+@@ -1774,7 +2251,7 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
+                    __ASM_CFI_CFA_IS_AT2(x22, 0x98, 0x02) /* frame->syscall_cfa */
+                    "and x20, x8, #0xfff\n\t"    /* syscall number */
+                    "ubfx x21, x8, #12, #2\n\t"  /* syscall table number */
+-                   "ldr x16, [x18, #0x370]\n\t" /* thread_data->syscall_table */
++                   "ldr x16, [x17, #0x370]\n\t" /* thread_data->syscall_table */
+                    "add x21, x16, x21, lsl #5\n\t"
+                    "ldr x16, [x21, #16]\n\t"    /* table->ServiceLimit */
+                    "cmp x20, x16\n\t"
+@@ -1792,7 +2269,7 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
+                    "cbnz x9, 1b\n"
+                    "2:\tldr x16, [x21]\n\t"     /* table->ServiceTable */
+                    "ldr x23, [x16, x20, lsl 3]\n\t"
+-                   "ldr w11, [x18, #0x380]\n\t" /* thread_data->syscall_trace */
++                   "ldr w11, [x17, #0x380]\n\t" /* thread_data->syscall_trace */
+                    "cbnz x11, " __ASM_LOCAL_LABEL("trace_syscall") "\n\t"
+                    "blr x23\n\t"
+                    "mov sp, x22\n"
+@@ -1843,7 +2320,12 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
+                    "msr FPCR, x17\n\t"
+                    "ldr w17, [sp, #0x12c]\n\t"
+                    "msr FPSR, x17\n"
+-                   "1:\tldp x16, x17, [sp, #0x100]\n\t"
++                   "1:\tldr w17, [sp, #0x128]\n\t"  /* Ember: 들어올 때 끈 AFP 되돌리기(바뀐 경우만 msr) */
++                   "mrs x16, FPCR\n\t"
++                   "cmp w16, w17\n\t"
++                   "b.eq 9f\n\t"
++                   "msr FPCR, x17\n"
++                   "9:\tldp x16, x17, [sp, #0x100]\n\t"
+                    "msr NZCV, x17\n\t"
+                    "ldp x30, x17, [sp, #0xf0]\n\t"
+                    /* switch to user stack */
+@@ -1882,7 +2364,8 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher,
+                    "b " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_return") )
+ 
+ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher_return,
+-                   "ldr w11, [x18, #0x380]\n\t" /* thread_data->syscall_trace */
++                   LOAD_TEB_X18
++                   "ldr w11, [x17, #0x380]\n\t" /* thread_data->syscall_trace */
+                    "cbnz x11, " __ASM_LOCAL_LABEL("trace_syscall_ret") "\n\t"
+                    "b " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_return") )
+ 
+@@ -1892,8 +2375,9 @@ __ASM_GLOBAL_FUNC( __wine_syscall_dispatcher_return,
+  */
+ __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
+                    "hint 34\n\t" /* bti c */
+-                   "ldr x10, [x18, #0x378]\n\t" /* thread_data->syscall_frame */
+-                   "stp x18, x19, [x10, #0x90]\n\t"
++                   LOAD_TEB_X18
++                   "ldr x10, [x17, #0x378]\n\t" /* thread_data->syscall_frame */
++                   "stp x17, x19, [x10, #0x90]\n\t"  /* CONTEXT.X18 자리에 TEB 를 넣는다 */
+                    "stp x20, x21, [x10, #0xa0]\n\t"
+                    "stp x22, x23, [x10, #0xb0]\n\t"
+                    "stp x24, x25, [x10, #0xc0]\n\t"
+@@ -1907,8 +2391,15 @@ __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
+                    "stp x30, x9, [x10, #0xf0]\n\t"
+                    "mrs x9, NZCV\n\t"
+                    "stp x30, x9, [x10, #0x100]\n\t"
++                   /* Ember: syscall 과 같이 AFP 끄기(FEX 가 DXMT 로 FPCR 전환 없이 나온 경우) */
++                   "mrs x9, FPCR\n\t"
++                   "str w9, [x10, #0x128]\n\t"
++                   "tst x9, #6\n\t"
++                   "b.eq 9f\n\t"
++                   "bic x9, x9, #6\n\t"
++                   "msr FPCR, x9\n"
+                    /* switch to kernel stack */
+-                   "mov sp, x10\n\t"
++                   "9:\tmov sp, x10\n\t"
+                    /* we're now on the kernel stack, stitch unwind info with previous frame */
+                    __ASM_CFI_CFA_IS_AT2(sp, 0x98, 0x02) /* frame->syscall_cfa */
+                    __ASM_CFI(".cfi_offset 29, -0xc0\n\t")
+@@ -1932,7 +2423,12 @@ __ASM_GLOBAL_FUNC( __wine_unix_call_dispatcher,
+                    "ldr w16, [sp, #0x10c]\n\t"  /* frame->restore_flags */
+                    "cbnz w16, " __ASM_LOCAL_LABEL("__wine_syscall_dispatcher_return") "\n\t"
+                    __ASM_CFI_CFA_IS_AT2(sp, 0x98, 0x02) /* frame->syscall_cfa */
+-                   "ldp x18, x19, [sp, #0x90]\n\t"
++                   "ldr w17, [sp, #0x128]\n\t"  /* Ember: AFP 되돌리기 */
++                   "mrs x16, FPCR\n\t"
++                   "cmp w16, w17\n\t"
++                   "b.eq 9f\n\t"
++                   "msr FPCR, x17\n"
++                   "9:\tldp x18, x19, [sp, #0x90]\n\t"
+                    "ldp x16, x17, [sp, #0xf8]\n\t"
+                    /* switch to user stack */
+                    "mov sp, x16\n\t"
+diff --git a/dlls/ntdll/unix/socket.c b/dlls/ntdll/unix/socket.c
+index 2b48734..5d6620c 100644
+--- a/dlls/ntdll/unix/socket.c
++++ b/dlls/ntdll/unix/socket.c
+@@ -92,7 +92,13 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(winsock);
+ 
+-#define u64_to_user_ptr(u) ((void *)(uintptr_t)(u))
++/* fex32: 32비트 ws2_32 가 ULONGLONG 칸에 넣은 포인터는 게스트 주소 → 창으로 */
++static inline void *u64_to_user_ptr_fex32( ULONGLONG u )
++{
++    if (u && u < 0x100000000ull && in_wow64_call()) return wine_wow64_g2h( (unsigned int)u );
++    return (void *)(uintptr_t)u;
++}
++#define u64_to_user_ptr(u) u64_to_user_ptr_fex32(u)
+ 
+ union unix_sockaddr
+ {
+@@ -2632,7 +2638,18 @@ NTSTATUS sock_ioctl( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc
+ #endif
+ 
+         case IOCTL_AFD_WINE_GET_TCP_NODELAY:
+-            return do_getsockopt( handle, io, IPPROTO_TCP, TCP_NODELAY, out_buffer, out_size );
++        {
++            NTSTATUS st = do_getsockopt( handle, io, IPPROTO_TCP, TCP_NODELAY, out_buffer, out_size );
++#ifdef __APPLE__
++            /* Ember: macOS 는 켜진 TCP_NODELAY 를 1 이 아니라 내부 플래그 값(4)으로 돌려준다 — 윈도우처럼 0/1 로. */
++            if (!st && out_buffer && out_size)
++            {
++                if (out_size >= sizeof(int)) *(int *)out_buffer = !!*(int *)out_buffer;
++                else *(unsigned char *)out_buffer = !!*(unsigned char *)out_buffer;
++            }
++#endif
++            return st;
++        }
+ 
+         case IOCTL_AFD_WINE_SET_TCP_NODELAY:
+             return do_setsockopt( handle, io, IPPROTO_TCP, TCP_NODELAY, in_buffer, in_size );
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+index 0127a05..d74f316 100644
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -56,6 +56,8 @@
+ #include <time.h>
+ #ifdef __APPLE__
+ # include <mach/mach_time.h>
++# include <mach/mach.h>
++# include <mach/thread_switch.h>
+ #endif
+ #ifdef HAVE_KQUEUE
+ # include <sys/event.h>
+@@ -74,6 +76,31 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(sync);
+ 
++#ifdef __APPLE__
++/* Ember perfpush2: 맥 커널은 스레드의 시간제한 잠을 다른 타이머와 몰아 깨우려고(timer coalescing) 기한보다 늦게 깨운다.
++ * 실측(M4 Pro, macOS 27): select·nanosleep 은 대기의 1/8~1/2(최대 7.5ms), __ulock_wait 는 1/8(최대 1ms) 늦다.
++ * Wine 의 Sleep(15) 가 평균 +1.4~2.4ms, p99 +3.8ms 늦어 Sleep 으로 프레임을 맞추는 게임이 박자를 놓쳤다.
++ *  - 깨울 수 없는 잠(NtDelayExecution non-alertable): 스레드마다 kqueue 하나, EVFILT_TIMER NOTE_CRITICAL(몰아 깨우기 제외) → +0.02ms.
++ *  - 객체·주소 대기의 시간제한: 남은 시간의 3/4 만 자고 다시 잰다(늦음이 남은 시간의 1/8 이하라 기한을 안 넘고 4~5번이면 수렴).
++ * EMBER_TIMER=0 이면 예전대로. */
++static int ember_timer_mode = -1;
++static inline int ember_timer_enabled(void)
++{
++    if (ember_timer_mode < 0)
++    {
++        const char *e = getenv( "EMBER_TIMER" );
++        ember_timer_mode = (e && e[0] == '0') ? 0 : 1;
++    }
++    return ember_timer_mode;
++}
++/* 시간제한 대기를 나눠 잘 때 이번에 잘 길이(ns). 250us 이하는 그대로(늦음 30us 안쪽). */
++static inline unsigned long long ember_staged_ns( unsigned long long ns )
++{
++    if (ns > 250000 && ember_timer_enabled()) ns -= ns / 4;
++    return ns;
++}
++#endif
++
+ HANDLE keyed_event = 0;
+ int inproc_device_fd = -1;
+ 
+@@ -449,6 +476,548 @@ static NTSTATUS linux_wait_objs( int device, DWORD count, const int *objs, WAIT_
+     return errno_to_status( errno );
+ }
+ 
++#elif defined(__APPLE__)   /* macOS: 공유 메모리 + __ulock 으로 직접 구현한다 */
++
++#include <sys/mman.h>
++#include "wine/inproc_sync_macos.h"
++
++extern int __ulock_wait( uint32_t operation, void *addr, uint64_t value, uint32_t timeout_us );
++extern int __ulock_wake( uint32_t operation, void *addr, uint64_t wake_value );
++#define UL_COMPARE_AND_WAIT_SHARED 3
++#define ULF_WAKE_ALL               0x00000100
++
++/* fd 하나에 공유 메모리 한 장이 붙는다. 매번 mmap 하면 느리니 표에 담아 둔다.
++ * fd 번호로 바로 찾도록 해서 충돌도, 표가 꽉 차는 일도 없게 한다.
++ *
++ * Ember perf2: 읽기 경로는 잠금 없이 간다. 전에는 SetEvent/Wait 마다 전역 뮤텍스를 잡아
++ * 스레드가 많은 게임(수백 개 동기화 호출/ms)에서 캐시 라인 핑퐁이 났다.
++ *  - 표는 2단(256칸 페이지)이고 한 번 만든 페이지는 없애지 않는다 → 포인터를 잠금 없이 읽어도 안전.
++ *  - 칸은 mmap 이 끝난 뒤 release 로 실리고 acquire 로 읽는다.
++ *  - 잠금은 빈 칸을 채울 때(mmap)와 지울 때(forget)만 잡는다.
++ *  - fd 재사용 규칙은 그대로: release_inproc_sync 가 close() 직전에 forget 한다. 호출자는 그 fd 의
++ *    참조를 쥔 채 여기 오므로 forget 과 겹치지 않는다(예전에도 반환 뒤에는 잠금 없이 썼다). */
++#define MACOS_SYNC_DIR_BITS  8
++#define MACOS_SYNC_DIR_SIZE  (1 << MACOS_SYNC_DIR_BITS)
++#define MACOS_SYNC_NDIRS     4096                           /* fd < 1M */
++static struct macos_sync_state **macos_sync_dirs[MACOS_SYNC_NDIRS];
++static pthread_mutex_t macos_sync_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
++
++static struct macos_sync_state *macos_sync_map( int fd )
++{
++    struct macos_sync_state **dir, *state;
++    void *map;
++
++    if (fd < 0 || fd >= MACOS_SYNC_NDIRS * MACOS_SYNC_DIR_SIZE) return NULL;
++    if ((dir = __atomic_load_n( &macos_sync_dirs[fd >> MACOS_SYNC_DIR_BITS], __ATOMIC_ACQUIRE )) &&
++        (state = __atomic_load_n( &dir[fd & (MACOS_SYNC_DIR_SIZE - 1)], __ATOMIC_ACQUIRE )))
++        return state;
++
++    pthread_mutex_lock( &macos_sync_cache_mutex );
++    if (!(dir = macos_sync_dirs[fd >> MACOS_SYNC_DIR_BITS]))
++    {
++        /* malloc 이 아니라 mmap: 이 함수는 시스템 APC(시그널 문맥)에서도 불릴 수 있다 */
++        map = mmap( NULL, MACOS_SYNC_DIR_SIZE * sizeof(*dir), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0 );
++        if (map == MAP_FAILED)
++        {
++            pthread_mutex_unlock( &macos_sync_cache_mutex );
++            return NULL;
++        }
++        dir = map;
++        __atomic_store_n( &macos_sync_dirs[fd >> MACOS_SYNC_DIR_BITS], dir, __ATOMIC_RELEASE );
++    }
++    if (!(state = dir[fd & (MACOS_SYNC_DIR_SIZE - 1)]))
++    {
++        map = mmap( NULL, MACOS_SYNC_MAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
++        state = map == MAP_FAILED ? NULL : map;
++        __atomic_store_n( &dir[fd & (MACOS_SYNC_DIR_SIZE - 1)], state, __ATOMIC_RELEASE );
++    }
++    pthread_mutex_unlock( &macos_sync_cache_mutex );
++    return state;
++}
++
++/* fd 번호는 닫히면 곧바로 다른 객체에 다시 쓰인다.
++ * 닫는 순간 표에서 지우지 않으면 엉뚱한 공유 메모리를 보게 된다. */
++static void macos_sync_forget( int fd )
++{
++    struct macos_sync_state **dir, *state;
++
++    if (fd < 0 || fd >= MACOS_SYNC_NDIRS * MACOS_SYNC_DIR_SIZE) return;
++    if (!(dir = __atomic_load_n( &macos_sync_dirs[fd >> MACOS_SYNC_DIR_BITS], __ATOMIC_ACQUIRE ))) return;
++    pthread_mutex_lock( &macos_sync_cache_mutex );
++    if ((state = dir[fd & (MACOS_SYNC_DIR_SIZE - 1)]))
++    {
++        __atomic_store_n( &dir[fd & (MACOS_SYNC_DIR_SIZE - 1)], NULL, __ATOMIC_RELEASE );
++        munmap( state, MACOS_SYNC_MAP_SIZE );
++    }
++    pthread_mutex_unlock( &macos_sync_cache_mutex );
++}
++
++/* wineserver 가 프로세스마다 넘겨 준 전역 카운터. 객체 여러 개를 기다릴 때 쓴다. */
++static struct macos_sync_global *macos_global;
++static pthread_once_t macos_global_once = PTHREAD_ONCE_INIT;
++
++static void macos_global_init(void)
++{
++    void *map;
++
++    if (inproc_device_fd < 0) return;
++    map = mmap( NULL, MACOS_SYNC_MAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, inproc_device_fd, 0 );
++    if (map != MAP_FAILED) macos_global = map;
++}
++
++static struct macos_sync_global *macos_global_state(void)
++{
++    pthread_once( &macos_global_once, macos_global_init );
++    return macos_global;
++}
++
++/* 자는 사람이 없으면 깨우기 syscall 을 부르지 않는다.
++ * 게임이 쏟아내는 신호는 대부분 아무도 안 기다리는 객체로 간다. */
++static void macos_sync_wake( struct macos_sync_state *state )
++{
++    struct macos_sync_global *global = macos_global_state();
++
++    __atomic_add_fetch( &state->seq, 1, __ATOMIC_SEQ_CST );
++    if (__atomic_load_n( &state->waiters, __ATOMIC_SEQ_CST ))
++        __ulock_wake( UL_COMPARE_AND_WAIT_SHARED | ULF_WAKE_ALL, &state->seq, 0 );
++    if (!global) return;
++    /* 이 객체를 다중 대기 목록에 넣은 사람이 없으면 전역은 건드리지 않는다.
++     * 게임이 쏟아내는 신호 대부분이 여기서 syscall 없이 끝난다. */
++    if (!__atomic_load_n( &state->multi, __ATOMIC_SEQ_CST )) return;
++    __atomic_add_fetch( &global->seq, 1, __ATOMIC_SEQ_CST );
++    if (__atomic_load_n( &global->waiters, __ATOMIC_SEQ_CST ))
++        __ulock_wake( UL_COMPARE_AND_WAIT_SHARED | ULF_WAKE_ALL, &global->seq, 0 );
++}
++
++static NTSTATUS linux_release_semaphore_obj( int obj, ULONG count, ULONG *prev_count )
++{
++    struct macos_sync_state *state = macos_sync_map( obj );
++    unsigned int prev;
++
++    if (!state) return STATUS_NOT_IMPLEMENTED;
++    for (;;)
++    {
++        prev = __atomic_load_n( &state->count, __ATOMIC_SEQ_CST );
++        if (prev + count > state->max) return STATUS_SEMAPHORE_LIMIT_EXCEEDED;
++        if (__atomic_compare_exchange_n( &state->count, &prev, prev + count, 0,
++                                         __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST )) break;
++    }
++    if (prev_count) *prev_count = prev;
++    /* 자던 쪽은 0 일 때만 잔다. 0 에서 올라올 때만 깨우면 된다. */
++    if (!prev) macos_sync_wake( state );
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS linux_query_semaphore_obj( int obj, SEMAPHORE_BASIC_INFORMATION *info )
++{
++    struct macos_sync_state *state = macos_sync_map( obj );
++    if (!state) return STATUS_NOT_IMPLEMENTED;
++    info->CurrentCount = __atomic_load_n( &state->count, __ATOMIC_SEQ_CST );
++    info->MaximumCount = state->max;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS linux_set_event_obj( int obj, LONG *prev_state )
++{
++    struct macos_sync_state *state = macos_sync_map( obj );
++    unsigned int prev;
++    if (!state) return STATUS_NOT_IMPLEMENTED;
++    prev = __atomic_exchange_n( &state->count, 1, __ATOMIC_SEQ_CST );
++    if (prev_state) *prev_state = prev;
++    /* 이미 켜져 있었으면 새로 깰 사람이 없다. syscall 을 아낀다. */
++    if (!prev) macos_sync_wake( state );
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS linux_reset_event_obj( int obj, LONG *prev_state )
++{
++    struct macos_sync_state *state = macos_sync_map( obj );
++    unsigned int prev;
++    if (!state) return STATUS_NOT_IMPLEMENTED;
++    prev = __atomic_exchange_n( &state->count, 0, __ATOMIC_SEQ_CST );
++    if (prev_state) *prev_state = prev;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS linux_pulse_event_obj( int obj, LONG *prev_state )
++{
++    struct macos_sync_state *state = macos_sync_map( obj );
++    unsigned int prev;
++    if (!state) return STATUS_NOT_IMPLEMENTED;
++    prev = __atomic_exchange_n( &state->count, 1, __ATOMIC_SEQ_CST );
++    if (prev_state) *prev_state = prev;
++    macos_sync_wake( state );
++    __atomic_store_n( &state->count, 0, __ATOMIC_SEQ_CST );
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS linux_query_event_obj( int obj, EVENT_BASIC_INFORMATION *info )
++{
++    struct macos_sync_state *state = macos_sync_map( obj );
++    if (!state) return STATUS_NOT_IMPLEMENTED;
++    info->EventType = state->manual ? NotificationEvent : SynchronizationEvent;
++    info->EventState = __atomic_load_n( &state->count, __ATOMIC_SEQ_CST ) ? 1 : 0;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS linux_release_mutex_obj( int obj, LONG *prev_count )
++{
++    struct macos_sync_state *state = macos_sync_map( obj );
++    unsigned int count;
++
++    if (!state) return STATUS_NOT_IMPLEMENTED;
++    if (__atomic_load_n( &state->owner, __ATOMIC_SEQ_CST ) != (int)GetCurrentThreadId())
++        return STATUS_MUTANT_NOT_OWNED;
++    count = __atomic_load_n( &state->count, __ATOMIC_SEQ_CST );
++    /* 윈도우 의미의 이전 CurrentCount(1 - 재귀 횟수). 서버 경로와 같게(ntdll sync 테스트 428/433). */
++    if (prev_count) *prev_count = 1 - count;
++    if (count > 1) __atomic_store_n( &state->count, count - 1, __ATOMIC_SEQ_CST );
++    else
++    {
++        __atomic_store_n( &state->count, 0, __ATOMIC_SEQ_CST );
++        __atomic_store_n( &state->owner, 0, __ATOMIC_SEQ_CST );
++        macos_sync_wake( state );
++    }
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS linux_query_mutex_obj( int obj, MUTANT_BASIC_INFORMATION *info )
++{
++    struct macos_sync_state *state = macos_sync_map( obj );
++    if (!state) return STATUS_NOT_IMPLEMENTED;
++    info->CurrentCount = 1 - __atomic_load_n( &state->count, __ATOMIC_SEQ_CST );
++    info->OwnedByCaller = (__atomic_load_n( &state->owner, __ATOMIC_SEQ_CST )
++                           == (int)GetCurrentThreadId());
++    info->AbandonedState = __atomic_load_n( &state->abandoned, __ATOMIC_SEQ_CST ) != 0;
++    return STATUS_SUCCESS;
++}
++
++/* 로컬 대기 타이머: 만료했으면 1. consume 이면 만료를 소모한다(주기 타이머는 다음 만료로 넘긴다).
++ * 소모는 due 의 CAS 로 하므로 대기자가 여럿이어도 한 명만 가져간다. */
++static int macos_timer_expired( struct macos_sync_state *state, int consume )
++{
++    long long due = __atomic_load_n( &state->due, __ATOMIC_SEQ_CST );
++    LARGE_INTEGER now;
++
++    if (!due) return 0;
++    NtQuerySystemTime( &now );
++    if (now.QuadPart < due) return 0;
++    if (!consume) return 1;
++    for (;;)
++    {
++        unsigned int period = __atomic_load_n( &state->period_ms, __ATOMIC_SEQ_CST );
++        long long next = 0;
++        if (period)
++        {
++            long long p = (long long)period * 10000;
++            next = due + p * (1 + (now.QuadPart - due) / p);
++        }
++        if (__atomic_compare_exchange_n( &state->due, &due, next, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ))
++            return 1;
++        if (!due || now.QuadPart < due) return 0;   /* 다른 대기자가 먼저 가져갔다 */
++    }
++}
++
++/* 객체 하나를 잡아 본다. 잡았으면 0, 못 잡았으면 -1, 버려진 뮤텍스면 1. */
++static int macos_try_acquire( struct macos_sync_state *state )
++{
++    unsigned int prev;
++
++    switch (state->type)
++    {
++    case INPROC_SYNC_MUTEX:
++    {
++        int tid = GetCurrentThreadId(), zero = 0;
++        if (__atomic_load_n( &state->owner, __ATOMIC_SEQ_CST ) == tid)
++        {
++            __atomic_add_fetch( &state->count, 1, __ATOMIC_SEQ_CST );
++            return 0;
++        }
++        if (__atomic_compare_exchange_n( &state->owner, &zero, tid, 0,
++                                         __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ))
++        {
++            __atomic_store_n( &state->count, 1, __ATOMIC_SEQ_CST );
++            if (__atomic_exchange_n( &state->abandoned, 0, __ATOMIC_SEQ_CST )) return 1;
++            return 0;
++        }
++        return -1;
++    }
++    case INPROC_SYNC_SEMAPHORE:
++        for (;;)
++        {
++            prev = __atomic_load_n( &state->count, __ATOMIC_SEQ_CST );
++            if (!prev) return -1;
++            if (__atomic_compare_exchange_n( &state->count, &prev, prev - 1, 0,
++                                             __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST )) return 0;
++        }
++    default:   /* 이벤트 (대기 타이머 포함) */
++        if (state->manual)
++        {
++            /* 수동 타이머가 만료했으면 신호 상태로 남긴다(리셋은 SetWaitableTimer 가 한다) */
++            if (macos_timer_expired( state, 1 )) __atomic_store_n( &state->count, 1, __ATOMIC_SEQ_CST );
++            return __atomic_load_n( &state->count, __ATOMIC_SEQ_CST ) ? 0 : -1;
++        }
++        if (macos_timer_expired( state, 1 )) return 0;   /* 동기화 타이머 만료를 소모 */
++        prev = 1;
++        return __atomic_compare_exchange_n( &state->count, &prev, 0, 0,
++                                            __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ) ? 0 : -1;
++    }
++}
++
++/* 신호가 와 있는가. 잡지는 않는다. WaitAll 이 먼저 전부 확인할 때 쓴다. */
++static int macos_is_signaled( struct macos_sync_state *state )
++{
++    switch (state->type)
++    {
++    case INPROC_SYNC_MUTEX:
++    {
++        int owner = __atomic_load_n( &state->owner, __ATOMIC_SEQ_CST );
++        return !owner || owner == (int)GetCurrentThreadId();
++    }
++    case INPROC_SYNC_SEMAPHORE:
++        return __atomic_load_n( &state->count, __ATOMIC_SEQ_CST ) != 0;
++    default:
++        return __atomic_load_n( &state->count, __ATOMIC_SEQ_CST ) != 0 || macos_timer_expired( state, 0 );
++    }
++}
++
++/* 잡았던 것을 도로 놓는다.
++ * WaitAll 은 전부 잡아야 성립한다. 중간에 하나라도 놓치면 앞서 잡은 것을 되돌린다. */
++static void macos_undo_acquire( struct macos_sync_state *state, int was_abandoned )
++{
++    unsigned int count;
++
++    switch (state->type)
++    {
++    case INPROC_SYNC_MUTEX:
++        if (was_abandoned) __atomic_store_n( &state->abandoned, 1, __ATOMIC_SEQ_CST );
++        count = __atomic_load_n( &state->count, __ATOMIC_SEQ_CST );
++        if (count > 1)
++        {
++            __atomic_store_n( &state->count, count - 1, __ATOMIC_SEQ_CST );
++            return;
++        }
++        __atomic_store_n( &state->count, 0, __ATOMIC_SEQ_CST );
++        __atomic_store_n( &state->owner, 0, __ATOMIC_SEQ_CST );
++        break;
++    case INPROC_SYNC_SEMAPHORE:
++        if (__atomic_fetch_add( &state->count, 1, __ATOMIC_SEQ_CST )) return;
++        break;
++    default:
++        if (state->manual) return;   /* 수동 리셋 이벤트는 애초에 소모하지 않는다 */
++        if (__atomic_exchange_n( &state->count, 1, __ATOMIC_SEQ_CST )) return;
++        break;
++    }
++    macos_sync_wake( state );
++}
++
++/* 깨우기 유실 판정 보조: 신호 쪽은 count 를 먼저 켜고 seq 를 나중에 올린다.
++ * 그 사이를 유실로 오판하지 않도록 잠깐 뒤에도 seq 가 그대로인지 본다. */
++static int macos_still_stale( unsigned int *seq, unsigned int before )
++{
++    usleep( 1000 );
++    return __atomic_load_n( seq, __ATOMIC_SEQ_CST ) == before;
++}
++
++/* 기다린다.
++ *
++ * 객체 하나면 그 객체의 seq 에서 잔다. 이게 게임이 가장 많이 하는 호출이다.
++ * 여러 개거나 alertable 이면 전역 카운터에서 잔다. 아무 객체가 신호를 받아도
++ * 깨어나 다시 확인하는 식이다. __ulock_wait 이 주소 하나만 볼 수 있어서 그렇다.
++ *
++ * 서버로 넘기는 길은 없다. msync 를 켜면 서버 쪽 객체는 대기열을 갖지 않아서
++ * 넘겨 봐야 OBJECT_TYPE_MISMATCH 만 돌아온다. 여기서 전부 처리해야 한다.
++ */
++/* 무한 대기의 헛깨어남 간격(µs). 기본 200ms, EMBER_SYNC_MAX_SLEEP_US 로 조절 */
++static uint32_t macos_sync_max_sleep_us(void)
++{
++    static uint32_t cached;
++    uint32_t v = __atomic_load_n( &cached, __ATOMIC_RELAXED );
++    if (!v)
++    {
++        const char *env = getenv( "EMBER_SYNC_MAX_SLEEP_US" );
++        unsigned long n = env ? strtoul( env, NULL, 10 ) : 0;
++        v = (n >= 1000 && n <= 10000000) ? (uint32_t)n : 200000;
++        __atomic_store_n( &cached, v, __ATOMIC_RELAXED );
++    }
++    return v;
++}
++
++static NTSTATUS linux_wait_objs( int device, DWORD count, const int *objs, WAIT_TYPE type,
++                                 int alert_fd, const LARGE_INTEGER *timeout )
++{
++    struct macos_sync_state *states[64], *alert = NULL;
++    struct macos_sync_global *global = macos_global_state();
++    int got[ARRAY_SIZE(states)];
++    ULONGLONG end = 0;
++    NTSTATUS ret;
++    int multi;
++    DWORD i;
++
++    if (!global || count > ARRAY_SIZE(states)) return STATUS_NOT_IMPLEMENTED;
++    for (i = 0; i < count; i++)
++        if (!(states[i] = macos_sync_map( objs[i] ))) return STATUS_NOT_IMPLEMENTED;
++    if (alert_fd > 0 && !(alert = macos_sync_map( alert_fd ))) return STATUS_NOT_IMPLEMENTED;
++    multi = !(count == 1 && !alert);
++
++    if (timeout)
++    {
++        LARGE_INTEGER now;
++        NtQuerySystemTime( &now );
++        end = timeout->QuadPart <= 0 ? now.QuadPart - timeout->QuadPart : timeout->QuadPart;
++    }
++
++    /* 여러 개를 한꺼번에 기다리는 동안에는 각 객체에 "나 여기 있다"고 표시해 둔다.
++     * 신호를 보내는 쪽은 이 표시가 있을 때만 전역 카운터를 올린다.
++     * 확인보다 먼저 표시해야 그 사이에 온 신호를 놓치지 않는다. */
++    if (multi)
++    {
++        for (i = 0; i < count; i++) __atomic_add_fetch( &states[i]->multi, 1, __ATOMIC_SEQ_CST );
++        if (alert) __atomic_add_fetch( &alert->multi, 1, __ATOMIC_SEQ_CST );
++    }
++
++    /* 깨우기 유실 안전장치. 무한 대기라도 이 간격마다 깨어나 다시 확인한다.
++     * 실측(2026-09-24): 게임 UI 스레드가 큐 객체에서 영원히 잠들어 창이 멈췄고, 메시지를 6만 개
++     * 던져도 깨지 않았다. 원인을 잡기 전까지 최대 이 시간만큼만 늦게 알아채도록 한다. */
++    /* Ember perf2: 20ms → 200ms. 20ms 면 잠든 스레드가 초당 50번 헛깨어나(스레드 수백 개 게임에서 수만 회/초)
++     * 컨텍스트 스위치와 전역 seq 재확인이 낭비였다. 유실 감지(아래 ERR 경로)는 그대로, 늦어야 이 시간만큼 늦게 안다.
++     * EMBER_SYNC_MAX_SLEEP_US 로 조절(1ms~10s). */
++    const uint32_t MACOS_SYNC_MAX_SLEEP_US = macos_sync_max_sleep_us();
++    int stale = 0;
++    unsigned int stale_seq = 0;   /* 잠들기 전 seq. 오탐 방지: 검사 시점에도 그대로여야 유실이다 */
++
++    for (;;)
++    {
++        unsigned int gseq = __atomic_load_n( &global->seq, __ATOMIC_SEQ_CST );
++        unsigned int oseq = count == 1 && !alert
++                          ? __atomic_load_n( &states[0]->seq, __ATOMIC_SEQ_CST ) : 0;
++        uint32_t wait_us, sleep_us;
++        int capped;
++
++        if (stale)
++        {
++            /* 직전 잠에서 seq 가 안 바뀌었는데 지금 신호가 와 있으면 깨우기가 샌 것이다.
++             * 깬 직후 새 신호가 들어왔을 수 있으니 지금 seq 도, 1ms 뒤 seq 도 잠들기 전과 같아야 한다. */
++            unsigned int *seqp = count == 1 && !alert ? &states[0]->seq : &global->seq;
++            unsigned int now_seq = count == 1 && !alert ? oseq : gseq;
++            for (i = 0; i < count && now_seq == stale_seq; i++)
++                if (macos_is_signaled( states[i] ) && macos_still_stale( seqp, stale_seq ))
++                    ERR( "깨우기 유실: fd %d type %d count %u seq %u waiters %u multi %u (alert %d, count %u)\n",
++                         objs[i], states[i]->type, __atomic_load_n( &states[i]->count, __ATOMIC_SEQ_CST ),
++                         __atomic_load_n( &states[i]->seq, __ATOMIC_SEQ_CST ),
++                         __atomic_load_n( &states[i]->waiters, __ATOMIC_SEQ_CST ),
++                         __atomic_load_n( &states[i]->multi, __ATOMIC_SEQ_CST ), alert_fd, count );
++            stale = 0;
++        }
++
++        if (type == WaitAll && count > 1)
++        {
++            DWORD taken = 0;
++            int ready = 1, abandoned = 0;
++
++            for (i = 0; i < count; i++) if (!macos_is_signaled( states[i] )) { ready = 0; break; }
++            if (ready)
++            {
++                for (i = 0; i < count; i++)
++                {
++                    if ((got[i] = macos_try_acquire( states[i] )) < 0) break;
++                    if (got[i]) abandoned = 1;
++                    taken++;
++                }
++                if (taken == count) { ret = abandoned ? STATUS_ABANDONED_WAIT_0 : STATUS_WAIT_0; goto done; }
++                while (taken--) macos_undo_acquire( states[taken], got[taken] );
++            }
++        }
++        else
++        {
++            for (i = 0; i < count; i++)
++            {
++                if ((got[0] = macos_try_acquire( states[i] )) < 0) continue;
++                ret = (got[0] ? STATUS_ABANDONED_WAIT_0 : STATUS_WAIT_0) + i;
++                goto done;
++            }
++        }
++
++        if (alert && macos_is_signaled( alert ))
++        {
++            static const LARGE_INTEGER no_wait;
++            /* APC 는 서버가 들고 있다. 깨우기만 여기서 받고 전달은 서버에 맡긴다. */
++            ret = server_wait( NULL, 0, SELECT_INTERRUPTIBLE | SELECT_ALERTABLE, &no_wait );
++            goto done;
++        }
++
++        if (!timeout) wait_us = 0;   /* 0 이면 무한 */
++        else
++        {
++            LARGE_INTEGER now;
++            LONGLONG left;
++
++            NtQuerySystemTime( &now );
++            if ((left = end - now.QuadPart) <= 0) { ret = STATUS_TIMEOUT; goto done; }
++            left /= 10;                                  /* 100ns → us */
++            wait_us = left > 0xfffffffe ? 0xfffffffe : (uint32_t)left;
++            if (!wait_us) wait_us = 1;
++        }
++
++        /* 로컬 대기 타이머는 가장 이른 만료 시각까지만 잔다 */
++        {
++            LONGLONG soonest = 0;
++            for (i = 0; i < count; i++)
++            {
++                long long d = __atomic_load_n( &states[i]->due, __ATOMIC_SEQ_CST );
++                if (d && (!soonest || d < soonest)) soonest = d;
++            }
++            if (soonest)
++            {
++                LARGE_INTEGER now;
++                LONGLONG left;
++                NtQuerySystemTime( &now );
++                left = (soonest - now.QuadPart) / 10;
++                if (left < 1) left = 1;
++                if (left > 0xfffffffe) left = 0xfffffffe;
++                if (!wait_us || (uint32_t)left < wait_us) wait_us = (uint32_t)left;
++            }
++        }
++
++        sleep_us = (!wait_us || wait_us > MACOS_SYNC_MAX_SLEEP_US) ? MACOS_SYNC_MAX_SLEEP_US : wait_us;
++        capped = sleep_us != wait_us;
++        /* Ember perfpush2: 시간제한 대기는 3/4 만 자고 다시 잰다(커널 몰아 깨우기 늦음 1/8 회피). capped 는 그대로 두어 유실 의심 안 함 */
++        if (!capped) sleep_us = (uint32_t)(ember_staged_ns( (unsigned long long)sleep_us * 1000 ) / 1000);
++
++        if (count == 1 && !alert)
++        {
++            int r;
++            __atomic_add_fetch( &states[0]->waiters, 1, __ATOMIC_SEQ_CST );
++            r = __ulock_wait( UL_COMPARE_AND_WAIT_SHARED, &states[0]->seq, oseq, sleep_us );
++            __atomic_sub_fetch( &states[0]->waiters, 1, __ATOMIC_SEQ_CST );
++            /* Ember perfpush: 유실 의심은 정말로 시간이 다 돼 깬 때만(헛깨어남은 흔하다 — 아래 전역 쪽 설명) */
++            stale = capped && r < 0 && errno == ETIMEDOUT && __atomic_load_n( &states[0]->seq, __ATOMIC_SEQ_CST ) == oseq;
++            stale_seq = oseq;
++        }
++        else
++        {
++            int r;
++            __atomic_add_fetch( &global->waiters, 1, __ATOMIC_SEQ_CST );
++            r = __ulock_wait( UL_COMPARE_AND_WAIT_SHARED, &global->seq, gseq, sleep_us );
++            __atomic_sub_fetch( &global->waiters, 1, __ATOMIC_SEQ_CST );
++            /* Ember perfpush: 전역 seq 는 보틀 안 모든 다중 대기가 나눠 쓴다. 우리가 이미 읽은 증가에 대한 깨우기가 잠든 뒤에
++             * 도착하면 seq 는 그대로인데 깬다(헛깨어남, 부하에서 흔함). 예전엔 이것도 "유실 의심"으로 보고 신호된 객체마다
++             * usleep(1ms) 확인을 해서 WaitAll(작업 8개) 이 몇 초마다 +12ms 늦게 깼다(fpace_cpu 실측, 로제타 CX msync 는 없음).
++             * 시간이 다 돼 깬(ETIMEDOUT) 경우만 의심한다. */
++            stale = capped && r < 0 && errno == ETIMEDOUT && __atomic_load_n( &global->seq, __ATOMIC_SEQ_CST ) == gseq;
++            stale_seq = gseq;
++        }
++    }
++
++done:
++    if (multi)
++    {
++        for (i = 0; i < count; i++) __atomic_sub_fetch( &states[i]->multi, 1, __ATOMIC_SEQ_CST );
++        if (alert) __atomic_sub_fetch( &alert->multi, 1, __ATOMIC_SEQ_CST );
++    }
++    return ret;
++}
++
+ #else /* NTSYNC_IOC_EVENT_READ */
+ 
+ static NTSTATUS linux_release_semaphore_obj( int obj, ULONG count, ULONG *prev_count )
+@@ -634,7 +1203,25 @@ static void release_inproc_sync( struct inproc_sync *sync )
+     LONG ref = InterlockedDecrement( &sync->refcount );
+ 
+     assert( ref >= 0 );
+-    if (!ref) close( fd );
++    if (!ref)
++    {
++#ifdef __APPLE__
++        macos_sync_forget( fd );
++#endif
++        close( fd );
++    }
++}
++
++/* 스레드 알림 fd 처럼 캐시(release_inproc_sync) 밖에서 닫는 동기화 fd.
++ * 실측(2026-09-24): 스레드가 끝나며 알림 fd 를 그냥 닫았고, 같은 번호를 받은 새 뮤텍스가
++ * 죽은 스레드의 알림 상태(내부 객체, 수동 리셋)를 보고 영원히 기다려 게임 메인 스레드가 멈췄다. */
++void close_inproc_sync_fd( int fd )
++{
++    if (fd < 0) return;
++#ifdef __APPLE__
++    macos_sync_forget( fd );
++#endif
++    close( fd );
+ }
+ 
+ static struct inproc_sync *get_cached_inproc_sync( HANDLE handle )
+@@ -2392,8 +2979,33 @@ NTSTATUS WINAPI NtSignalAndWaitForSingleObject( HANDLE signal, HANDLE wait,
+ /******************************************************************
+  *		NtYieldExecution (NTDLL.@)
+  */
++#ifdef __APPLE__
++/* Ember perfpush: macOS 의 sched_yield() 는 swtch_pri(0) — 스레드 우선순위를 한 퀀텀(약 10ms) 동안 0 으로
++ * 깎는다(리눅스는 같은 우선순위 줄 끝으로만 보낸다). 코어가 바쁘면 게임 주 스레드가 Sleep(1)·Sleep(0)·PeekMessage
++ * 마다 최대 10ms 를 못 돌아온다(실측: 바쁜 스레드 14개일 때 Sleep(1) 1.2→10ms, 로아 주 스레드 표본의 43%).
++ * 윈도우 Sleep(0)/SwitchToThread 처럼 우선순위를 깎지 않고 넘기기만 한다(thread_switch SWITCH_OPTION_NONE).
++ * EMBER_YIELD=0 이면 예전대로(sched_yield + 0 아닌 대기 앞 양보). */
++static int ember_yield_mode = -1;
++static inline int ember_yield_enabled(void)
++{
++    if (ember_yield_mode < 0)
++    {
++        const char *e = getenv( "EMBER_YIELD" );
++        ember_yield_mode = (e && e[0] == '0') ? 0 : 1;
++    }
++    return ember_yield_mode;
++}
++#endif
++
+ NTSTATUS WINAPI NtYieldExecution(void)
+ {
++#ifdef __APPLE__
++    if (ember_yield_enabled())
++    {
++        thread_switch( MACH_PORT_NULL, SWITCH_OPTION_NONE, 0 );
++        return STATUS_SUCCESS;
++    }
++#endif
+ #ifdef HAVE_SCHED_YIELD
+ #ifdef RUSAGE_THREAD
+     struct rusage u1, u2;
+@@ -2413,6 +3025,47 @@ NTSTATUS WINAPI NtYieldExecution(void)
+ }
+ 
+ 
++#if defined(__APPLE__) && defined(HAVE_KQUEUE)
++static pthread_key_t ember_kq_key;
++static pthread_once_t ember_kq_once = PTHREAD_ONCE_INIT;
++static void ember_kq_close( void *p )
++{
++    int fd = (int)(intptr_t)p - 1;
++    if (fd >= 0) close( fd );
++}
++static void ember_kq_atfork_child(void)
++{
++    pthread_setspecific( ember_kq_key, NULL );   /* kqueue 는 fork 로 물려받지 않는다 */
++}
++static void ember_kq_init(void)
++{
++    pthread_key_create( &ember_kq_key, ember_kq_close );
++    pthread_atfork( NULL, NULL, ember_kq_atfork_child );
++}
++/* 1 = 기한까지 잤다, 0 = 신호로 일찍 깼다(남은 시간 재확인), -1 = 못 쓴다(옛 길로) */
++static int ember_precise_sleep( long long us )
++{
++    struct kevent64_s ev, out;
++    intptr_t v;
++    int kq, r;
++
++    pthread_once( &ember_kq_once, ember_kq_init );
++    v = (intptr_t)pthread_getspecific( ember_kq_key );
++    if (v) kq = (int)v - 1;
++    else
++    {
++        if ((kq = kqueue()) < 0) return -1;
++        fcntl( kq, F_SETFD, FD_CLOEXEC );
++        pthread_setspecific( ember_kq_key, (void *)(intptr_t)(kq + 1) );
++    }
++    EV_SET64( &ev, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, NOTE_USECONDS | NOTE_CRITICAL, us, 0, 0, 0 );
++    r = kevent64( kq, &ev, 1, &out, 1, 0, NULL );
++    if (r < 0) return errno == EINTR ? 0 : -1;
++    if (r == 1 && (out.flags & EV_ERROR)) return -1;
++    return r == 1 ? 1 : 0;
++}
++#endif
++
+ /******************************************************************
+  *		NtDelayExecution (NTDLL.@)
+  */
+@@ -2447,6 +3100,11 @@ NTSTATUS WINAPI NtDelayExecution( BOOLEAN alertable, const LARGE_INTEGER *timeou
+ 
+         /* Note that we yield after establishing the desired timeout, but
+            we only care about the result of the yield for zero timeouts */
++#ifdef __APPLE__
++        /* Ember perfpush: 0 이 아닌 대기는 어차피 잠드니 앞 양보가 필요 없다(맥에서는 우선순위까지 깎였다). */
++        if (when && ember_yield_enabled()) status = STATUS_SUCCESS;
++        else
++#endif
+         status = NtYieldExecution();
+         if (!when) return status;
+ 
+@@ -2456,6 +3114,14 @@ NTSTATUS WINAPI NtDelayExecution( BOOLEAN alertable, const LARGE_INTEGER *timeou
+             NtQuerySystemTime( &now );
+             diff = (when - now.QuadPart + 9) / 10;
+             if (diff <= 0) break;
++#if defined(__APPLE__) && defined(HAVE_KQUEUE)
++            if (ember_timer_enabled())
++            {
++                int r = ember_precise_sleep( diff );
++                if (r > 0) break;
++                if (!r) continue;
++            }
++#endif
+             tv.tv_sec  = diff / 1000000;
+             tv.tv_usec = diff % 1000000;
+             if (select( 0, NULL, NULL, NULL, &tv ) != -1) break;
+@@ -3610,6 +4276,9 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
+                 LONGLONG timeleft = update_timeout( end );
+                 struct timespec timespec;
+ 
++#ifdef __APPLE__
++                timeleft = ember_staged_ns( timeleft * 100 ) / 100;
++#endif
+                 timespec.tv_sec = timeleft / (ULONGLONG)TICKSPERSEC;
+                 timespec.tv_nsec = (timeleft % TICKSPERSEC) * 100;
+                 ret = futex_wait( futex, 0, &timespec );
+@@ -3617,7 +4286,13 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
+             else
+                 ret = futex_wait( futex, 0, NULL );
+ 
+-            if (ret == -1 && errno == ETIMEDOUT) return STATUS_TIMEOUT;
++            if (ret == -1 && errno == ETIMEDOUT)
++            {
++#ifdef __APPLE__
++                if (timeout && ember_timer_enabled() && update_timeout( end )) continue;   /* 나눠 잔 것 — 남은 시간 더 */
++#endif
++                return STATUS_TIMEOUT;
++            }
+         }
+         return STATUS_ALERTED;
+     }
+diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
+index aaae9a2..8436fe7 100644
+--- a/dlls/ntdll/unix/system.c
++++ b/dlls/ntdll/unix/system.c
+@@ -2101,6 +2101,76 @@ static DWORD get_core_id_regs_arm64( struct smbios_wine_id_reg_value_arm64 *regs
+     return regidx;
+ }
+ 
++#elif defined(__APPLE__)
++
++/* macOS 는 EL0 에서 ID 레지스터를 못 읽는다(트랩). 대신 sysctl 의 hw.optional.arm.FEAT_* 로
++ * ID_AA64* 값을 합성한다. FEX 같은 에뮬레이터가 이 레지스트리 값(CP 40xx)에서 호스트 기능을
++ * 읽어 CRC32/AES/LSE 유무를 정하고, 거기에 맞춰 x86 CPUID(SSE4.2·AES-NI 등)를 켠다.
++ * 비워 두면 "기능 없음"으로 보여 게스트가 SSE4.2 없는 CPU 로 오인한다(실측). */
++static DWORD get_core_id_regs_arm64( struct smbios_wine_id_reg_value_arm64 *regs,
++                                     WORD logical_thread_id )
++{
++    DWORD regidx = 0;
++    unsigned long long v;
++#define F(name) (has_feature( name ) ? 1ull : 0ull)
++#define FIELD(val, shift) (((unsigned long long)(val)) << (shift))
++
++    /* MIDR_EL1: 구현자 Apple(0x61). 파트 번호는 노출되지 않으므로 0 */
++    regs[regidx++] = (struct smbios_wine_id_reg_value_arm64){ 0x4000, 0x61000000ull };
++
++    /* ID_AA64PFR0_EL1: EL0/EL1 AArch64, FP·AdvSIMD(FP16 이면 1), DIT, CSV2/3 */
++    v = FIELD(1, 0) | FIELD(1, 4)
++      | FIELD(F("FEAT_FP16"), 16) | FIELD(F("FEAT_FP16"), 20)
++      | FIELD(F("FEAT_DIT"), 48) | FIELD(F("FEAT_CSV2"), 56) | FIELD(F("FEAT_CSV3"), 60);
++    regs[regidx++] = (struct smbios_wine_id_reg_value_arm64){ 0x4020, v };
++    /* ID_AA64PFR1_EL1: BTI, SSBS */
++    v = FIELD(F("FEAT_BTI"), 0) | FIELD(F("FEAT_SSBS") ? 2 : 0, 4);
++    regs[regidx++] = (struct smbios_wine_id_reg_value_arm64){ 0x4021, v };
++    /* ID_AA64ZFR0_EL1: SVE 없음 */
++    regs[regidx++] = (struct smbios_wine_id_reg_value_arm64){ 0x4024, 0 };
++    /* ID_AA64ISAR0_EL1 */
++    v = FIELD(F("FEAT_AES") ? (F("FEAT_PMULL") ? 2 : 1) : 0, 4)
++      | FIELD(F("FEAT_SHA1"), 8)
++      | FIELD(F("FEAT_SHA256") ? (F("FEAT_SHA512") ? 2 : 1) : 0, 12)
++      | FIELD(F("FEAT_CRC32"), 16)
++      | FIELD(F("FEAT_LSE") ? 2 : 0, 20)
++      | FIELD(F("FEAT_RDM"), 28)
++      | FIELD(F("FEAT_SHA3"), 32)
++      | FIELD(F("FEAT_DotProd"), 44)
++      | FIELD(F("FEAT_FHM"), 48)
++      | FIELD(F("FEAT_FlagM") ? (F("FEAT_FlagM2") ? 2 : 1) : 0, 52);
++    regs[regidx++] = (struct smbios_wine_id_reg_value_arm64){ 0x4030, v };
++    /* ID_AA64ISAR1_EL1 */
++    v = FIELD(F("FEAT_DPB") ? (F("FEAT_DPB2") ? 2 : 1) : 0, 0)
++      | FIELD(F("FEAT_JSCVT"), 12)
++      | FIELD(F("FEAT_FCMA"), 16)
++      | FIELD(F("FEAT_LRCPC") ? (F("FEAT_LRCPC2") ? 2 : 1) : 0, 20)
++      | FIELD(F("FEAT_FRINTTS"), 32)
++      | FIELD(F("FEAT_SB"), 36)
++      | FIELD(F("FEAT_SPECRES"), 40)
++      | FIELD(F("FEAT_BF16") ? (F("FEAT_EBF16") ? 2 : 1) : 0, 44)
++      | FIELD(F("FEAT_I8MM"), 52);
++    regs[regidx++] = (struct smbios_wine_id_reg_value_arm64){ 0x4031, v };
++    /* ID_AA64ISAR2_EL1: WFxT, RPRES */
++    v = FIELD(F("FEAT_WFxT") ? 2 : 0, 0) | FIELD(F("FEAT_RPRES"), 4);
++    regs[regidx++] = (struct smbios_wine_id_reg_value_arm64){ 0x4032, v };
++    /* ID_AA64MMFR0_EL1: PARange 48비트(5), ASIDBits 16(2), TGran16 지원(1), TGran4 미지원(0xf) */
++    v = FIELD(5, 0) | FIELD(2, 4) | FIELD(1, 20) | FIELD(0xf, 28);
++    regs[regidx++] = (struct smbios_wine_id_reg_value_arm64){ 0x4038, v };
++    /* ID_AA64MMFR1_EL1: AFP */
++    v = FIELD(F("FEAT_AFP"), 44);
++    regs[regidx++] = (struct smbios_wine_id_reg_value_arm64){ 0x4039, v };
++    /* ID_AA64MMFR2_EL1: AT(LSE2 — 정렬 안 된 원자 연산), ...  */
++    v = FIELD(F("FEAT_LSE2"), 32);
++    regs[regidx++] = (struct smbios_wine_id_reg_value_arm64){ 0x403a, v };
++    /* CTR_EL0 도 macOS 에선 EL0 읽기가 트랩된다(실측 SIGILL). Apple Silicon 의 값(M1~M4 동일:
++     * 캐시라인 64B, PIPT, ERG/CWG 64B)을 상수로 둔다. */
++    regs[regidx++] = (struct smbios_wine_id_reg_value_arm64){ 0x5801, 0x8444C004ull };
++#undef F
++#undef FIELD
++    return regidx;
++}
++
+ #else
+ 
+ static DWORD get_core_id_regs_arm64( struct smbios_wine_id_reg_value_arm64 *regs,
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index b06ea92..646b657 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1116,7 +1116,7 @@ static void contexts_from_server( CONTEXT *context, struct context_data server_c
+ static DECLSPEC_NORETURN void pthread_exit_wrapper( int status )
+ {
+     struct thread_data *data = get_thread_data();
+-    close( data->alert_fd );
++    close_inproc_sync_fd( data->alert_fd );
+     close( data->wait_fd[0] );
+     close( data->wait_fd[1] );
+     close( data->reply_fd );
+@@ -1507,6 +1507,8 @@ void abort_thread( int status )
+  */
+ void abort_process( int status )
+ {
++    extern void ember_ls_report_exit( int code );
++    ember_ls_report_exit( get_unix_exit_code( status ));
+     _exit( get_unix_exit_code( status ));
+ }
+ 
+@@ -1540,7 +1542,9 @@ static DECLSPEC_NORETURN void exit_thread( int status )
+  */
+ void exit_process( int status )
+ {
++    extern void ember_ls_report_exit( int code );  /* Ember: loader.c — LaunchServices 로 뜬 게임이면 도우미에 종료 코드 */
+     pthread_sigmask( SIG_BLOCK, &server_block_set, NULL );
++    ember_ls_report_exit( get_unix_exit_code( status ));
+     process_exit_wrapper( get_unix_exit_code( status ));
+ }
+ 
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index 9b6401e..a506858 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -29,6 +29,10 @@
+ #include "wine/list.h"
+ #include "wine/debug.h"
+ 
++/* fex32: wow64 썽크의 32비트 포인터를 게스트 창(4GB 위)으로 푼다 */
++#define WINE_WOW64_REBASE
++#include "wine/wow64base.h"
++
+ struct msghdr;
+ 
+ typedef struct
+@@ -125,6 +129,10 @@ struct thread_data
+     void        *jmp_buf;           /* setjmp buffer for exception handling */
+     void        *start;             /* thread entry point */
+     void        *param;             /* thread entry point parameter */
++    void        *vm_lock_site;      /* 마지막으로 uninterrupted section 을 잡은 호출처 (데드락 추적) */
++    int          vm_lock_depth;     /* 현재 쥔 uninterrupted section 깊이 */
++    void        *server_scratch;    /* Ember perf2: virtual_locked_server_call 의 스레드별 64KB 답 버퍼(mmap, 지연 할당) */
++    int          server_scratch_busy; /* 위 버퍼 사용 중(시그널 문맥 재진입이면 mmap 폴백) */
+     struct list  entry;             /* entry in TEB list */
+     char         debug_info[0x800]; /* debug_info structure */
+     char         signal_stack[];    /* signal stack */
+@@ -189,6 +197,25 @@ static const LONG teb_offset = 0x2000;
+ #define FILE_USE_FILE_POINTER_POSITION ((LONGLONG)-2)
+ 
+ /* callbacks to PE ntdll from the Unix side */
++#if defined(__APPLE__) && defined(__aarch64__)
++/* macOS 는 x18 을 플랫폼 예약으로 두고 예외 복귀마다(선점 포함) 0 으로 지운다.
++ * 윈도우 ABI 가 정한 "x18 = TEB" 를 지킬 수 없으므로, macOS 가 보존하는
++ * TPIDRRO_EL0 의 pthread 직접 TSD 배열에 TEB 를 둔다. PE 쪽 NtCurrentTeb() 이
++ * 같은 슬롯을 읽는다(include/winnt.h).
++ *
++ * 반드시 **그 TEB 를 쓸 스레드 자신이** 불러야 한다. 만드는 쪽에서 부르면
++ * 부모의 슬롯을 덮어쓰고 자식은 빈 채로 남는다. */
++static inline void set_teb_tsd_slot( void *teb )
++{
++    unsigned long long tsd;
++    if (!teb) return;
++    __asm__ __volatile__( "mrs %0, tpidrro_el0" : "=r" (tsd) );
++    ((void **)(unsigned long long)(tsd & ~7ull))[WINE_MACOS_TEB_TSD_SLOT] = teb;
++}
++#else
++static inline void set_teb_tsd_slot( void *teb ) { }
++#endif
++
+ extern void *pDbgUiRemoteBreakin;
+ extern void *pKiRaiseUserExceptionDispatcher;
+ extern void *pKiUserExceptionDispatcher;
+@@ -313,6 +340,9 @@ extern NTSTATUS virtual_map_builtin_module( HANDLE mapping, void **module, SIZE_
+                                             SECTION_IMAGE_INFORMATION *info, ULONG_PTR limit_low,
+                                             ULONG_PTR limit_high, WORD machine, BOOL prefer_native, off_t offset );
+ extern NTSTATUS virtual_map_main_module( HANDLE mapping, USHORT machine );
++#if defined(__APPLE__) && defined(__aarch64__)
++extern ULONG_PTR virtual_fex32_prepare_main32(void);  /* fex32b */
++#endif
+ extern NTSTATUS virtual_create_builtin_view( void *module, const UNICODE_STRING *nt_name,
+                                              struct pe_image_info *info, void *so_handle );
+ extern NTSTATUS virtual_relocate_module( void *module );
+@@ -420,6 +450,7 @@ extern NTSTATUS wow64_wine_spawnvp( void *args );
+ extern void dbg_init(void);
+ 
+ extern void close_inproc_sync( HANDLE handle );
++extern void close_inproc_sync_fd( int fd );
+ 
+ extern NTSTATUS call_user_apc_dispatcher( CONTEXT *context_ptr, unsigned int flags, ULONG_PTR arg1, ULONG_PTR arg2,
+                                           ULONG_PTR arg3, PNTAPCFUNC func, NTSTATUS status );
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 38cab90..0ee0fdb 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -36,6 +36,7 @@
+ #include <sys/socket.h>
+ #include <sys/stat.h>
+ #include <sys/mman.h>
++#include <pthread.h>
+ #include <sys/ioctl.h>
+ #ifdef HAVE_SYS_SYSINFO_H
+ # include <sys/sysinfo.h>
+@@ -90,6 +91,7 @@
+ #include "wine/rbtree.h"
+ #include "unix_private.h"
+ #include "wine/debug.h"
++#include "wine/usdaddr.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(virtual);
+ WINE_DECLARE_DEBUG_CHANNEL(module);
+@@ -138,11 +140,22 @@ struct file_view
+ #define VPROT_GUARD      0x10
+ #define VPROT_COMMITTED  0x20
+ #define VPROT_WRITEWATCH 0x40
++/* macOS 는 한 페이지에 쓰기와 실행을 동시에 주지 않는다(W^X).
++ * PE 의 SectionAlignment 는 4KB 인데 macOS ARM64 의 페이지는 16KB 라,
++ * 코드 섹션과 데이터 섹션이 같은 호스트 페이지에 겹쳐 들어간다.
++ * 그 페이지는 쓰기든 실행이든 한쪽만 줄 수 있다.
++ *
++ * 기본은 쓰기 쪽이다. 이미지를 올리는 동안에는 재배치 때문에 쓰기가 훨씬 잦고,
++ * 실행은 그 뒤에 시작되기 때문이다. 실행 폴트가 나면 이 비트를 켜고 실행 쪽으로
++ * 뒤집는다. 다시 쓰기 폴트가 나면 도로 끈다. */
++#define VPROT_WX_EXEC 0x80
+ /* per-mapping protection flags */
+ #define VPROT_ARM64EC          0x0100  /* view may contain ARM64EC code */
+ #define VPROT_SYSTEM           0x0200  /* system view (underlying mmap not under our control) */
+ #define VPROT_PLACEHOLDER      0x0400
+ #define VPROT_FREE_PLACEHOLDER 0x0800
++#define VPROT_MAPJIT           0x1000  /* macOS MAP_JIT 아레나 안의 뷰 (FEX 코드 버퍼) */
++#define SERVER_SCRATCH_SIZE 65536   /* Ember perf2: 스레드별 서버 답 버퍼 (virtual_locked_server_call) */
+ 
+ /* Conversion from VPROT_* to Win32 flags */
+ static const BYTE VIRTUAL_Win32Flags[16] =
+@@ -167,6 +180,18 @@ static const BYTE VIRTUAL_Win32Flags[16] =
+ 
+ static struct wine_rb_tree views_tree;
+ static pthread_mutex_t virtual_mutex;
++
++/* 데드락 추적: 시그널 핸들러 안에서 직접 잡는 잠금도 깊이를 센다 */
++static inline void vm_lock_track( void *site )
++{
++    struct thread_data *data = get_thread_data();
++    if (data) { data->vm_lock_depth++; data->vm_lock_site = site; }
++}
++static inline void vm_lock_untrack(void)
++{
++    struct thread_data *data = get_thread_data();
++    if (data) data->vm_lock_depth--;
++}
+ pthread_key_t thread_data_key = 0;
+ 
+ static const UINT page_shift = 12;
+@@ -182,7 +207,14 @@ static const UINT_PTR host_page_mask = 0xfff;
+ #endif
+ 
+ /* Note: these are Windows limits, you cannot change them. */
++#if defined(__APPLE__) && defined(__aarch64__)
++/* macOS 의 ARM64 프로세스는 __PAGEZERO 가 4GB 로 고정이고(줄이면 커널이 SIGKILL),
++ * 실측상 0x140000000 아래로는 MAP_FIXED 가 전부 실패한다. 0x100000000 도 막힌다.
++ * 주소공간 시작을 그 위로 올린다. */
++static void *address_space_start = (void *)0x140000000;
++#else
+ static void *address_space_start = (void *)0x10000;
++#endif
+ #ifdef _WIN64
+ static void *address_space_limit = (void *)0x7fffffff0000;  /* top of the total available address space */
+ static void *user_space_limit    = (void *)0x7fffffff0000;  /* top of the user address space */
+@@ -198,7 +230,11 @@ static void *host_addr_space_limit;  /* top of the host virtual address space */
+ static struct file_view *arm64ec_view;
+ 
+ ULONG_PTR user_space_wow_limit = 0;
+-struct _KUSER_SHARED_DATA *user_shared_data = (void *)0x7ffe0000;
++/* fex32: 32비트 게스트 주소공간 창의 시작(4GB 정렬). 0 이면 꺼짐(일반 프로세스·옛 방식) */
++ULONG_PTR wow_guest_base = 0;
++/* 다른 유닉스 라이브러리(win32u.so·winevulkan.so…)의 wine_wow64_g2h 가 본다 */
++__attribute__((visibility("default"))) unsigned long long __wine_wow64_guest_base = 0;
++struct _KUSER_SHARED_DATA *user_shared_data = (void *)(ULONG_PTR)WINE_USD_ADDR;
+ 
+ /* TEB allocation blocks */
+ static void *teb_block;
+@@ -1375,6 +1411,13 @@ static int get_unix_prot( BYTE vprot )
+         if (vprot & VPROT_WRITECOPY) prot |= PROT_WRITE | PROT_READ;
+         if (vprot & VPROT_EXEC) prot |= PROT_EXEC | PROT_READ;
+         if (vprot & VPROT_WRITEWATCH) prot &= ~PROT_WRITE;
++#ifdef __APPLE__
++        if ((prot & PROT_WRITE) && (prot & PROT_EXEC))
++        {
++            if (vprot & VPROT_WX_EXEC) prot &= ~PROT_WRITE;
++            else prot &= ~PROT_EXEC;
++        }
++#endif
+     }
+     if (!prot) prot = PROT_NONE;
+     return prot;
+@@ -1452,6 +1495,82 @@ static void VIRTUAL_Dump(void)
+  *	View: Success
+  *	NULL: Failure
+  */
++#ifdef __APPLE__
++/***********************************************************************
++ * MAP_JIT 아레나 — FEX(에뮬레이터)의 JIT 코드 버퍼 전용.
++ *
++ * macOS 는 익명 RWX 매핑을 거부한다. 처음 쓴 방법은 페이지를 W 와 X 중 한쪽만 주고
++ * 폴트마다 mprotect 로 뒤집는 것이었는데, mprotect 는 프로세스 전체에 걸리므로
++ * JIT 스레드 둘이 같은 창에서 쓰기/실행을 번갈아 하면 서로의 보호를 계속 뒤집는
++ * 핑퐁이 생긴다(실측: 40초에 25만 번, 그 사이 진행이 멈추고 손상까지 났다).
++ *
++ * MAP_JIT 영역은 다르다. 접근 허용이 스레드별 상태(pthread_jit_write_protect_np)로
++ * 정해지고 다른 스레드에 영향이 없다. 다만 두 가지 제약이 있어 이렇게 쓴다:
++ *  - MAP_FIXED 와 같이 쓸 수 없다 → 큰 아레나를 커널이 주는 주소로 한 번 잡아 두고
++ *    잘라 쓴다. 해제한 조각은 munmap 하지 않고(다시 JIT 로 못 붙인다) 프리리스트로 돌린다.
++ *  - 영역 안에서는 페이지별 mprotect 가 무시된다(실측). 그래서 게스트가 요구한 RWX 는
++ *    여기 두지 않는다 — FEX 의 자기수정코드 추적이 보호 폴트에 기대기 때문이다.
++ *    FEX 는 자기 코드 버퍼를 MEM_EXTENDED_PARAMETER_EC_CODE 로 할당하므로 그것만 받는다.
++ */
++/* 코드 버퍼마다 개별 mmap(MAP_JIT). 아레나 하나를 잘라 쓰는 방식은 munmap 구멍을 못 내서
++ * FEX 의 마지막 페이지 가드(VirtualProtect NOACCESS)를 만들 수 없었다. 개별 매핑이면
++ * 가드 자리를 munmap 해 구멍(접근 시 폴트)을 만들 수 있고, 해제도 munmap 으로 끝난다.
++ * 실측: MAP_JIT 매핑 안에서 mprotect 는 전부 EINVAL 이지만 munmap 은 되고 구멍은 폴트한다. */
++static void *jit_map_alloc( size_t size, size_t align_mask )
++{
++    size_t total = ROUND_SIZE( 0, size, host_page_mask );
++    size_t extra = (align_mask + 1 > host_page_size) ? align_mask + 1 : 0;
++    char *p = mmap( NULL, total + extra, PROT_READ | PROT_WRITE | PROT_EXEC,
++                    MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0 );
++    if (p == MAP_FAILED) return NULL;
++    if (is_beyond_limit( p, total + extra, user_space_limit )) { munmap( p, total + extra ); return NULL; }
++    if (extra)
++    {
++        /* 정렬 때문에 남는 앞뒤 자투리는 munmap 하지 않는다 — 구멍을 내면 커널이 그 자리를
++         * 다른 mmap 에 내줘 Wine 뷰와 겹친다(create_view 의 assert 로 실측). PROT_NONE 으로
++         * 덮어 매핑은 남기고 접근만 막는다. 크기는 버퍼당 64K 이하라 무시할 만하다. */
++        char *a = (char *)(((size_t)p + align_mask) & ~align_mask);
++        if (a > p) mmap( p, a - p, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0 );
++        if (a + total < p + total + extra)
++            mmap( a + total, (p + total + extra) - (a + total), PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0 );
++        p = a;
++    }
++    return p;
++}
++
++static void jit_map_free( void *base, size_t size )
++{
++    munmap( base, ROUND_SIZE( 0, size, host_page_mask ) );   /* PROT_NONE 으로 덮은 가드도 함께 풀린다 */
++}
++
++static BOOL want_jit_alloc;   /* allocate_virtual_memory 가 map_view 를 부르는 동안만 참 */
++
++/* Ember perf2: SIGSEGV 마다 virtual_handle_jit_fault 가 virtual_mutex 를 잡고 뷰를 찾았다(그 뒤 virtual_handle_fault 가
++ * 또 잡는다 → 폴트마다 잠금 2회). "MAP_JIT 뷰가 한 번이라도 있었나" 와 모든 MAP_JIT 뷰를 감싸는 주소 범위를 잠금 밖에서 먼저 본다.
++ * 둘 다 한 방향으로만 바뀐다(표시는 켜지기만, 범위는 넓어지기만 — 뷰가 사라져도 되돌리지 않는다). 오탐은 예전처럼 잠금을
++ * 한 번 잡을 뿐이고, 미탐은 없다. 뷰 개수로 세면 안 된다: remove_pages_from_view 가 뷰를 둘로 나눌 때 protect(MAPJIT)
++ * 를 그대로 복사하므로 delete_view 가 늘린 것보다 많이 줄여 0 이 되고, 살아 있는 JIT 뷰의 쓰기 폴트를 놓친다. */
++static LONG jit_view_seen;
++static ULONG_PTR jit_range_lo = ~(ULONG_PTR)0, jit_range_hi;
++
++static void jit_view_added( const void *base, size_t size )
++{
++    ULONG_PTR lo = (ULONG_PTR)base, hi = lo + size, cur;
++    while ((cur = __atomic_load_n( &jit_range_lo, __ATOMIC_SEQ_CST )) > lo &&
++           !__atomic_compare_exchange_n( &jit_range_lo, &cur, lo, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST )) ;
++    while ((cur = __atomic_load_n( &jit_range_hi, __ATOMIC_SEQ_CST )) < hi &&
++           !__atomic_compare_exchange_n( &jit_range_hi, &cur, hi, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST )) ;
++    __atomic_store_n( &jit_view_seen, 1, __ATOMIC_SEQ_CST );   /* 범위를 먼저 넓히고 표시한다: 표시가 보이면 범위도 보인다 */
++}
++
++static BOOL maybe_jit_addr( const void *addr )
++{
++    if (!__atomic_load_n( &jit_view_seen, __ATOMIC_SEQ_CST )) return FALSE;
++    return (ULONG_PTR)addr >= __atomic_load_n( &jit_range_lo, __ATOMIC_SEQ_CST ) &&
++           (ULONG_PTR)addr <  __atomic_load_n( &jit_range_hi, __ATOMIC_SEQ_CST );
++}
++#endif
++
+ static struct file_view *find_view( const void *addr, size_t size )
+ {
+     struct wine_rb_entry *ptr = views_tree.root;
+@@ -1835,6 +1954,10 @@ static void unregister_view( struct file_view *view )
+  */
+ static void delete_view( struct file_view *view ) /* [in] View */
+ {
++#ifdef __APPLE__
++    if (view->protect & VPROT_MAPJIT) jit_map_free( view->base, view->size );
++    else
++#endif
+     if (!(view->protect & VPROT_SYSTEM)) unmap_area( view->base, view->size );
+     set_page_vprot( view->base, view->size, 0 );
+     if (view->protect & VPROT_ARM64EC) clear_arm64ec_range( view->base, view->size );
+@@ -2021,6 +2144,25 @@ static int mprotect_range( void *base, size_t size, BYTE set, BYTE clear )
+  */
+ static BOOL set_vprot( struct file_view *view, void *base, size_t size, BYTE vprot )
+ {
++#ifdef __APPLE__
++    if (view->protect & VPROT_MAPJIT)
++    {
++        /* MAP_JIT 매핑에서는 mprotect 가 통째로 EINVAL 이다. 접근 불가(가드 페이지) 요청은
++         * 호스트 페이지 단위로 안쪽만 munmap 해 구멍을 만들고(구멍은 폴트한다),
++         * 그 밖의 보호 변경은 기록만 한다 — 매핑은 늘 RWX 이고 쓰기/실행은 스레드 상태가 정한다. */
++        if (!(vprot & (VPROT_READ | VPROT_WRITE | VPROT_EXEC)))
++        {
++            char *start = (char *)(((ULONG_PTR)base + host_page_mask) & ~host_page_mask);
++            char *end = (char *)(((ULONG_PTR)base + size) & ~host_page_mask);
++            /* munmap 으로 구멍을 내면 커널이 그 자리를 다른 매핑에 내준다. PROT_NONE 매핑으로
++             * 덮어 자리를 지키면서 접근만 막는다(MAP_JIT 영역 위에 MAP_FIXED 덮기는 된다 — 실측). */
++            if (end > start) mmap( start, end - start, PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0 );
++            set_page_vprot( base, size, 0 );
++        }
++        else set_page_vprot( base, size, vprot );
++        return TRUE;
++    }
++#endif
+     if (!use_kernel_writewatch && view->protect & VPROT_WRITEWATCH)
+     {
+         /* each page may need different protections depending on write watch flag */
+@@ -2234,6 +2376,10 @@ failed:
+     return status;
+ }
+ 
++#if defined(__APPLE__) && defined(__aarch64__)
++static void fex32_init_window(void);
++#endif
++
+ /***********************************************************************
+  *           map_view
+  *
+@@ -2252,6 +2398,15 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
+     if (!align_mask) align_mask = granularity_mask;
+     assert( align_mask >= host_page_mask );
+ 
++    /* fex32: 32비트 한도(4GB 아래) 요청은 게스트 창 [base, base+4G) 안에서 찾는다 */
++    if (wow_guest_base && limit_high && limit_high < limit_4g)
++    {
++        /* limit_low 가 address_space_start(0x140000000) 같은 호스트 하한이면 게스트 하한 64K 로 */
++        if (limit_low >= wow_guest_base && limit_low < wow_guest_base + limit_4g) ;  /* 이미 창 주소 */
++        else limit_low = wow_guest_base + (limit_low < limit_4g ? max( limit_low, (ULONG_PTR)0x10000 ) : 0x10000);
++        limit_high = wow_guest_base + limit_high;
++    }
++
+     if (alloc_type & MEM_REPLACE_PLACEHOLDER)
+     {
+         struct file_view *view;
+@@ -2274,6 +2429,17 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
+     }
+ 
+     if (limit_high && limit_low >= limit_high) return STATUS_INVALID_PARAMETER;
++#ifdef __APPLE__
++    if (want_jit_alloc && !base && (ptr = jit_map_alloc( size, align_mask )))
++    {
++        /* MAP_JIT 매핑은 항상 RWX 다(mprotect 불가). 커밋 여부는 vprot 로만 관리한다 */
++        status = create_view( view_ret, ptr, size, vprot );
++        if (status) jit_map_free( ptr, size );
++        else { (*view_ret)->protect |= VPROT_MAPJIT; jit_view_added( ptr, size ); }
++        TRACE( "MAP_JIT 뷰 %p-%p status %x\n", ptr, (char *)ptr + size, status );
++        return status;
++    }
++#endif
+ 
+     if (use_kernel_writewatch && vprot & VPROT_WRITEWATCH)
+         unix_prot = get_unix_prot( vprot & ~VPROT_WRITEWATCH );
+@@ -2300,8 +2466,28 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
+         if (limit_low && (void *)limit_low > start) start = (void *)limit_low;
+         if (limit_high && (void *)limit_high < end) end = (char *)limit_high + 1;
+ 
+-        if ((ptr = map_reserved_area( start, end, host_size, top_down, unix_prot, align_mask )))
++        if (wow_guest_base && !((ULONG_PTR)start >= wow_guest_base && (ULONG_PTR)end <= wow_guest_base + limit_4g))
+         {
++            /* fex32: 32비트 한도가 아닌 요청은 게스트 창을 피한다(게스트 NULL 근처가 차 버리지 않게) */
++            char *wb = (char *)wow_guest_base, *we = wb + limit_4g;
++            if (top_down)
++            {
++                if ((char *)end > we && (ptr = map_reserved_area( max( (char *)start, we ), end, host_size, top_down, unix_prot, align_mask )))
++                    goto got_reserved;
++                if ((char *)start < wb && (ptr = map_reserved_area( start, min( (char *)end, wb ), host_size, top_down, unix_prot, align_mask )))
++                    goto got_reserved;
++            }
++            else
++            {
++                if ((char *)start < wb && (ptr = map_reserved_area( start, min( (char *)end, wb ), host_size, top_down, unix_prot, align_mask )))
++                    goto got_reserved;
++                if ((char *)end > we && (ptr = map_reserved_area( max( (char *)start, we ), end, host_size, top_down, unix_prot, align_mask )))
++                    goto got_reserved;
++            }
++        }
++        else if ((ptr = map_reserved_area( start, end, host_size, top_down, unix_prot, align_mask )))
++        {
++        got_reserved:
+             TRACE( "got mem in reserved area %p-%p\n", ptr, (char *)ptr + size );
+             goto done;
+         }
+@@ -2467,9 +2653,37 @@ static SIZE_T get_committed_size( struct file_view *view, void *base, size_t max
+  * Decommit some pages of a given view.
+  * virtual_mutex must be held by caller.
+  */
++/* Ember (2026-10-07 fexcompat1): 호스트 페이지(16K) 일부만 되돌리는 경우의 내용 지우기.
++ * 윈도우는 MEM_DECOMMIT 했다 다시 MEM_COMMIT 한 페이지를 0 으로 준다. 호스트 페이지 전체가 아니면 위 anon_mmap_fixed 를
++ * 못 해서(이웃 4K 가 살아 있음) 옛 내용이 그대로 남았다 → 크로미움 PartitionAlloc 은 "되돌렸다 다시 잡은 페이지는 0"
++ * 이라 믿고 calloc 의 memset 을 건너뛰어, CRT 환경 배열의 끝(NULL) 자리에 옛 문자열이 남아 libcef 가 "NotSuppo"·"ntHeap"
++ * 같은 글자를 포인터로 읽고 죽었다(로아 LOSTARKWeb64 _wgetenv(L"TZ"), STOVE 런처 CEF). 4K 호스트 페이지(로제타)에선 안 생긴다.
++ * 끄기: EMBER_DECOMMIT_ZERO=0. 호스트 쓰기 권한이 없으면 잠깐 RW 로 바꿨다가 호출 쪽이 mprotect_range 로 되돌린다. */
++/* Wine 의 winnt.h 는 MEM_RESET_UNDO 를 0x10000000 으로 잘못 적었다(MS SDK·mingw 는 0x01000000). 앱이 보내는 값으로 받는다. */
++#undef MEM_RESET_UNDO
++#define MEM_RESET_UNDO 0x01000000
++
++static int decommit_zero_mode = -1;
++
++static BOOL zero_partial_host_page( struct file_view *view, char *start, char *end )
++{
++    char *host = ROUND_ADDR( start, host_page_mask );
++
++    if (start >= end) return FALSE;
++#ifdef __APPLE__
++    if (view->protect & VPROT_MAPJIT) return FALSE;  /* MAP_JIT 은 mprotect 가 안 된다(FEX 코드 버퍼) */
++#endif
++    if (!(get_unix_prot( get_host_page_vprot( host ) ) & PROT_WRITE) &&
++        mprotect( host, host_page_size, PROT_READ | PROT_WRITE ))
++        return FALSE;
++    memset( start, 0, end - start );
++    return TRUE;
++}
++
+ static NTSTATUS decommit_pages( struct file_view *view, char *base, size_t size )
+ {
+     char *host_end, *host_start = (char *)ROUND_SIZE( 0, base, host_page_mask );
++    char *zero_head = NULL, *zero_tail = NULL;
+ 
+     if (!size)
+     {
+@@ -2478,9 +2692,32 @@ static NTSTATUS decommit_pages( struct file_view *view, char *base, size_t size
+     }
+     else host_end = ROUND_ADDR( base + size, host_page_mask );
+ 
++    if (host_page_size > page_size)
++    {
++        char *end = base + size;
++
++        if (decommit_zero_mode < 0)
++        {
++            const char *e = getenv( "EMBER_DECOMMIT_ZERO" );
++            decommit_zero_mode = !(e && e[0] == '0');
++        }
++        if (decommit_zero_mode)
++        {
++            /* 앞쪽 자투리 [base, 첫 호스트 경계) 와 뒤쪽 자투리 [마지막 호스트 경계, end) — 한 호스트 페이지 안이면 하나 */
++            char *head_end = min( host_start, end );
++            if (zero_partial_host_page( view, base, head_end )) zero_head = base;
++            if (host_end >= host_start && host_end < end && host_end >= head_end &&
++                zero_partial_host_page( view, host_end, end )) zero_tail = host_end;
++        }
++    }
++
+     if (host_start < host_end) anon_mmap_fixed( host_start, host_end - host_start, PROT_NONE, 0 );
+     set_page_vprot_bits( base, size, 0, VPROT_COMMITTED );
+     if (host_start < host_end) kernel_writewatch_register_range( view, host_start, host_end - host_start );
++    /* 자투리 호스트 페이지의 보호를 남은 4K 들에 맞게 되돌린다 */
++    if (zero_head) mprotect_range( ROUND_ADDR( zero_head, host_page_mask ), host_page_size, 0, 0 );
++    if (zero_tail && ROUND_ADDR( zero_tail, host_page_mask ) != (zero_head ? ROUND_ADDR( zero_head, host_page_mask ) : NULL))
++        mprotect_range( zero_tail, host_page_size, 0, 0 );
+     return STATUS_SUCCESS;
+ }
+ 
+@@ -2613,6 +2850,10 @@ static NTSTATUS free_pages( struct file_view *view, char *base, size_t size )
+     {
+         set_page_vprot( base, size, 0 );
+         if (view->protect & VPROT_ARM64EC) clear_arm64ec_range( base, size );
++#ifdef __APPLE__
++        if (view->protect & VPROT_MAPJIT) { if (host_base < host_end) madvise( host_base, host_end - host_base, MADV_FREE ); }
++        else
++#endif
+         if (host_base < host_end) unmap_area( host_base, host_end - host_base );
+     }
+     return status;
+@@ -3373,6 +3614,9 @@ static NTSTATUS map_image_view( struct file_view **view_ret, struct pe_image_inf
+         base = wine_server_get_ptr( image_info->base );
+         if ((ULONG_PTR)base != image_info->base) base = NULL;
+     }
++    /* fex32: 32비트 이미지의 선호 주소는 게스트 주소다 → 창 안으로 */
++    if (wow_guest_base && base && (ULONG_PTR)base < limit_4g)
++        base = (char *)base + wow_guest_base;
+     if (base)
+     {
+         status = map_view( view_ret, base, size, alloc_type, vprot, limit_low, limit_high, 0 );
+@@ -3849,7 +4093,15 @@ NTSTATUS virtual_map_main_module( HANDLE mapping, USHORT machine )
+ 
+     if (!pe_mapping) return STATUS_INVALID_PARAMETER;
+ 
+-    if (!is_machine_64bit( pe_mapping->image.machine )) limit_high = (limit_2g - 1) & ~granularity_mask;
++    /* Ember: IL-only AnyCPU(.NET) 32비트 이미지는 64비트 프로세스로 돈다(convert_to_pe64). macOS arm64 는 2GB 아래를
++     * 매핑할 수 없어 이 제한이 c000000d 로 .NET 프로그램 전부를 막았다(2026-09-26). 네이티브 코드가 없으니 높은 주소도 된다. */
++    if (!is_machine_64bit( pe_mapping->image.machine ) &&
++        !((pe_mapping->image.image_flags & IMAGE_FLAGS_ComPlusNativeReady) && is_machine_64bit( native_machine )))
++        limit_high = (limit_2g - 1) & ~granularity_mask;
++#if defined(__APPLE__) && defined(__aarch64__)
++    /* fex32: 32비트 주 실행파일 → 게스트 창을 지금 만든다(set_large_address_space 보다 먼저 매핑되므로) */
++    if (limit_high && is_win64) fex32_init_window();
++#endif
+     main_module = NULL;
+ 
+     /* check if we can replace that mapping with the builtin */
+@@ -4052,6 +4304,9 @@ static void init_teb( struct thread_data *data, void *ptr )
+     teb->StaticUnicodeString.MaximumLength = sizeof(teb->StaticUnicodeBuffer);
+     teb->RealClientId = teb->ClientId;
+     data->teb = teb;
++    /* 자기 자신의 TEB 를 만드는 경우에만 TSD 슬롯을 채운다. 새 스레드용으로
++     * 부모가 만드는 경우에는 그 스레드가 server_init_thread 에서 직접 채운다. */
++    if (pthread_getspecific( thread_data_key ) == data) set_teb_tsd_slot( teb );
+     list_add_head( &teb_list, &data->entry );
+ }
+ 
+@@ -4069,6 +4324,70 @@ static struct thread_data *init_thread_data( void *ptr )
+     return data;
+ }
+ 
++#if defined(__APPLE__) && defined(__aarch64__)
++/***********************************************************************
++ *           fex32_init_window
++ *
++ * fex32: macOS arm64 는 4GB 아래를 못 쓴다. 32비트 게스트의 4GB 를 통째로
++ * wow_guest_base 위에 예약하고, 공유 사용자 데이터(0x7ffe0000)를 창 안에도 비춘다.
++ */
++static void fex32_init_window(void)
++{
++    static const WCHAR usd_nameW[] = {'\\','K','e','r','n','e','l','O','b','j','e','c','t','s',
++                                      '\\','_','_','w','i','n','e','_','u','s','e','r','_','s','h','a','r','e','d','_','d','a','t','a',0};
++    UNICODE_STRING name_str = RTL_CONSTANT_STRING( usd_nameW );
++    OBJECT_ATTRIBUTES attr = { sizeof(attr), 0, &name_str };
++    struct file_view *view;
++    char *base = (char *)(ULONG_PTR)WINE_WOW64_GUEST_BASE;
++    char *usd = base + 0x7ffe0000;
++    HANDLE section;
++    int fd, needs_close;
++    unsigned int status;
++
++    if (wow_guest_base) return;
++    /* fex32b: 실험 기능 — Ember 가 EMBER_FEX32=1 을 줄 때만 창을 만든다(없으면 예전처럼 32비트는 못 돈다) */
++    {
++        const char *e = getenv( "EMBER_FEX32" );
++        if (!e || e[0] != '1') return;
++    }
++    reserve_area( base, base + 0x100000000ull );
++    wow_guest_base = (ULONG_PTR)base;
++    __wine_wow64_guest_base = (ULONG_PTR)base;
++    /* 창 앞뒤 64K 가드: JIT 는 [기준+게스트주소±16K] 로 접근하므로 32비트 감김이 창 밖 호스트 메모리를 건드리지 않게 */
++    {
++        void *g1 = mmap( base - 0x10000, 0x10000, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0 );
++        void *g2 = mmap( base + 0x100000000ull, 0x10000, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0 );
++        if (g1 != base - 0x10000) { ERR( "fex32: 앞 가드 실패 %p\n", g1 ); if (g1 != MAP_FAILED) munmap( g1, 0x10000 ); }
++        if (g2 != base + 0x100000000ull) { ERR( "fex32: 뒤 가드 실패 %p\n", g2 ); if (g2 != MAP_FAILED) munmap( g2, 0x10000 ); }
++    }
++
++    status = map_view( &view, usd, page_size, 0, VPROT_READ | VPROT_COMMITTED, 0, 0, 0 );
++    if (status) { ERR( "fex32: USD 창 뷰 실패 %08x\n", status ); return; }
++    if ((status = NtOpenSection( &section, SECTION_MAP_READ, &attr )))
++    {
++        ERR( "fex32: USD 섹션 열기 실패 %08x\n", status );
++        return;
++    }
++    if (!server_get_unix_fd( section, 0, &fd, &needs_close, NULL, NULL ))
++    {
++        if (mmap( usd, host_page_size, PROT_READ, MAP_SHARED | MAP_FIXED, fd, 0 ) != usd)
++            ERR( "fex32: USD 창 mmap 실패 %s\n", strerror(errno) );
++        if (needs_close) close( fd );
++    }
++    NtClose( section );
++    TRACE( "fex32: 게스트 창 %p-%p, USD %p\n", base, base + 0x100000000ull, usd );
++}
++
++/* fex32b: 파일 없이 내장으로 올리는 32비트 주 실행파일(보틀 준비 중 wineboot 가 띄우는 32비트 rundll32 —
++ * syswow64 가 아직 비어 있다)도 창을 먼저 만들고 창 안 2GB 아래로 올린다. 창이 없으면 0(제한 없음, 예전과 같음). */
++ULONG_PTR virtual_fex32_prepare_main32(void)
++{
++    if (!is_win64) return 0;
++    fex32_init_window();
++    return wow_guest_base ? ((limit_2g - 1) & ~granularity_mask) : 0;
++}
++#endif
++
+ /* enable use of a large address space when allowed by the application */
+ static void set_large_address_space(void)
+ {
+@@ -4085,6 +4404,9 @@ static void set_large_address_space(void)
+ 
+     if (is_win64)
+     {
++#if defined(__APPLE__) && defined(__aarch64__)
++        if (is_wow64()) fex32_init_window();
++#endif
+         if (!is_wow64())
+         {
+ #ifndef __APPLE__  /* don't free the zerofill section on macOS */
+@@ -4125,11 +4447,13 @@ struct thread_data *virtual_alloc_first_thread_data(void)
+         exit(1);
+     }
+ 
++
+     status = map_view( &view, NULL, signal_stack_mask + 1 + kernel_stack_size, MEM_TOP_DOWN,
+                        VPROT_READ | VPROT_WRITE | VPROT_COMMITTED, limit_4g, 0, 0 );
+     assert( !status );
+     thread_data = init_thread_data( view->base );
+     pthread_setspecific( thread_data_key, thread_data );
++    set_teb_tsd_slot( thread_data->teb );
+     return thread_data;
+ }
+ 
+@@ -4265,6 +4589,11 @@ void virtual_free_thread_data( struct thread_data *data )
+     sigset_t sigset;
+     WOW_TEB *wow_teb;
+ 
++    if (data->server_scratch)
++    {
++        munmap( data->server_scratch, SERVER_SCRATCH_SIZE );
++        data->server_scratch = NULL;
++    }
+     if (!(teb = data->teb)) goto done;
+ 
+     if (teb->DeallocationStack)
+@@ -4503,6 +4832,11 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
+ 
+     size = max( reserve_size, commit_size );
+     if (size < 1024 * 1024) size = 1024 * 1024;  /* Xlib needs a large stack */
++    /* 에뮬레이션된 코드는 네이티브 스택을 훨씬 많이 쓴다. EC↔x64 썽크가 레지스터를
++     * 통째로 저장하고, 번역기 자체도 게스트 호출마다 프레임을 쌓는다. 윈도우 실행파일이
++     * 적어 둔 1MB 로는 CEF 같은 큰 프로그램에서 스택이 터진다(실측).
++     * guard_page 가 참인 것만 진짜 스레드 스택이다. CHPE 에뮬레이터 스택은 건드리지 않는다. */
++    if (guard_page && is_arm64ec() && size < 16 * 1024 * 1024) size = 16 * 1024 * 1024;
+     size = ROUND_SIZE( 0, size, granularity_mask );
+ 
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+@@ -4562,6 +4896,7 @@ void virtual_map_user_shared_data(void)
+         ERR( "failed to remap the process USD: %d\n", res );
+         exit(1);
+     }
++
+     if (needs_close) close( fd );
+     NtClose( section );
+ }
+@@ -4689,6 +5024,62 @@ static NTSTATUS grow_thread_stack( struct thread_data *data, char *page, struct
+ /***********************************************************************
+  *           virtual_handle_fault
+  */
++#ifdef __APPLE__
++/***********************************************************************
++ *           virtual_handle_jit_fault
++ *
++ * MAP_JIT 아레나 안의 페이지에 난 쓰기/실행 폴트. 이 스레드의 JIT 쓰기보호를
++ * 원하는 쪽으로 돌리고 같은 명령을 다시 실행시킨다. 다른 스레드는 영향받지 않는다.
++ */
++BOOL virtual_handle_jit_fault( void *addr, void *pc, void *lr, BOOL exec )
++{
++    struct file_view *view;
++    BOOL ret = FALSE;
++
++    /* Ember perf2: MAP_JIT 뷰가 없거나 그 범위 밖이면 잠금 없이 끝낸다(게임 폴트 대부분 — 게스트 SMC 트랩·가드 페이지) */
++    if (!maybe_jit_addr( addr )) return FALSE;
++
++    mutex_lock( &virtual_mutex ); vm_lock_track( __builtin_return_address(0) );
++    view = find_view( addr, 0 );
++    if (view && (view->protect & VPROT_MAPJIT) && (get_page_vprot( addr ) & VPROT_COMMITTED))
++    {
++        if (exec)
++        {
++            /* 실행 모드 전환은 시그널 핸들러 안에서 하면 sigreturn 이 되돌린다(실측).
++             * 그래서 실행 모드 진입은 에뮬레이터가 코드를 쓴 뒤 스스로 돌려놓아야 한다.
++             * 여기 왔다면 그 짝이 빠진 곳이 있는 것이다. 위치를 남기고 진짜 예외로 올린다. */
++            static LONG exec_faults;
++            if (InterlockedIncrement( &exec_faults ) <= 16)   /* 무한 폴트 루프에서 로그가 터지지 않게 */
++            {
++                struct file_view *lv = find_view( lr, 0 );
++                ERR( "JIT 아레나 실행 폴트 %p (lr %p = image %p +%#lx) — 쓰기 모드에서 코드로 돌아왔다. 짝이 빠진 쓰기 지점을 찾아야 한다\n",
++                     addr, lr, lv ? lv->base : NULL, lv ? (unsigned long)((char *)lr - (char *)lv->base) : 0ul );
++            }
++        }
++        else
++        {
++            /* 에뮬레이터가 스코프 없이 코드를 썼다. 쓰기 모드 전환은 핸들러에서도 유지되므로
++             * 여기서 돌려 주고 계속 가되, 위치를 남겨서 짝을 맞출 수 있게 한다. */
++            /* 이 경로가 실행 폴트의 원인이다: 쓰기 모드로 바꾼 뒤 되돌릴 사람이 없다. 위치를 남긴다(처음 32번). */
++            static LONG write_faults;
++            if (InterlockedIncrement( &write_faults ) <= 32)
++            {
++                /* FEX 는 PE DLL 이라 dladdr 로는 안 보인다. pc 가 속한 이미지 뷰의 베이스와 오프셋을 찍는다
++                 * (오프셋 → llvm-nm --numeric-sort libarm64ecfex.dll 로 함수 이름). */
++                struct file_view *pv = find_view( pc, 0 ), *lv = find_view( lr, 0 );
++                ERR( "JIT 아레나 쓰기 폴트 %p (pc %p = image %p +%#lx, lr %p = image %p +%#lx) — 스코프 없는 코드 쓰기\n", addr,
++                     pc, pv ? pv->base : NULL, pv ? (unsigned long)((char *)pc - (char *)pv->base) : 0ul,
++                     lr, lv ? lv->base : NULL, lv ? (unsigned long)((char *)lr - (char *)lv->base) : 0ul );
++            }
++            pthread_jit_write_protect_np( 0 );
++            ret = TRUE;
++        }
++    }
++    vm_lock_untrack(); mutex_unlock( &virtual_mutex );
++    return ret;
++}
++#endif
++
+ NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec, void *stack )
+ {
+     NTSTATUS ret = STATUS_ACCESS_VIOLATION;
+@@ -4697,7 +5088,7 @@ NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec,
+     char *page = ROUND_ADDR( addr, host_page_mask );
+     BYTE vprot;
+ 
+-    mutex_lock( &virtual_mutex );  /* no need for signal masking inside signal handler */
++    mutex_lock( &virtual_mutex ); vm_lock_track( __builtin_return_address(0) );  /* no need for signal masking inside signal handler */
+     vprot = get_host_page_vprot( page );
+ 
+ #ifdef __APPLE__
+@@ -4720,6 +5111,57 @@ NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec,
+         }
+         else ret = grow_thread_stack( data, page, &stack_info );
+     }
++#ifdef __APPLE__
++    /* W^X 때문에 한쪽만 줄 수 있는 페이지다. 필요한 쪽으로 뒤집고 다시 실행시킨다. */
++    else if (is_vprot_exec_write( vprot ) && !(vprot & VPROT_WRITEWATCH) &&
++             (err == EXCEPTION_WRITE_FAULT || err == EXCEPTION_EXECUTE_FAULT))
++    {
++        BOOL want_exec = (err == EXCEPTION_EXECUTE_FAULT);
++
++        /* 이미 원하는 쪽으로 열려 있는데도 폴트가 났다면 진짜 접근 위반이다. */
++        if (want_exec != !!(vprot & VPROT_WX_EXEC))
++        {
++            /* 한 페이지씩 뒤집으면 JIT 이 돌 때 전환이 수십만 번 일어난다(실측).
++             * 에뮬레이터의 코드 버퍼는 넓게 이어져 있고, 쓰는 자리와 실행하는 자리가
++             * 대개 멀리 떨어져 있다. 그래서 넉넉한 창 단위로 한 번에 뒤집는다.
++             * 창은 이 주소가 속한 view 안으로 잘라 넣는다. */
++            char *start = page, *end = page + host_page_size;
++            struct file_view *view = find_view( page, 0 );
++
++            if (view)
++            {
++                static const SIZE_T wx_window = 0x100000;   /* 1MB */
++                char *vbase = view->base, *vend = vbase + view->size;
++                char *wstart = ROUND_ADDR( page, wx_window - 1 );
++                char *wend = wstart + wx_window;
++
++                if (wstart < vbase) wstart = vbase;
++                if (wend > vend) wend = vend;
++                if (wstart <= page && wend >= page + host_page_size)
++                {
++                    start = ROUND_ADDR( wstart, host_page_mask );
++                    end = (char *)ROUND_ADDR( wend + host_page_mask, host_page_mask );
++                }
++            }
++            set_page_vprot_bits( start, end - start,
++                                 want_exec ? VPROT_WX_EXEC : 0,
++                                 want_exec ? 0 : VPROT_WX_EXEC );
++            if (!mprotect_range( start, end - start, 0, 0 )) ret = STATUS_SUCCESS;
++        }
++        else
++        {
++            /* 이미 원하는 쪽으로 열려 있는데 폴트가 왔다. 진짜 위반이 아니라 낡은 폴트다.
++             * 폴트는 다른 스레드가 이 창을 반대쪽으로 뒤집어 둔 동안 났고, 우리가
++             * virtual_mutex 를 기다리는 사이 그 스레드(혹은 또 다른 스레드)가 다시
++             * 이쪽으로 뒤집어 놓은 것이다(실측: FEX 의 JIT 스레드 둘이 같은 1MB 창에서
++             * 쓰기/실행을 번갈아 하다가 정확히 이 순서로 걸렸다). 이걸 접근 위반으로
++             * 올리면 에뮬레이터가 예외를 게스트에 넘겨 프로세스가 무너진다.
++             * 호스트 보호를 한 번 더 맞춰 두고 그냥 다시 실행시킨다. */
++            mprotect_range( page, host_page_size, 0, 0 );
++            ret = STATUS_SUCCESS;
++        }
++    }
++#endif
+     else if (err == EXCEPTION_WRITE_FAULT)
+     {
+         if (vprot & VPROT_WRITEWATCH)
+@@ -4743,9 +5185,9 @@ NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec,
+                 ret = STATUS_SUCCESS;
+         }
+     }
+-    mutex_unlock( &virtual_mutex );
++    vm_lock_untrack(); mutex_unlock( &virtual_mutex );
+     rec->ExceptionCode = ret;
+-    return ret;
++return ret;
+ }
+ 
+ 
+@@ -4783,13 +5225,13 @@ void *virtual_setup_exception( struct thread_data *data, void *stack_ptr, size_t
+     else if (stack < stack_info.limit)
+     {
+         char *page = ROUND_ADDR( stack, host_page_mask );
+-        mutex_lock( &virtual_mutex );  /* no need for signal masking inside signal handler */
++        mutex_lock( &virtual_mutex ); vm_lock_track( __builtin_return_address(0) );  /* no need for signal masking inside signal handler */
+         if ((get_host_page_vprot( page ) & VPROT_GUARD) && grow_thread_stack( data, page, &stack_info ))
+         {
+             rec->ExceptionCode = STATUS_STACK_OVERFLOW;
+             rec->NumberParameters = 0;
+         }
+-        mutex_unlock( &virtual_mutex );
++        vm_lock_untrack(); mutex_unlock( &virtual_mutex );
+     }
+ #if defined(VALGRIND_MAKE_MEM_UNDEFINED)
+     VALGRIND_MAKE_MEM_UNDEFINED( stack, size );
+@@ -4824,6 +5266,56 @@ static NTSTATUS check_write_access( void *base, size_t size, BOOL *has_write_wat
+ }
+ 
+ 
++/* Ember perf2: 잠금 없이 보는 사전 검사. 쓸 수 있고 쓰기 감시가 없으면 TRUE.
++ * pages_vprot 는 한 번 만든 디렉터리를 없애지 않으므로 잠금 없이 읽어도 죽지 않는다. 값이 낡았을 수는 있는데
++ * 그 경우는 어차피 서버 왕복 중에도 생길 수 있는 경합이고, 복사 단계의 잠금 검사가 최종 판정이다. */
++static BOOL check_write_access_unlocked( void *base, size_t size )
++{
++    size_t i;
++    char *addr = ROUND_ADDR( base, host_page_mask );
++
++    size = ROUND_SIZE( base, size, host_page_mask );
++    for (i = 0; i < size; i += host_page_size)
++    {
++        BYTE vprot = get_host_page_vprot( addr + i );
++        if (vprot & VPROT_WRITEWATCH) return FALSE;
++        if (!(get_unix_prot( vprot ) & PROT_WRITE)) return FALSE;
++    }
++    return TRUE;
++}
++
++/* 서버 답을 받을 임시 버퍼. 0 = 스택, 1 = 스레드별 스크래치, 2 = mmap */
++static void *server_reply_buffer_acquire( data_size_t size, char *stack_buf, size_t stack_size, int *kind )
++{
++    struct thread_data *data;
++    void *p;
++
++    if (size <= stack_size) { *kind = 0; return stack_buf; }
++    /* Ember perf2: 1KB~64KB 답(디렉터리 목록·핸들 표·IRP 데이터)마다 mmap/munmap 두 번의 시스템 콜을 하던 것을
++     * 스레드별 64KB 버퍼(한 번만 mmap) 로 바꾼다. 시그널 문맥(usr1_handler → 시스템 APC)에서 재진입하면 busy 라
++     * 예전처럼 mmap 으로 간다 — malloc 은 여전히 금지(README §38). */
++    if ((data = get_thread_data()) && !__atomic_exchange_n( &data->server_scratch_busy, 1, __ATOMIC_ACQUIRE ))
++    {
++        if (!data->server_scratch)
++        {
++            p = mmap( NULL, SERVER_SCRATCH_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0 );
++            if (p != MAP_FAILED) data->server_scratch = p;
++        }
++        if (data->server_scratch) { *kind = 1; return data->server_scratch; }
++        __atomic_store_n( &data->server_scratch_busy, 0, __ATOMIC_RELEASE );
++    }
++    p = mmap( NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0 );
++    if (p == MAP_FAILED) return NULL;
++    *kind = 2;
++    return p;
++}
++
++static void server_reply_buffer_release( void *tmp, data_size_t size, int kind )
++{
++    if (kind == 1) __atomic_store_n( &get_thread_data()->server_scratch_busy, 0, __ATOMIC_RELEASE );
++    else if (kind == 2) munmap( tmp, size );
++}
++
+ /***********************************************************************
+  *           virtual_locked_server_call
+  */
+@@ -4838,6 +5330,58 @@ unsigned int virtual_locked_server_call( void *req_ptr )
+ 
+     if (!size) return wine_server_call( req_ptr );
+ 
++    /* Ember: 서버 왕복 동안 virtual_mutex 를 쥐지 않는다. 답을 임시 버퍼로 받고, 잠금은 사용자 버퍼로
++     * 복사하는 짧은 구간에만 잡는다. 실측(2026-09-24, 로아 FEX 멈춤): wineserver 가 밀리면 이 잠금을 쥔 채
++     * 답을 기다리는 스레드 뒤에 14개가 줄을 서서 게임이 멈춘 것처럼 보였다. */
++    if (size <= 65536)
++    {
++        char stack_buf[1024];
++        /* malloc 은 안 된다. 이 함수는 시그널 문맥에서도 불린다(usr1_handler → wait_suspend → 시스템 APC →
++         * irp_completion). 스레드가 malloc 안에서 멈춘 채 여기서 다시 malloc 하면 같은 잠금을 두 번 잡아
++         * abort 하고, 그 뒤처리도 free 로 또 잠금을 잡아 무한히 돈다. 프로세스 전체가 malloc 에서 멈춘다.
++         * 실측(2026-09-25, 스팀 webhelper 100% 멈춤): Chrome_IOThread NtReadFile → malloc 중 SIGUSR1.
++         * mmap/munmap 은 시스템 콜이라 시그널 문맥에서도 안전하다. */
++        void *tmp;
++        int kind;
++        data_size_t got;
++
++        if (!(tmp = server_reply_buffer_acquire( size, stack_buf, sizeof(stack_buf), &kind ))) goto locked;
++        /* 사전 검사는 "버퍼가 잘못됐으면 부작용 있는 요청(NtReadFile 등)을 서버에 보내지 않는다"는 조기 탈출일 뿐이다.
++         * 왕복 중에 버퍼가 풀릴 수 있어 어차피 최종 판정은 아래 복사 단계의 잠금 검사다. 그래서 흔한 경우(쓰기 가능·
++         * 쓰기 감시 없음)는 잠금 없이 보고, 그 밖(쓰기 감시 페이지는 mprotect 가 필요)만 예전대로 잠근다. */
++        if (!check_write_access_unlocked( addr, size ))
++        {
++            server_enter_uninterrupted_section( &virtual_mutex, &sigset );
++            ret = check_write_access( addr, size, &has_write_watch );
++            server_leave_uninterrupted_section( &virtual_mutex, &sigset );
++            if (ret)
++            {
++                memset( &req->u.reply, 0, sizeof(req->u.reply) );
++                server_reply_buffer_release( tmp, size, kind );
++                return ret;
++            }
++        }
++        req->reply_data = tmp;
++        ret = wine_server_call( req_ptr );
++        req->reply_data = addr;
++        got = wine_server_reply_size( req );
++        if (got)
++        {
++            /* 이 잠금은 필요하다: 사용자 버퍼로 복사하는 동안 다른 스레드가 그 자리를 풀거나 보호를 바꾸면
++             * 안 되고, 쓰기 감시 갱신도 vprot 와 함께 원자적이어야 한다. */
++            server_enter_uninterrupted_section( &virtual_mutex, &sigset );
++            if (!check_write_access( addr, got, &has_write_watch ))
++            {
++                memcpy( addr, tmp, got );
++                if (has_write_watch) update_write_watches( addr, got, got );
++            }
++            server_leave_uninterrupted_section( &virtual_mutex, &sigset );
++        }
++        server_reply_buffer_release( tmp, size, kind );
++        return ret;
++    }
++
++locked:
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+     if (!(ret = check_write_access( addr, size, &has_write_watch )))
+     {
+@@ -5189,7 +5733,9 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
+ 
+     /* Compute the alloc type flags */
+ 
+-    if (!(type & (MEM_COMMIT | MEM_RESERVE | MEM_RESET))
++    /* Ember (fexcompat1): MEM_RESET_UNDO 는 홀로만, 이미 있는 영역에만 */
++    if (type & MEM_RESET_UNDO && (type != MEM_RESET_UNDO || !base)) return STATUS_INVALID_PARAMETER;
++    if (!(type & (MEM_COMMIT | MEM_RESERVE | MEM_RESET | MEM_RESET_UNDO))
+         || (type & MEM_REPLACE_PLACEHOLDER && !(type & MEM_RESERVE)))
+     {
+         WARN("called with wrong alloc type flags (%08x) !\n", type);
+@@ -5226,8 +5772,17 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
+ 
+             if (vprot & VPROT_WRITECOPY) status = STATUS_INVALID_PAGE_PROTECTION;
+             else if (is_dos_memory) status = allocate_dos_memory( &view, vprot );
+-            else status = map_view( &view, base, size, type, vprot, limit_low, limit_high,
+-                                    align ? align - 1 : granularity_mask );
++            else
++            {
++#ifdef __APPLE__
++                want_jit_alloc = !!(attributes & MEM_EXTENDED_PARAMETER_EC_CODE);
++#endif
++                status = map_view( &view, base, size, type, vprot, limit_low, limit_high,
++                                   align ? align - 1 : granularity_mask );
++#ifdef __APPLE__
++                want_jit_alloc = FALSE;
++#endif
++            }
+ 
+             if (status == STATUS_SUCCESS)
+             {
+@@ -5236,10 +5791,51 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
+             }
+         }
+     }
++    else if (type & MEM_RESET_UNDO)
++    {
++        /* Ember (2026-10-08 fexcompat1): 윈도우 규약 — MEM_RESET 했던 범위의 내용이 다 남아 있으면 성공, 하나라도 버려졌으면 실패.
++         * 맥에선 MEM_RESET 이 안쪽 16K 페이지를 MADV_FREE_REUSABLE 로 내준다. 그사이 커널이 가져간(상주도 스왑도 아닌) 페이지가
++         * 있으면 내용이 0 이 됐으니 실패를 돌려주고, 어느 쪽이든 MADV_FREE_REUSE 로 다시 쓴다고 알린다(사용량 계산 복구). */
++        if (!(view = find_view( base, size ))) status = STATUS_NOT_MAPPED_VIEW;
++#ifdef __APPLE__
++        else
++        {
++            char *hs = (char *)ROUND_SIZE( 0, base, host_page_mask ), *he = ROUND_ADDR( (char *)base + size, host_page_mask );
++
++            if (hs < he && !(view->protect & (SEC_FILE | SEC_IMAGE | VPROT_MAPJIT)))
++            {
++                size_t i, n = (he - hs) / host_page_size;
++                char *vec = malloc( n );
++
++                if (vec && !mincore( hs, he - hs, vec ))
++                    for (i = 0; i < n; i++)
++                        if (!(vec[i] & (MINCORE_INCORE | MINCORE_PAGED_OUT))) { status = STATUS_UNSUCCESSFUL; break; }
++                free( vec );
++                madvise( hs, he - hs, MADV_FREE_REUSE );
++            }
++        }
++#endif
++    }
+     else if (type & MEM_RESET)
+     {
+         if (!(view = find_view( base, size ))) status = STATUS_NOT_MAPPED_VIEW;
++#ifdef __APPLE__
++        /* Ember (2026-10-07 fexcompat1): 맥의 MADV_DONTNEED 는 내용을 버리지 않는다(리눅스와 다름) — MEM_RESET·DiscardVirtualMemory
++         * 로 돌려준 메모리가 그대로 남아 압축·스왑으로 쌓였다. 또 madvise 는 호스트 페이지(16K) 정렬이 아니면 EINVAL 로 아무것도
++         * 안 한다. 안쪽의 온전한 호스트 페이지만 MADV_FREE_REUSABLE(크로미움 맥판과 같은 방식)로 버린다. EMBER_RESET_FREE=0 이면 예전대로. */
++        else
++        {
++            static int reset_free = -1;
++            char *hs = (char *)ROUND_SIZE( 0, base, host_page_mask ), *he = ROUND_ADDR( (char *)base + size, host_page_mask );
++
++            if (reset_free < 0) { const char *e = getenv( "EMBER_RESET_FREE" ); reset_free = !(e && e[0] == '0'); }
++            if (!reset_free) madvise( base, size, MADV_DONTNEED );
++            else if (hs < he && !(view->protect & (SEC_FILE | SEC_IMAGE | VPROT_MAPJIT)))
++                madvise( hs, he - hs, MADV_FREE_REUSABLE );
++        }
++#else
+         else madvise( base, size, MADV_DONTNEED );
++#endif
+     }
+     else  /* commit the pages */
+     {
+@@ -5289,7 +5885,7 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
+                                          SIZE_T *size_ptr, ULONG type, ULONG protect )
+ {
+     static const ULONG type_mask = MEM_COMMIT | MEM_RESERVE | MEM_RESET | MEM_TOP_DOWN |
+-                                   MEM_PHYSICAL | MEM_LARGE_PAGES | MEM_WRITE_WATCH;
++                                   MEM_PHYSICAL | MEM_LARGE_PAGES | MEM_WRITE_WATCH | MEM_RESET_UNDO;
+     ULONG_PTR limit;
+ 
+     TRACE("%p %p %08lx %x %08x\n", process, *ret, *size_ptr, type, protect );
+@@ -5428,7 +6024,7 @@ NTSTATUS WINAPI NtAllocateVirtualMemoryEx( HANDLE process, PVOID *ret, SIZE_T *s
+ {
+     static const ULONG type_mask = MEM_COMMIT | MEM_RESERVE | MEM_RESET | MEM_TOP_DOWN |
+                                    MEM_PHYSICAL | MEM_LARGE_PAGES | MEM_WRITE_WATCH |
+-                                   MEM_RESERVE_PLACEHOLDER | MEM_REPLACE_PLACEHOLDER;
++                                   MEM_RESERVE_PLACEHOLDER | MEM_REPLACE_PLACEHOLDER | MEM_RESET_UNDO;
+     ULONG_PTR limit_low = 0;
+     ULONG_PTR limit_high = 0;
+     ULONG_PTR align = 0;
+@@ -5826,6 +6422,22 @@ static unsigned int get_basic_memory_info( HANDLE process, LPCVOID addr,
+         return result.virtual_query.status;
+     }
+ 
++#ifdef __aarch64__
++    /* Ember: 윈도우의 KUSER_SHARED_DATA 는 0x7FFE0000 의 읽기 전용 한 쪽이다. arm64 맥에서는 4GB 아래를 못 써서 진짜 USD 를
++     * WINE_USD_ADDR 로 옮겼고(읽기는 FEX 가 흉내), VirtualQuery 로 그 자리를 확인하는 프로그램(안티치트 등)을 위해 있는 척한다. */
++    if (WINE_USD_ADDR != 0x7ffe0000 && (ULONG_PTR)addr >= 0x7ffe0000 && (ULONG_PTR)addr < 0x7ffe1000)
++    {
++        info->BaseAddress       = (void *)0x7ffe0000;
++        info->AllocationBase    = (void *)0x7ffe0000;
++        info->AllocationProtect = PAGE_READONLY;
++        info->RegionSize        = 0x1000;
++        info->State             = MEM_COMMIT;
++        info->Protect           = PAGE_READONLY;
++        info->Type              = MEM_PRIVATE;
++        if (res_len) *res_len = sizeof(*info);
++        return STATUS_SUCCESS;
++    }
++#endif
+     if ((status = fill_basic_memory_info( addr, info ))) return status;
+ 
+     if (res_len) *res_len = sizeof(*info);
+@@ -6065,7 +6677,9 @@ static NTSTATUS get_working_set_ex( HANDLE process, LPCVOID addr,
+ 
+     if (process != NtCurrentProcess())
+     {
+-        FIXME( "(process=%p,addr=%p) Unimplemented information class: MemoryWorkingSetExInformation\n", process, addr );
++        /* 안티치트가 다른 프로세스에 초당 수백 번 묻는다(로그 60MB/20분). 한 번만 알린다. */
++        static int once;
++        if (!once++) FIXME( "(process=%p,addr=%p) Unimplemented information class: MemoryWorkingSetExInformation\n", process, addr );
+         return STATUS_INVALID_INFO_CLASS;
+     }
+ 
+@@ -6371,10 +6985,15 @@ NTSTATUS WINAPI NtMapViewOfSection( HANDLE handle, HANDLE process, PVOID *addr_p
+         return STATUS_INVALID_PARAMETER_4;
+ 
+     /* If both addr_ptr and zero_bits are passed, they have match */
+-    if (zero_bits && zero_bits < 32 && ((UINT_PTR)*addr_ptr >> (32 - zero_bits)))
+-        return STATUS_INVALID_PARAMETER_4;
+-    if (zero_bits >= 32 && ((UINT_PTR)*addr_ptr & ~zero_bits))
+-        return STATUS_INVALID_PARAMETER_4;
++    {
++        UINT_PTR a = (UINT_PTR)*addr_ptr;
++        /* fex32: 게스트 창 안의 주소는 게스트 값으로 검사한다 */
++        if (wow_guest_base && (a & ~(UINT_PTR)0xffffffff) == wow_guest_base) a &= 0xffffffff;
++        if (zero_bits && zero_bits < 32 && (a >> (32 - zero_bits)))
++            return STATUS_INVALID_PARAMETER_4;
++        if (zero_bits >= 32 && (a & ~zero_bits))
++            return STATUS_INVALID_PARAMETER_4;
++    }
+ 
+     if (!is_win64 && !is_wow64())
+     {
+diff --git a/dlls/ntdll/unwind.c b/dlls/ntdll/unwind.c
+index f070734..a0ae7e7 100644
+--- a/dlls/ntdll/unwind.c
++++ b/dlls/ntdll/unwind.c
+@@ -70,6 +70,14 @@ struct dynamic_unwind_entry
+ 
+ static struct list dynamic_unwind_list = LIST_INIT(dynamic_unwind_list);
+ 
++/* 동적 unwind 테이블 조회 캐시.
++ * PhysX·JIT 처럼 RtlAddFunctionTable 로 테이블을 등록하는 게임은 예외/스택 추적마다 등록 목록을 처음부터
++ * 훑는다(선형 탐색 + 크리티컬 섹션). 직전에 맞은 등록 항목을 기억해 두고 같은 범위면 바로 쓴다.
++ * 콜백 등록(callback)은 호출 결과가 달라질 수 있어 캐시하지 않는다. 목록이 바뀌는 곳마다 비운다.
++ * WINE_UNWIND_TABLE_CACHE=0 으로 끈다. (ForgePlay 의 같은 착안을 범위 판정으로 넓힌 것) */
++static struct dynamic_unwind_entry *dynamic_unwind_cache;
++static int dynamic_unwind_cache_state;   /* 0: 미확인, 1: 켬, -1: 끔 */
++
+ static RTL_CRITICAL_SECTION dynamic_unwind_section;
+ static RTL_CRITICAL_SECTION_DEBUG dynamic_unwind_debug =
+ {
+@@ -82,26 +90,51 @@ static RTL_CRITICAL_SECTION dynamic_unwind_section = { &dynamic_unwind_debug, -1
+ 
+ static RUNTIME_FUNCTION *lookup_dynamic_function_table( ULONG_PTR pc, ULONG_PTR *base, ULONG *count )
+ {
+-    struct dynamic_unwind_entry *entry;
++    struct dynamic_unwind_entry *entry = NULL, *cursor;
+     RUNTIME_FUNCTION *ret = NULL;
+ 
+     RtlEnterCriticalSection( &dynamic_unwind_section );
+-    LIST_FOR_EACH_ENTRY( entry, &dynamic_unwind_list, struct dynamic_unwind_entry, entry )
++    if (!dynamic_unwind_cache_state)
++    {
++        UNICODE_STRING name = RTL_CONSTANT_STRING( L"WINE_UNWIND_TABLE_CACHE" );
++        WCHAR buffer[2];
++        UNICODE_STRING value = {0, sizeof(buffer), buffer};
++        BOOL enabled;
++
++        /* 환경 변수 조회는 PEB 락을 잡는다. 락 순서가 꼬이지 않게 잠깐 놓고 읽는다. */
++        RtlLeaveCriticalSection( &dynamic_unwind_section );
++        enabled = RtlQueryEnvironmentVariable_U( NULL, &name, &value ) != STATUS_SUCCESS ||
++                  value.Length != sizeof(WCHAR) || buffer[0] != '0';
++        RtlEnterCriticalSection( &dynamic_unwind_section );
++        if (!dynamic_unwind_cache_state) dynamic_unwind_cache_state = enabled ? 1 : -1;
++    }
++    if (dynamic_unwind_cache_state > 0 && dynamic_unwind_cache &&
++        pc >= dynamic_unwind_cache->base && pc < dynamic_unwind_cache->end)
++        entry = dynamic_unwind_cache;
++    else
+     {
+-        if (pc >= entry->base && pc < entry->end)
++        LIST_FOR_EACH_ENTRY( cursor, &dynamic_unwind_list, struct dynamic_unwind_entry, entry )
+         {
+-            *base = entry->base;
+-            if (entry->callback)
++            if (pc >= cursor->base && pc < cursor->end)
+             {
+-                ret = entry->callback( pc, entry->context );
+-                *count = 1;
+-            }
+-            else
+-            {
+-                ret = entry->table;
+-                *count = entry->count;
++                entry = cursor;
++                break;
+             }
+-            break;
++        }
++    }
++    if (entry)
++    {
++        *base = entry->base;
++        if (entry->callback)
++        {
++            ret = entry->callback( pc, entry->context );
++            *count = 1;
++        }
++        else
++        {
++            ret = entry->table;
++            *count = entry->count;
++            if (dynamic_unwind_cache_state > 0) dynamic_unwind_cache = entry;
+         }
+     }
+     RtlLeaveCriticalSection( &dynamic_unwind_section );
+@@ -139,6 +172,7 @@ BOOLEAN CDECL RtlInstallFunctionTableCallback( ULONG_PTR table, ULONG_PTR base,
+     entry->context   = context;
+ 
+     RtlEnterCriticalSection( &dynamic_unwind_section );
++    dynamic_unwind_cache = NULL;
+     list_add_tail( &dynamic_unwind_list, &entry->entry );
+     RtlLeaveCriticalSection( &dynamic_unwind_section );
+ 
+@@ -169,6 +203,7 @@ NTSTATUS WINAPI RtlAddGrowableFunctionTable( void **table, RUNTIME_FUNCTION *fun
+     entry->context   = NULL;
+ 
+     RtlEnterCriticalSection( &dynamic_unwind_section );
++    dynamic_unwind_cache = NULL;
+     list_add_tail( &dynamic_unwind_list, &entry->entry );
+     RtlLeaveCriticalSection( &dynamic_unwind_section );
+ 
+@@ -193,7 +228,10 @@ void WINAPI RtlGrowFunctionTable( void *table, DWORD count )
+         if (entry == table)
+         {
+             if (count > entry->count && count <= entry->max_count)
++            {
++                dynamic_unwind_cache = NULL;
+                 entry->count = count;
++            }
+             break;
+         }
+     }
+@@ -216,6 +254,7 @@ void WINAPI RtlDeleteGrowableFunctionTable( void *table )
+         if (entry == table)
+         {
+             to_free = entry;
++            dynamic_unwind_cache = NULL;
+             list_remove( &entry->entry );
+             break;
+         }
+@@ -241,6 +280,7 @@ BOOLEAN CDECL RtlDeleteFunctionTable( RUNTIME_FUNCTION *table )
+         if (entry->table == table)
+         {
+             to_free = entry;
++            dynamic_unwind_cache = NULL;
+             list_remove( &entry->entry );
+             break;
+         }

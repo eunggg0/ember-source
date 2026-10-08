@@ -1,0 +1,7 @@
+prefix=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr
+includedir=${prefix}/include/ffi
+Name: libffi
+Description: macOS system libffi (/usr/lib/libffi.dylib)
+Version: 3.4.6
+Libs: -lffi
+Cflags: -I${includedir}

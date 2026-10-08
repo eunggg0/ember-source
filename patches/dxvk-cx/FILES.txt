@@ -1,0 +1,36 @@
+# dxvk-cx — base: CrossOver 26.3.0 FOSS source, sources/dxvk (DXVK 1.10.3)
+# 
+# changed 33 files (new 4)
+A build-arm64ec.txt
+M dxvk.conf
+A libarm64ec/vulkan-1.def
+M meson.build
+M src/d3d9/d3d9_adapter.cpp
+M src/d3d9/d3d9_device.cpp
+M src/d3d9/d3d9_device.h
+M src/d3d9/d3d9_fixed_function.cpp
+M src/d3d9/d3d9_include.h
+M src/d3d9/d3d9_options.cpp
+M src/d3d9/d3d9_swapchain.cpp
+M src/dxso/dxso_compiler.cpp
+M src/dxso/dxso_util.h
+M src/dxvk/dxvk_buffer.cpp
+M src/dxvk/dxvk_context.cpp
+M src/dxvk/dxvk_context.h
+M src/dxvk/dxvk_gpu_query.cpp
+M src/dxvk/dxvk_gpu_query.h
+M src/dxvk/dxvk_graphics.cpp
+M src/dxvk/dxvk_graphics.h
+M src/dxvk/dxvk_image.h
+M src/dxvk/dxvk_options.cpp
+M src/dxvk/dxvk_options.h
+A src/dxvk/dxvk_pipecompiler.cpp
+A src/dxvk/dxvk_pipecompiler.h
+M src/dxvk/dxvk_pipemanager.cpp
+M src/dxvk/dxvk_pipemanager.h
+M src/dxvk/meson.build
+M src/util/config/config.cpp
+M src/util/config/config.h
+M src/util/sync/sync_spinlock.h
+M src/util/util_bit.h
+M src/util/util_vector.h

@@ -1,0 +1,37 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 31/34] loader: Ember changes
+
+Base: wine-11.18.tar.xz
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/loader/wine.inf.in b/loader/wine.inf.in
+index 965d3b2..08a8c84 100644
+--- a/loader/wine.inf.in
++++ b/loader/wine.inf.in
+@@ -896,6 +896,26 @@ system.ini, drivers32,,"vidc.mrle=msrle32.dll"
+ system.ini, drivers32,,"vidc.msvc=msvidc32.dll"
+ system.ini, drivers32,,"vidc.cvid=iccvid.dll"
+ system.ini, drivers32,,"vidc.IV50=ir50_32.dll"
++system.ini, drivers32,,"vidc.MJPG=ir50_32.dll"
++system.ini, drivers32,,"vidc.AVRN=ir50_32.dll"
++system.ini, drivers32,,"vidc.AVDJ=ir50_32.dll"
++system.ini, drivers32,,"vidc.DMB1=ir50_32.dll"
++system.ini, drivers32,,"vidc.MPG4=ir50_32.dll"
++system.ini, drivers32,,"vidc.MP41=ir50_32.dll"
++system.ini, drivers32,,"vidc.MP42=ir50_32.dll"
++system.ini, drivers32,,"vidc.MP43=ir50_32.dll"
++system.ini, drivers32,,"vidc.DIV3=ir50_32.dll"
++system.ini, drivers32,,"vidc.DIV4=ir50_32.dll"
++system.ini, drivers32,,"vidc.MPG3=ir50_32.dll"
++system.ini, drivers32,,"vidc.DIVX=ir50_32.dll"
++system.ini, drivers32,,"vidc.DX50=ir50_32.dll"
++system.ini, drivers32,,"vidc.XVID=ir50_32.dll"
++system.ini, drivers32,,"vidc.FMP4=ir50_32.dll"
++system.ini, drivers32,,"vidc.MP4V=ir50_32.dll"
++system.ini, drivers32,,"vidc.M4S2=ir50_32.dll"
++system.ini, drivers32,,"vidc.MP4S=ir50_32.dll"
++system.ini, drivers32,,"vidc.3IV2=ir50_32.dll"
++system.ini, drivers32,,"vidc.DIV5=ir50_32.dll"
+ system.ini, drivers32,,"vidc.i420=iyuv_32.dll"
+ system.ini, drivers32,,"vidc.iyuv=iyuv_32.dll"
+ system.ini, drivers32,,"; vidc.IV31=ir32_32.dll"

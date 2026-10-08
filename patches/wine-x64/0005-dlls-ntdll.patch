@@ -1,0 +1,1076 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 5/12] dlls-ntdll: Ember changes
+
+Base: wine-11.0.tar.xz
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index c5c3493..6e44abb 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -73,6 +73,19 @@ static void __fastcall default_thread_init_func( DWORD unknown, LPTHREAD_START_R
+ void (FASTCALL *pBaseThreadInitThunk)(DWORD,LPTHREAD_START_ROUTINE,void *) = default_thread_init_func;
+ NTSTATUS (WINAPI *__wine_unix_call_dispatcher)( unixlib_handle_t, unsigned int, void * ) = NULL;
+ 
++/***********************************************************************
++ *           __wine_unix_call   (NTDLL.@)
++ *
++ * upstream 은 이것을 헤더의 인라인으로 두지만, CrossOver 의 Wine 은 실제 함수로
++ * 내보낸다. 애플 D3DMetal 처럼 그쪽에 맞춰 빌드된 DLL 이 이 심볼을 import 한다.
++ * 없으면 "unimplemented function ntdll.dll.__wine_unix_call" 로 죽는다.
++ * 하는 일은 디스패처로 그대로 넘기는 것뿐이다.
++ */
++NTSTATUS WINAPI wine_unix_call_entry( unixlib_handle_t handle, unsigned int code, void *args )
++{
++    return __wine_unix_call_dispatcher( handle, code, args );
++}
++
+ static DWORD (WINAPI *pCtrlRoutine)(void *);
+ 
+ SYSTEM_DLL_INIT_BLOCK LdrSystemDllInitBlock = { 0xf0 };
+diff --git a/dlls/ntdll/ntdll.spec b/dlls/ntdll/ntdll.spec
+index 46cd1dc..322097e 100644
+--- a/dlls/ntdll/ntdll.spec
++++ b/dlls/ntdll/ntdll.spec
+@@ -1750,6 +1750,7 @@
+ @ stdcall __wine_unix_spawnvp(long ptr)
+ @ stdcall __wine_ctrl_routine(ptr)
+ @ extern -private __wine_syscall_dispatcher
++@ stdcall __wine_unix_call(int64 long ptr) wine_unix_call_entry
+ @ extern -private __wine_unix_call_dispatcher
+ @ extern -private -arch=arm64ec __wine_unix_call_dispatcher_arm64ec
+ @ extern -private __wine_unixlib_handle
+diff --git a/dlls/ntdll/thread.c b/dlls/ntdll/thread.c
+index 3d1e6e0..868cd96 100644
+--- a/dlls/ntdll/thread.c
++++ b/dlls/ntdll/thread.c
+@@ -691,6 +691,14 @@ void WINAPI DECLSPEC_HOTPATCH RtlProcessFlsData( void *teb_fls_data, ULONG flags
+ 
+     if (flags & 1)
+     {
++        /* Ember: 콜백은 fls_section 을 놓고 부른다. 콜백(CRT _freefls 등)이 로더 잠금을 잡는 동안, 다른 스레드가
++         * 로더 잠금을 쥔 채(DllMain THREAD_ATTACH) FlsSetValue 로 fls_section 을 기다리면 교착이다.
++         * 실측(2026-09-24, 로아 FEX): fls_section 을 쥔 스레드 하나에 4개가 60초 넘게 막히고 loader_section 까지
++         * 얽혀 게임이 종료됐다. 먼저 잠금 안에서 (콜백, 인자) 쌍을 모으고 목록에서 뺀 뒤, 잠금 밖에서 호출한다. */
++        struct fls_call { PFLS_CALLBACK_FUNCTION callback; void *arg; };
++        struct fls_call stack_calls[64], *calls = stack_calls;
++        unsigned int ncalls = 0, cap = ARRAY_SIZE(stack_calls);
++
+         lock_fls_data();
+         for (i = 0; i < ARRAY_SIZE(fls->fls_data_chunks); ++i)
+         {
+@@ -701,24 +709,36 @@ void WINAPI DECLSPEC_HOTPATCH RtlProcessFlsData( void *teb_fls_data, ULONG flags
+             for (index = 0; index < fls_chunk_size( i ); ++index)
+             {
+                 PFLS_CALLBACK_FUNCTION callback = fls_data.fls_callback_chunks[i]->callbacks[index].callback;
++                void *arg = fls->fls_data_chunks[i][index + 1];
+ 
+-                if (!fls->fls_data_chunks[i][index + 1])
+-                    continue;
+-
+-                if (callback && callback != (void *)~(ULONG_PTR)0)
++                if (!arg) continue;
++                fls->fls_data_chunks[i][index + 1] = NULL;
++                if (!callback || callback == (void *)~(ULONG_PTR)0) continue;
++                if (ncalls == cap)
+                 {
+-                    TRACE_(relay)("Calling FLS callback %p, arg %p.\n", callback,
+-                            fls->fls_data_chunks[i][index + 1]);
+-
+-                    callback( fls->fls_data_chunks[i][index + 1] );
++                    struct fls_call *grown = RtlAllocateHeap( GetProcessHeap(), 0, cap * 2 * sizeof(*calls) );
++                    if (!grown) continue;
++                    memcpy( grown, calls, ncalls * sizeof(*calls) );
++                    if (calls != stack_calls) RtlFreeHeap( GetProcessHeap(), 0, calls );
++                    calls = grown;
++                    cap *= 2;
+                 }
+-                fls->fls_data_chunks[i][index + 1] = NULL;
++                calls[ncalls].callback = callback;
++                calls[ncalls].arg = arg;
++                ncalls++;
+             }
+         }
+         /* Not using RemoveEntryList() as Windows does not zero list entry here. */
+         fls->fls_list_entry.Flink->Blink = fls->fls_list_entry.Blink;
+         fls->fls_list_entry.Blink->Flink = fls->fls_list_entry.Flink;
+         unlock_fls_data();
++
++        for (i = 0; i < ncalls; ++i)
++        {
++            TRACE_(relay)("Calling FLS callback %p, arg %p.\n", calls[i].callback, calls[i].arg);
++            calls[i].callback( calls[i].arg );
++        }
++        if (calls != stack_calls) RtlFreeHeap( GetProcessHeap(), 0, calls );
+     }
+ 
+     if (flags & 2)
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index cb700dd..cadeb6b 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -361,13 +361,25 @@ static WORD get_alt_machine( WORD machine )
+ static void set_dll_path(void)
+ {
+     char *p, *path = getenv( "WINEDLLPATH" );
++    /* Ember: 게임(보틀)별 빌트인 DLL 우선 경로. ':' 로 나눈다. Wine 트리(dll_dir)보다 먼저 찾는다.
++     * DXMT 처럼 "Wine builtin DLL" 서명이 있는 DLL 은 system32 에 native 로 넣어도 로더가 트리의 것을
++     * 대신 쓰므로(load_builtin), 트리를 건드리지 않고 게임마다 다른 변환기를 고르려면 이 길이 필요하다. */
++    char *pre = getenv( "EMBER_DLLPATH" );
+     int i, count = 0;
+ 
+     if (path) for (p = path, count = 1; *p; p++) if (*p == ':') count++;
++    if (pre) for (p = pre, count++; *p; p++) if (*p == ':') count++;
+ 
+     dll_paths = malloc( (count + 2) * sizeof(*dll_paths) );
+     count = 0;
+ 
++    if (pre && *pre)
++    {
++        pre = strdup( pre );
++        for (p = strtok( pre, ":" ); p; p = strtok( NULL, ":" )) dll_paths[count++] = strdup( p );
++        free( pre );
++    }
++
+     if (!build_dir) dll_paths[count++] = dll_dir;
+ 
+     if (path)
+@@ -521,13 +533,38 @@ static void preloader_exec( char **argv )
+     execv( argv[1], argv + 1 );
+ }
+ 
++/* Ember: 게임 프로세스를 앱 번들의 주 실행파일(Wine 로더 복사본)로 exec 한다.
++ * macOS 는 번들 주 실행파일인 프로세스만 "앱"으로 취급하므로, 그래야 게임 모드·Dock·앱 전환기
++ * 정체가 게임 프로세스에 붙는다. 호스트 옆에는 ntdll.so 심볼릭 링크가 있어 로더가 그대로 뜬다.
++ *   EMBER_HOST_LOADER  호스트 실행파일 절대 경로
++ *   EMBER_HOST_ROUTE   "1" 이면 이 프로세스를 호스트로 보낸다. 자식은 spawn_process 가
++ *                      ImagePathName 을 EMBER_HOST_EXE 목록과 비교해 매번 다시 정한다. */
++static const char *ember_host_loader(void)
++{
++    const char *host = getenv( "EMBER_HOST_LOADER" ), *route = getenv( "EMBER_HOST_ROUTE" );
++    struct stat st;
++
++    if (!host || host[0] != '/' || !route || strcmp( route, "1" )) return NULL;
++    if (stat( host, &st ) || !S_ISREG( st.st_mode ) || !(st.st_mode & S_IXUSR)) return NULL;
++    return host;
++}
++
+ /* exec the appropriate wine loader for the specified machine */
+ static NTSTATUS loader_exec( char **argv, WORD machine )
+ {
+     static char noexec[] = "WINELOADERNOEXEC=1";
++    const char *host;
+ 
+     putenv( noexec );
+ 
++    if ((host = ember_host_loader()))
++    {
++        /* 호스트에는 프리로더가 없다. 실패하면 아래 일반 경로로 계속 간다. */
++        argv[1] = strdup( host );
++        execv( argv[1], argv + 1 );
++        free( argv[1] );
++    }
++
+     if (((argv[1] = get_alternate_wineloader( machine )))) preloader_exec( argv );
+ 
+     argv[1] = strdup( wineloader );
+diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
+index 4c2e7eb..d924cb9 100644
+--- a/dlls/ntdll/unix/process.c
++++ b/dlls/ntdll/unix/process.c
+@@ -32,6 +32,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <strings.h>
+ #include <time.h>
+ #include <sys/socket.h>
+ #include <sys/time.h>
+@@ -397,6 +398,68 @@ static BOOL is_unix_console_handle( HANDLE handle )
+ }
+ 
+ 
++/* Ember: 유니코드 경로에 ASCII 조각이 (대소문자·구분자 무시하고) 들어 있는가 */
++static int ember_path_contains( const WCHAR *path, const WCHAR *end, const char *frag, size_t len )
++{
++    size_t i;
++    const WCHAR *p;
++
++    for (p = path; p + len <= end; p++)
++    {
++        for (i = 0; i < len; i++)
++        {
++            WCHAR a = p[i];
++            unsigned char b = frag[i];
++            if (a == '/') a = '\\';
++            if (b == '/') b = '\\';
++            if (a >= 'A' && a <= 'Z') a += 'a' - 'A';
++            if (b >= 'A' && b <= 'Z') b += 'a' - 'A';
++            if (a != b) break;
++        }
++        if (i == len) return 1;
++    }
++    return 0;
++}
++
++/* Ember: 이 자식이 게임 실행파일이면 호스트(앱 번들 주 실행파일)로 exec 하게 표시한다.
++ * EMBER_HOST_EXE 는 ';' 로 나눈 파일 이름 목록(대소문자 무시). 표시는 자식마다 새로 정하므로
++ * 런처(STOVE 등)는 보통 로더로, 게임만 호스트로 간다. fork 뒤 exec 전 단계에서만 부른다. */
++static void ember_route_child( const UNICODE_STRING *image )
++{
++    const char *list = getenv( "EMBER_HOST_EXE" ), *s;
++    const WCHAR *p, *name, *end;
++    char buf[256];
++    unsigned int i, n;
++
++    unsetenv( "EMBER_HOST_ROUTE" );
++    if (!list || !*list || !image->Buffer) return;
++    end = image->Buffer + image->Length / sizeof(WCHAR);
++    for (p = name = image->Buffer; p < end; p++) if (*p == '\\' || *p == '/') name = p + 1;
++    n = end - name;
++    if (!n || n >= sizeof(buf)) return;
++    for (i = 0; i < n; i++)
++    {
++        WCHAR c = name[i];
++        if (c > 127) return;
++        buf[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (char)c;
++    }
++    buf[n] = 0;
++    for (s = list; *s; )
++    {
++        const char *e = strchr( s, ';' );
++        size_t len = e ? (size_t)(e - s) : strlen( s );
++        if (len == n && !strncasecmp( s, buf, len )) { setenv( "EMBER_HOST_ROUTE", "1", 1 ); return; }
++        /* '\' 로 시작하면 경로 조각: 전체 경로에 포함되면 게임으로 본다(예: \steamapps\common\ — 스팀이 띄우는 게임 전부) */
++        if (len > 1 && (s[0] == '\\' || s[0] == '/') && ember_path_contains( image->Buffer, end, s, len ))
++        {
++            setenv( "EMBER_HOST_ROUTE", "1", 1 );
++            return;
++        }
++        s += len;
++        if (*s == ';') s++;
++    }
++}
++
+ /***********************************************************************
+  *           spawn_process
+  */
+@@ -439,6 +502,7 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+                 fchdir( unixdir );
+                 close( unixdir );
+             }
++            ember_route_child( &params->ImagePathName );
+             argv = build_argv( &params->CommandLine, 2 );
+ 
+             exec_wineloader( argv, socketfd, pe_info );
+@@ -472,14 +536,8 @@ NTSTATUS WINAPI __wine_unix_spawnvp( char * const argv[], int wait )
+     pid_t pid, wret;
+     int fd[2], status, err;
+ 
+-#ifdef HAVE_PIPE2
+-    if (pipe2( fd, O_CLOEXEC ) == -1)
+-#endif
+-    {
+-        if (pipe(fd) == -1) return STATUS_TOO_MANY_OPENED_FILES;
+-        fcntl( fd[0], F_SETFD, FD_CLOEXEC );
+-        fcntl( fd[1], F_SETFD, FD_CLOEXEC );
+-    }
++    /* Ember: pipe2 는 macOS 27 에만 있다. server_pipe 가 OS 를 보고 고른다. */
++    if (server_pipe( fd ) == -1) return STATUS_TOO_MANY_OPENED_FILES;
+ 
+     if (!(pid = fork()))
+     {
+@@ -568,14 +626,8 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
+     char **argv;
+     NTSTATUS status = STATUS_SUCCESS;
+ 
+-#ifdef HAVE_PIPE2
+-    if (pipe2( fd, O_CLOEXEC ) == -1)
+-#endif
+-    {
+-        if (pipe(fd) == -1) return STATUS_TOO_MANY_OPENED_FILES;
+-        fcntl( fd[0], F_SETFD, FD_CLOEXEC );
+-        fcntl( fd[1], F_SETFD, FD_CLOEXEC );
+-    }
++    /* Ember: pipe2 는 macOS 27 에만 있다. server_pipe 가 OS 를 보고 고른다. */
++    if (server_pipe( fd ) == -1) return STATUS_TOO_MANY_OPENED_FILES;
+ 
+     if (wine_server_handle_to_fd( params->hStdInput, FILE_READ_DATA, &stdin_fd, NULL ) &&
+         isatty(0) && is_unix_console_handle( params->hStdInput ))
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 258a959..28ad736 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1285,8 +1285,17 @@ int server_pipe( int fd[2] )
+ 
+     if (have_pipe2)
+     {
+-        if (!(ret = pipe2( fd, O_CLOEXEC ))) return ret;
+-        if (errno == ENOSYS || errno == EINVAL) have_pipe2 = FALSE;  /* don't try again */
++#ifdef __APPLE__
++        /* Ember: pipe2 는 macOS 27 에서 생겼다. 낮은 minos 로 빌드하면 약한 심볼이라 옛 macOS 에선 NULL 을 부른다. */
++        if (__builtin_available(macOS 27.0, *))
++#endif
++        {
++            if (!(ret = pipe2( fd, O_CLOEXEC ))) return ret;
++            if (errno == ENOSYS || errno == EINVAL) have_pipe2 = FALSE;  /* don't try again */
++        }
++#ifdef __APPLE__
++        else have_pipe2 = FALSE;
++#endif
+     }
+ #endif
+     if (!(ret = pipe( fd )))
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+index e59f211..cb6ff51 100644
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -450,6 +450,509 @@ static NTSTATUS linux_wait_objs( int device, DWORD count, const int *objs, WAIT_
+     return errno_to_status( errno );
+ }
+ 
++#elif defined(__APPLE__)   /* macOS: 공유 메모리 + __ulock 으로 직접 구현한다 */
++
++#include <sys/mman.h>
++#include "wine/inproc_sync_macos.h"
++
++extern int __ulock_wait( uint32_t operation, void *addr, uint64_t value, uint32_t timeout_us );
++extern int __ulock_wake( uint32_t operation, void *addr, uint64_t wake_value );
++#define UL_COMPARE_AND_WAIT_SHARED 3
++#define ULF_WAKE_ALL               0x00000100
++
++/* fd 하나에 공유 메모리 한 장이 붙는다. 매번 mmap 하면 느리니 표에 담아 둔다.
++ * fd 번호로 바로 찾도록 해서 충돌도, 표가 꽉 차는 일도 없게 한다. */
++static struct macos_sync_state **macos_sync_by_fd;
++static int macos_sync_nfds;
++static pthread_mutex_t macos_sync_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
++
++static struct macos_sync_state *macos_sync_map( int fd )
++{
++    struct macos_sync_state *state;
++    void *map;
++
++    if (fd < 0) return NULL;
++    pthread_mutex_lock( &macos_sync_cache_mutex );
++    if (fd < macos_sync_nfds && (state = macos_sync_by_fd[fd]))
++    {
++        pthread_mutex_unlock( &macos_sync_cache_mutex );
++        return state;
++    }
++    if (fd >= macos_sync_nfds)
++    {
++        int want = fd + 64;
++        struct macos_sync_state **grown = realloc( macos_sync_by_fd, want * sizeof(*grown) );
++
++        if (!grown)
++        {
++            pthread_mutex_unlock( &macos_sync_cache_mutex );
++            return NULL;
++        }
++        memset( grown + macos_sync_nfds, 0, (want - macos_sync_nfds) * sizeof(*grown) );
++        macos_sync_by_fd = grown;
++        macos_sync_nfds = want;
++    }
++    map = mmap( NULL, MACOS_SYNC_MAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
++    state = map == MAP_FAILED ? NULL : map;
++    macos_sync_by_fd[fd] = state;
++    pthread_mutex_unlock( &macos_sync_cache_mutex );
++    return state;
++}
++
++/* fd 번호는 닫히면 곧바로 다른 객체에 다시 쓰인다.
++ * 닫는 순간 표에서 지우지 않으면 엉뚱한 공유 메모리를 보게 된다. */
++static void macos_sync_forget( int fd )
++{
++    struct macos_sync_state *state;
++
++    if (fd < 0) return;
++    pthread_mutex_lock( &macos_sync_cache_mutex );
++    if (fd < macos_sync_nfds && (state = macos_sync_by_fd[fd]))
++    {
++        macos_sync_by_fd[fd] = NULL;
++        munmap( state, MACOS_SYNC_MAP_SIZE );
++    }
++    pthread_mutex_unlock( &macos_sync_cache_mutex );
++}
++
++/* wineserver 가 프로세스마다 넘겨 준 전역 카운터. 객체 여러 개를 기다릴 때 쓴다. */
++static struct macos_sync_global *macos_global;
++static pthread_once_t macos_global_once = PTHREAD_ONCE_INIT;
++
++static void macos_global_init(void)
++{
++    void *map;
++
++    if (inproc_device_fd < 0) return;
++    map = mmap( NULL, MACOS_SYNC_MAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, inproc_device_fd, 0 );
++    if (map != MAP_FAILED) macos_global = map;
++}
++
++static struct macos_sync_global *macos_global_state(void)
++{
++    pthread_once( &macos_global_once, macos_global_init );
++    return macos_global;
++}
++
++/* 자는 사람이 없으면 깨우기 syscall 을 부르지 않는다.
++ * 게임이 쏟아내는 신호는 대부분 아무도 안 기다리는 객체로 간다. */
++static void macos_sync_wake( struct macos_sync_state *state )
++{
++    struct macos_sync_global *global = macos_global_state();
++
++    __atomic_add_fetch( &state->seq, 1, __ATOMIC_SEQ_CST );
++    if (__atomic_load_n( &state->waiters, __ATOMIC_SEQ_CST ))
++        __ulock_wake( UL_COMPARE_AND_WAIT_SHARED | ULF_WAKE_ALL, &state->seq, 0 );
++    if (!global) return;
++    /* 이 객체를 다중 대기 목록에 넣은 사람이 없으면 전역은 건드리지 않는다.
++     * 게임이 쏟아내는 신호 대부분이 여기서 syscall 없이 끝난다. */
++    if (!__atomic_load_n( &state->multi, __ATOMIC_SEQ_CST )) return;
++    __atomic_add_fetch( &global->seq, 1, __ATOMIC_SEQ_CST );
++    if (__atomic_load_n( &global->waiters, __ATOMIC_SEQ_CST ))
++        __ulock_wake( UL_COMPARE_AND_WAIT_SHARED | ULF_WAKE_ALL, &global->seq, 0 );
++}
++
++static NTSTATUS linux_release_semaphore_obj( int obj, ULONG count, ULONG *prev_count )
++{
++    struct macos_sync_state *state = macos_sync_map( obj );
++    unsigned int prev;
++
++    if (!state) return STATUS_NOT_IMPLEMENTED;
++    for (;;)
++    {
++        prev = __atomic_load_n( &state->count, __ATOMIC_SEQ_CST );
++        if (prev + count > state->max) return STATUS_SEMAPHORE_LIMIT_EXCEEDED;
++        if (__atomic_compare_exchange_n( &state->count, &prev, prev + count, 0,
++                                         __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST )) break;
++    }
++    if (prev_count) *prev_count = prev;
++    /* 자던 쪽은 0 일 때만 잔다. 0 에서 올라올 때만 깨우면 된다. */
++    if (!prev) macos_sync_wake( state );
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS linux_query_semaphore_obj( int obj, SEMAPHORE_BASIC_INFORMATION *info )
++{
++    struct macos_sync_state *state = macos_sync_map( obj );
++    if (!state) return STATUS_NOT_IMPLEMENTED;
++    info->CurrentCount = __atomic_load_n( &state->count, __ATOMIC_SEQ_CST );
++    info->MaximumCount = state->max;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS linux_set_event_obj( int obj, LONG *prev_state )
++{
++    struct macos_sync_state *state = macos_sync_map( obj );
++    unsigned int prev;
++    if (!state) return STATUS_NOT_IMPLEMENTED;
++    prev = __atomic_exchange_n( &state->count, 1, __ATOMIC_SEQ_CST );
++    if (prev_state) *prev_state = prev;
++    /* 이미 켜져 있었으면 새로 깰 사람이 없다. syscall 을 아낀다. */
++    if (!prev) macos_sync_wake( state );
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS linux_reset_event_obj( int obj, LONG *prev_state )
++{
++    struct macos_sync_state *state = macos_sync_map( obj );
++    unsigned int prev;
++    if (!state) return STATUS_NOT_IMPLEMENTED;
++    prev = __atomic_exchange_n( &state->count, 0, __ATOMIC_SEQ_CST );
++    if (prev_state) *prev_state = prev;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS linux_pulse_event_obj( int obj, LONG *prev_state )
++{
++    struct macos_sync_state *state = macos_sync_map( obj );
++    unsigned int prev;
++    if (!state) return STATUS_NOT_IMPLEMENTED;
++    prev = __atomic_exchange_n( &state->count, 1, __ATOMIC_SEQ_CST );
++    if (prev_state) *prev_state = prev;
++    macos_sync_wake( state );
++    __atomic_store_n( &state->count, 0, __ATOMIC_SEQ_CST );
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS linux_query_event_obj( int obj, EVENT_BASIC_INFORMATION *info )
++{
++    struct macos_sync_state *state = macos_sync_map( obj );
++    if (!state) return STATUS_NOT_IMPLEMENTED;
++    info->EventType = state->manual ? NotificationEvent : SynchronizationEvent;
++    info->EventState = __atomic_load_n( &state->count, __ATOMIC_SEQ_CST ) ? 1 : 0;
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS linux_release_mutex_obj( int obj, LONG *prev_count )
++{
++    struct macos_sync_state *state = macos_sync_map( obj );
++    unsigned int count;
++
++    if (!state) return STATUS_NOT_IMPLEMENTED;
++    if (__atomic_load_n( &state->owner, __ATOMIC_SEQ_CST ) != (int)GetCurrentThreadId())
++        return STATUS_MUTANT_NOT_OWNED;
++    count = __atomic_load_n( &state->count, __ATOMIC_SEQ_CST );
++    if (prev_count) *prev_count = count;
++    if (count > 1) __atomic_store_n( &state->count, count - 1, __ATOMIC_SEQ_CST );
++    else
++    {
++        __atomic_store_n( &state->count, 0, __ATOMIC_SEQ_CST );
++        __atomic_store_n( &state->owner, 0, __ATOMIC_SEQ_CST );
++        macos_sync_wake( state );
++    }
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS linux_query_mutex_obj( int obj, MUTANT_BASIC_INFORMATION *info )
++{
++    struct macos_sync_state *state = macos_sync_map( obj );
++    if (!state) return STATUS_NOT_IMPLEMENTED;
++    info->CurrentCount = 1 - __atomic_load_n( &state->count, __ATOMIC_SEQ_CST );
++    info->OwnedByCaller = (__atomic_load_n( &state->owner, __ATOMIC_SEQ_CST )
++                           == (int)GetCurrentThreadId());
++    info->AbandonedState = __atomic_load_n( &state->abandoned, __ATOMIC_SEQ_CST ) != 0;
++    return STATUS_SUCCESS;
++}
++
++/* 로컬 대기 타이머: 만료했으면 1. consume 이면 만료를 소모한다(주기 타이머는 다음 만료로 넘긴다).
++ * 소모는 due 의 CAS 로 하므로 대기자가 여럿이어도 한 명만 가져간다. */
++static int macos_timer_expired( struct macos_sync_state *state, int consume )
++{
++    long long due = __atomic_load_n( &state->due, __ATOMIC_SEQ_CST );
++    LARGE_INTEGER now;
++
++    if (!due) return 0;
++    NtQuerySystemTime( &now );
++    if (now.QuadPart < due) return 0;
++    if (!consume) return 1;
++    for (;;)
++    {
++        unsigned int period = __atomic_load_n( &state->period_ms, __ATOMIC_SEQ_CST );
++        long long next = 0;
++        if (period)
++        {
++            long long p = (long long)period * 10000;
++            next = due + p * (1 + (now.QuadPart - due) / p);
++        }
++        if (__atomic_compare_exchange_n( &state->due, &due, next, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ))
++            return 1;
++        if (!due || now.QuadPart < due) return 0;   /* 다른 대기자가 먼저 가져갔다 */
++    }
++}
++
++/* 객체 하나를 잡아 본다. 잡았으면 0, 못 잡았으면 -1, 버려진 뮤텍스면 1. */
++static int macos_try_acquire( struct macos_sync_state *state )
++{
++    unsigned int prev;
++
++    switch (state->type)
++    {
++    case INPROC_SYNC_MUTEX:
++    {
++        int tid = GetCurrentThreadId(), zero = 0;
++        if (__atomic_load_n( &state->owner, __ATOMIC_SEQ_CST ) == tid)
++        {
++            __atomic_add_fetch( &state->count, 1, __ATOMIC_SEQ_CST );
++            return 0;
++        }
++        if (__atomic_compare_exchange_n( &state->owner, &zero, tid, 0,
++                                         __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ))
++        {
++            __atomic_store_n( &state->count, 1, __ATOMIC_SEQ_CST );
++            if (__atomic_exchange_n( &state->abandoned, 0, __ATOMIC_SEQ_CST )) return 1;
++            return 0;
++        }
++        return -1;
++    }
++    case INPROC_SYNC_SEMAPHORE:
++        for (;;)
++        {
++            prev = __atomic_load_n( &state->count, __ATOMIC_SEQ_CST );
++            if (!prev) return -1;
++            if (__atomic_compare_exchange_n( &state->count, &prev, prev - 1, 0,
++                                             __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST )) return 0;
++        }
++    default:   /* 이벤트 (대기 타이머 포함) */
++        if (state->manual)
++        {
++            /* 수동 타이머가 만료했으면 신호 상태로 남긴다(리셋은 SetWaitableTimer 가 한다) */
++            if (macos_timer_expired( state, 1 )) __atomic_store_n( &state->count, 1, __ATOMIC_SEQ_CST );
++            return __atomic_load_n( &state->count, __ATOMIC_SEQ_CST ) ? 0 : -1;
++        }
++        if (macos_timer_expired( state, 1 )) return 0;   /* 동기화 타이머 만료를 소모 */
++        prev = 1;
++        return __atomic_compare_exchange_n( &state->count, &prev, 0, 0,
++                                            __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST ) ? 0 : -1;
++    }
++}
++
++/* 신호가 와 있는가. 잡지는 않는다. WaitAll 이 먼저 전부 확인할 때 쓴다. */
++static int macos_is_signaled( struct macos_sync_state *state )
++{
++    switch (state->type)
++    {
++    case INPROC_SYNC_MUTEX:
++    {
++        int owner = __atomic_load_n( &state->owner, __ATOMIC_SEQ_CST );
++        return !owner || owner == (int)GetCurrentThreadId();
++    }
++    case INPROC_SYNC_SEMAPHORE:
++        return __atomic_load_n( &state->count, __ATOMIC_SEQ_CST ) != 0;
++    default:
++        return __atomic_load_n( &state->count, __ATOMIC_SEQ_CST ) != 0 || macos_timer_expired( state, 0 );
++    }
++}
++
++/* 잡았던 것을 도로 놓는다.
++ * WaitAll 은 전부 잡아야 성립한다. 중간에 하나라도 놓치면 앞서 잡은 것을 되돌린다. */
++static void macos_undo_acquire( struct macos_sync_state *state, int was_abandoned )
++{
++    unsigned int count;
++
++    switch (state->type)
++    {
++    case INPROC_SYNC_MUTEX:
++        if (was_abandoned) __atomic_store_n( &state->abandoned, 1, __ATOMIC_SEQ_CST );
++        count = __atomic_load_n( &state->count, __ATOMIC_SEQ_CST );
++        if (count > 1)
++        {
++            __atomic_store_n( &state->count, count - 1, __ATOMIC_SEQ_CST );
++            return;
++        }
++        __atomic_store_n( &state->count, 0, __ATOMIC_SEQ_CST );
++        __atomic_store_n( &state->owner, 0, __ATOMIC_SEQ_CST );
++        break;
++    case INPROC_SYNC_SEMAPHORE:
++        if (__atomic_fetch_add( &state->count, 1, __ATOMIC_SEQ_CST )) return;
++        break;
++    default:
++        if (state->manual) return;   /* 수동 리셋 이벤트는 애초에 소모하지 않는다 */
++        if (__atomic_exchange_n( &state->count, 1, __ATOMIC_SEQ_CST )) return;
++        break;
++    }
++    macos_sync_wake( state );
++}
++
++/* 깨우기 유실 판정 보조: 신호 쪽은 count 를 먼저 켜고 seq 를 나중에 올린다.
++ * 그 사이를 유실로 오판하지 않도록 잠깐 뒤에도 seq 가 그대로인지 본다. */
++static int macos_still_stale( unsigned int *seq, unsigned int before )
++{
++    usleep( 1000 );
++    return __atomic_load_n( seq, __ATOMIC_SEQ_CST ) == before;
++}
++
++/* 기다린다.
++ *
++ * 객체 하나면 그 객체의 seq 에서 잔다. 이게 게임이 가장 많이 하는 호출이다.
++ * 여러 개거나 alertable 이면 전역 카운터에서 잔다. 아무 객체가 신호를 받아도
++ * 깨어나 다시 확인하는 식이다. __ulock_wait 이 주소 하나만 볼 수 있어서 그렇다.
++ *
++ * 서버로 넘기는 길은 없다. msync 를 켜면 서버 쪽 객체는 대기열을 갖지 않아서
++ * 넘겨 봐야 OBJECT_TYPE_MISMATCH 만 돌아온다. 여기서 전부 처리해야 한다.
++ */
++static NTSTATUS linux_wait_objs( int device, DWORD count, const int *objs, WAIT_TYPE type,
++                                 int alert_fd, const LARGE_INTEGER *timeout )
++{
++    struct macos_sync_state *states[64], *alert = NULL;
++    struct macos_sync_global *global = macos_global_state();
++    int got[ARRAY_SIZE(states)];
++    ULONGLONG end = 0;
++    NTSTATUS ret;
++    int multi;
++    DWORD i;
++
++    if (!global || count > ARRAY_SIZE(states)) return STATUS_NOT_IMPLEMENTED;
++    for (i = 0; i < count; i++)
++        if (!(states[i] = macos_sync_map( objs[i] ))) return STATUS_NOT_IMPLEMENTED;
++    if (alert_fd > 0 && !(alert = macos_sync_map( alert_fd ))) return STATUS_NOT_IMPLEMENTED;
++    multi = !(count == 1 && !alert);
++
++    if (timeout)
++    {
++        LARGE_INTEGER now;
++        NtQuerySystemTime( &now );
++        end = timeout->QuadPart <= 0 ? now.QuadPart - timeout->QuadPart : timeout->QuadPart;
++    }
++
++    /* 여러 개를 한꺼번에 기다리는 동안에는 각 객체에 "나 여기 있다"고 표시해 둔다.
++     * 신호를 보내는 쪽은 이 표시가 있을 때만 전역 카운터를 올린다.
++     * 확인보다 먼저 표시해야 그 사이에 온 신호를 놓치지 않는다. */
++    if (multi)
++    {
++        for (i = 0; i < count; i++) __atomic_add_fetch( &states[i]->multi, 1, __ATOMIC_SEQ_CST );
++        if (alert) __atomic_add_fetch( &alert->multi, 1, __ATOMIC_SEQ_CST );
++    }
++
++    /* 깨우기 유실 안전장치. 무한 대기라도 이 간격마다 깨어나 다시 확인한다.
++     * 실측(2026-09-24, FEX 엔진): 게임 UI 스레드가 큐 객체에서 영원히 잠들어 창이 멈췄고, 메시지를
++     * 6만 개 던져도 깨지 않았다. 원인을 잡기 전까지 최대 이 시간만큼만 늦게 알아채도록 한다. */
++    enum { MACOS_SYNC_MAX_SLEEP_US = 20000 };
++    int stale = 0;
++    unsigned int stale_seq = 0;   /* 잠들기 전 seq. 오탐 방지: 검사 시점에도 그대로여야 유실이다 */
++
++    for (;;)
++    {
++        unsigned int gseq = __atomic_load_n( &global->seq, __ATOMIC_SEQ_CST );
++        unsigned int oseq = count == 1 && !alert
++                          ? __atomic_load_n( &states[0]->seq, __ATOMIC_SEQ_CST ) : 0;
++        uint32_t wait_us, sleep_us;
++        int capped;
++
++        if (stale)
++        {
++            /* 직전 잠에서 seq 가 안 바뀌었는데 지금 신호가 와 있으면 깨우기가 샌 것이다.
++             * 깬 직후 새 신호가 들어왔을 수 있으니 지금 seq 도, 1ms 뒤 seq 도 잠들기 전과 같아야 한다. */
++            unsigned int *seqp = count == 1 && !alert ? &states[0]->seq : &global->seq;
++            unsigned int now_seq = count == 1 && !alert ? oseq : gseq;
++            for (i = 0; i < count && now_seq == stale_seq; i++)
++                if (macos_is_signaled( states[i] ) && macos_still_stale( seqp, stale_seq ))
++                    ERR( "깨우기 유실: fd %d type %d count %u seq %u waiters %u multi %u (alert %d, count %u)\n",
++                         objs[i], states[i]->type, __atomic_load_n( &states[i]->count, __ATOMIC_SEQ_CST ),
++                         __atomic_load_n( &states[i]->seq, __ATOMIC_SEQ_CST ),
++                         __atomic_load_n( &states[i]->waiters, __ATOMIC_SEQ_CST ),
++                         __atomic_load_n( &states[i]->multi, __ATOMIC_SEQ_CST ), alert_fd, count );
++            stale = 0;
++        }
++
++        if (type == WaitAll && count > 1)
++        {
++            DWORD taken = 0;
++            int ready = 1, abandoned = 0;
++
++            for (i = 0; i < count; i++) if (!macos_is_signaled( states[i] )) { ready = 0; break; }
++            if (ready)
++            {
++                for (i = 0; i < count; i++)
++                {
++                    if ((got[i] = macos_try_acquire( states[i] )) < 0) break;
++                    if (got[i]) abandoned = 1;
++                    taken++;
++                }
++                if (taken == count) { ret = abandoned ? STATUS_ABANDONED_WAIT_0 : STATUS_WAIT_0; goto done; }
++                while (taken--) macos_undo_acquire( states[taken], got[taken] );
++            }
++        }
++        else
++        {
++            for (i = 0; i < count; i++)
++            {
++                if ((got[0] = macos_try_acquire( states[i] )) < 0) continue;
++                ret = (got[0] ? STATUS_ABANDONED_WAIT_0 : STATUS_WAIT_0) + i;
++                goto done;
++            }
++        }
++
++        if (alert && macos_is_signaled( alert ))
++        {
++            static const LARGE_INTEGER no_wait;
++            /* APC 는 서버가 들고 있다. 깨우기만 여기서 받고 전달은 서버에 맡긴다. */
++            ret = server_wait( NULL, 0, SELECT_INTERRUPTIBLE | SELECT_ALERTABLE, &no_wait );
++            goto done;
++        }
++
++        if (!timeout) wait_us = 0;   /* 0 이면 무한 */
++        else
++        {
++            LARGE_INTEGER now;
++            LONGLONG left;
++
++            NtQuerySystemTime( &now );
++            if ((left = end - now.QuadPart) <= 0) { ret = STATUS_TIMEOUT; goto done; }
++            left /= 10;                                  /* 100ns → us */
++            wait_us = left > 0xfffffffe ? 0xfffffffe : (uint32_t)left;
++            if (!wait_us) wait_us = 1;
++        }
++
++        /* 로컬 대기 타이머는 가장 이른 만료 시각까지만 잔다 */
++        {
++            LONGLONG soonest = 0;
++            for (i = 0; i < count; i++)
++            {
++                long long d = __atomic_load_n( &states[i]->due, __ATOMIC_SEQ_CST );
++                if (d && (!soonest || d < soonest)) soonest = d;
++            }
++            if (soonest)
++            {
++                LARGE_INTEGER now;
++                LONGLONG left;
++                NtQuerySystemTime( &now );
++                left = (soonest - now.QuadPart) / 10;
++                if (left < 1) left = 1;
++                if (left > 0xfffffffe) left = 0xfffffffe;
++                if (!wait_us || (uint32_t)left < wait_us) wait_us = (uint32_t)left;
++            }
++        }
++
++        sleep_us = (!wait_us || wait_us > MACOS_SYNC_MAX_SLEEP_US) ? MACOS_SYNC_MAX_SLEEP_US : wait_us;
++        capped = sleep_us != wait_us;
++
++        if (count == 1 && !alert)
++        {
++            __atomic_add_fetch( &states[0]->waiters, 1, __ATOMIC_SEQ_CST );
++            __ulock_wait( UL_COMPARE_AND_WAIT_SHARED, &states[0]->seq, oseq, sleep_us );
++            __atomic_sub_fetch( &states[0]->waiters, 1, __ATOMIC_SEQ_CST );
++            stale = capped && __atomic_load_n( &states[0]->seq, __ATOMIC_SEQ_CST ) == oseq;
++            stale_seq = oseq;
++        }
++        else
++        {
++            __atomic_add_fetch( &global->waiters, 1, __ATOMIC_SEQ_CST );
++            __ulock_wait( UL_COMPARE_AND_WAIT_SHARED, &global->seq, gseq, sleep_us );
++            __atomic_sub_fetch( &global->waiters, 1, __ATOMIC_SEQ_CST );
++            stale = capped && __atomic_load_n( &global->seq, __ATOMIC_SEQ_CST ) == gseq;
++            stale_seq = gseq;
++        }
++    }
++
++done:
++    if (multi)
++    {
++        for (i = 0; i < count; i++) __atomic_sub_fetch( &states[i]->multi, 1, __ATOMIC_SEQ_CST );
++        if (alert) __atomic_sub_fetch( &alert->multi, 1, __ATOMIC_SEQ_CST );
++    }
++    return ret;
++}
++
+ #else /* NTSYNC_IOC_EVENT_READ */
+ 
+ static NTSTATUS linux_release_semaphore_obj( int obj, ULONG count, ULONG *prev_count )
+@@ -635,7 +1138,25 @@ static void release_inproc_sync( struct inproc_sync *sync )
+     LONG ref = InterlockedDecrement( &sync->refcount );
+ 
+     assert( ref >= 0 );
+-    if (!ref) close( fd );
++    if (!ref)
++    {
++#ifdef __APPLE__
++        macos_sync_forget( fd );
++#endif
++        close( fd );
++    }
++}
++
++/* 스레드 알림 fd 처럼 캐시(release_inproc_sync) 밖에서 닫는 동기화 fd.
++ * 실측(2026-09-24): 스레드가 끝나며 알림 fd 를 그냥 닫았고, 같은 번호를 받은 새 뮤텍스가
++ * 죽은 스레드의 알림 상태(내부 객체, 수동 리셋)를 보고 영원히 기다려 게임 메인 스레드가 멈췄다. */
++void close_inproc_sync_fd( int fd )
++{
++    if (fd < 0) return;
++#ifdef __APPLE__
++    macos_sync_forget( fd );
++#endif
++    close( fd );
+ }
+ 
+ static struct inproc_sync *get_cached_inproc_sync( HANDLE handle )
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index 24cd058..c2e49ec 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1104,7 +1104,7 @@ static void contexts_from_server( CONTEXT *context, struct context_data server_c
+  */
+ static DECLSPEC_NORETURN void pthread_exit_wrapper( int status )
+ {
+-    close( ntdll_get_thread_data()->alert_fd );
++    close_inproc_sync_fd( ntdll_get_thread_data()->alert_fd );
+     close( ntdll_get_thread_data()->wait_fd[0] );
+     close( ntdll_get_thread_data()->wait_fd[1] );
+     close( ntdll_get_thread_data()->reply_fd );
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index 3932b17..21b3d95 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -389,6 +389,7 @@ extern NTSTATUS wow64_wine_spawnvp( void *args );
+ extern void dbg_init(void);
+ 
+ extern void close_inproc_sync( HANDLE handle );
++extern void close_inproc_sync_fd( int fd );
+ 
+ extern NTSTATUS call_user_apc_dispatcher( CONTEXT *context_ptr, unsigned int flags, ULONG_PTR arg1, ULONG_PTR arg2,
+                                           ULONG_PTR arg3, PNTAPCFUNC func, NTSTATUS status );
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 111849d..23e9031 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -4684,6 +4684,44 @@ unsigned int virtual_locked_server_call( void *req_ptr )
+ 
+     if (!size) return wine_server_call( req_ptr );
+ 
++    /* Ember: 서버 왕복 동안 virtual_mutex 를 쥐지 않는다. 답을 임시 버퍼로 받고, 잠금은 사용자 버퍼로
++     * 복사하는 짧은 구간에만 잡는다. 실측(2026-09-24, 로아 FEX 멈춤): wineserver 가 밀리면 이 잠금을 쥔 채
++     * 답을 기다리는 스레드 뒤에 14개가 줄을 서서 게임이 멈춘 것처럼 보였다. */
++    if (size <= 65536)
++    {
++        char stack_buf[1024];
++        void *tmp = size <= sizeof(stack_buf) ? stack_buf : malloc( size );
++        data_size_t got;
++
++        if (!tmp) goto locked;
++        server_enter_uninterrupted_section( &virtual_mutex, &sigset );
++        ret = check_write_access( addr, size, &has_write_watch );
++        server_leave_uninterrupted_section( &virtual_mutex, &sigset );
++        if (ret)
++        {
++            memset( &req->u.reply, 0, sizeof(req->u.reply) );
++            if (tmp != stack_buf) free( tmp );
++            return ret;
++        }
++        req->reply_data = tmp;
++        ret = wine_server_call( req_ptr );
++        req->reply_data = addr;
++        got = wine_server_reply_size( req );
++        if (got)
++        {
++            server_enter_uninterrupted_section( &virtual_mutex, &sigset );
++            if (!check_write_access( addr, got, &has_write_watch ))
++            {
++                memcpy( addr, tmp, got );
++                if (has_write_watch) update_write_watches( addr, got, got );
++            }
++            server_leave_uninterrupted_section( &virtual_mutex, &sigset );
++        }
++        if (tmp != stack_buf) free( tmp );
++        return ret;
++    }
++
++locked:
+     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+     if (!(ret = check_write_access( addr, size, &has_write_watch )))
+     {
+@@ -5949,7 +5987,9 @@ static NTSTATUS get_working_set_ex( HANDLE process, LPCVOID addr,
+ 
+     if (process != NtCurrentProcess())
+     {
+-        FIXME( "(process=%p,addr=%p) Unimplemented information class: MemoryWorkingSetExInformation\n", process, addr );
++        /* 안티치트가 다른 프로세스에 초당 수백 번 묻는다(로그 60MB/20분). 한 번만 알린다. */
++        static int once;
++        if (!once++) FIXME( "(process=%p,addr=%p) Unimplemented information class: MemoryWorkingSetExInformation\n", process, addr );
+         return STATUS_INVALID_INFO_CLASS;
+     }
+ 
+diff --git a/dlls/ntdll/unwind.c b/dlls/ntdll/unwind.c
+index 6e2b864..43f8c87 100644
+--- a/dlls/ntdll/unwind.c
++++ b/dlls/ntdll/unwind.c
+@@ -71,6 +71,14 @@ struct dynamic_unwind_entry
+ 
+ static struct list dynamic_unwind_list = LIST_INIT(dynamic_unwind_list);
+ 
++/* 동적 unwind 테이블 조회 캐시.
++ * PhysX·JIT 처럼 RtlAddFunctionTable 로 테이블을 등록하는 게임은 예외/스택 추적마다 등록 목록을 처음부터
++ * 훑는다(선형 탐색 + 크리티컬 섹션). 직전에 맞은 등록 항목을 기억해 두고 같은 범위면 바로 쓴다.
++ * 콜백 등록(callback)은 호출 결과가 달라질 수 있어 캐시하지 않는다. 목록이 바뀌는 곳마다 비운다.
++ * WINE_UNWIND_TABLE_CACHE=0 으로 끈다. (ForgePlay 의 같은 착안을 범위 판정으로 넓힌 것) */
++static struct dynamic_unwind_entry *dynamic_unwind_cache;
++static int dynamic_unwind_cache_state;   /* 0: 미확인, 1: 켬, -1: 끔 */
++
+ static RTL_CRITICAL_SECTION dynamic_unwind_section;
+ static RTL_CRITICAL_SECTION_DEBUG dynamic_unwind_debug =
+ {
+@@ -83,26 +91,51 @@ static RTL_CRITICAL_SECTION dynamic_unwind_section = { &dynamic_unwind_debug, -1
+ 
+ static RUNTIME_FUNCTION *lookup_dynamic_function_table( ULONG_PTR pc, ULONG_PTR *base, ULONG *count )
+ {
+-    struct dynamic_unwind_entry *entry;
++    struct dynamic_unwind_entry *entry = NULL, *cursor;
+     RUNTIME_FUNCTION *ret = NULL;
+ 
+     RtlEnterCriticalSection( &dynamic_unwind_section );
+-    LIST_FOR_EACH_ENTRY( entry, &dynamic_unwind_list, struct dynamic_unwind_entry, entry )
++    if (!dynamic_unwind_cache_state)
++    {
++        UNICODE_STRING name = RTL_CONSTANT_STRING( L"WINE_UNWIND_TABLE_CACHE" );
++        WCHAR buffer[2];
++        UNICODE_STRING value = {0, sizeof(buffer), buffer};
++        BOOL enabled;
++
++        /* 환경 변수 조회는 PEB 락을 잡는다. 락 순서가 꼬이지 않게 잠깐 놓고 읽는다. */
++        RtlLeaveCriticalSection( &dynamic_unwind_section );
++        enabled = RtlQueryEnvironmentVariable_U( NULL, &name, &value ) != STATUS_SUCCESS ||
++                  value.Length != sizeof(WCHAR) || buffer[0] != '0';
++        RtlEnterCriticalSection( &dynamic_unwind_section );
++        if (!dynamic_unwind_cache_state) dynamic_unwind_cache_state = enabled ? 1 : -1;
++    }
++    if (dynamic_unwind_cache_state > 0 && dynamic_unwind_cache &&
++        pc >= dynamic_unwind_cache->base && pc < dynamic_unwind_cache->end)
++        entry = dynamic_unwind_cache;
++    else
+     {
+-        if (pc >= entry->base && pc < entry->end)
++        LIST_FOR_EACH_ENTRY( cursor, &dynamic_unwind_list, struct dynamic_unwind_entry, entry )
+         {
+-            *base = entry->base;
+-            if (entry->callback)
++            if (pc >= cursor->base && pc < cursor->end)
+             {
+-                ret = entry->callback( pc, entry->context );
+-                *count = 1;
+-            }
+-            else
+-            {
+-                ret = entry->table;
+-                *count = entry->count;
++                entry = cursor;
++                break;
+             }
+-            break;
++        }
++    }
++    if (entry)
++    {
++        *base = entry->base;
++        if (entry->callback)
++        {
++            ret = entry->callback( pc, entry->context );
++            *count = 1;
++        }
++        else
++        {
++            ret = entry->table;
++            *count = entry->count;
++            if (dynamic_unwind_cache_state > 0) dynamic_unwind_cache = entry;
+         }
+     }
+     RtlLeaveCriticalSection( &dynamic_unwind_section );
+@@ -140,6 +173,7 @@ BOOLEAN CDECL RtlInstallFunctionTableCallback( ULONG_PTR table, ULONG_PTR base,
+     entry->context   = context;
+ 
+     RtlEnterCriticalSection( &dynamic_unwind_section );
++    dynamic_unwind_cache = NULL;
+     list_add_tail( &dynamic_unwind_list, &entry->entry );
+     RtlLeaveCriticalSection( &dynamic_unwind_section );
+ 
+@@ -170,6 +204,7 @@ NTSTATUS WINAPI RtlAddGrowableFunctionTable( void **table, RUNTIME_FUNCTION *fun
+     entry->context   = NULL;
+ 
+     RtlEnterCriticalSection( &dynamic_unwind_section );
++    dynamic_unwind_cache = NULL;
+     list_add_tail( &dynamic_unwind_list, &entry->entry );
+     RtlLeaveCriticalSection( &dynamic_unwind_section );
+ 
+@@ -194,7 +229,10 @@ void WINAPI RtlGrowFunctionTable( void *table, DWORD count )
+         if (entry == table)
+         {
+             if (count > entry->count && count <= entry->max_count)
++            {
++                dynamic_unwind_cache = NULL;
+                 entry->count = count;
++            }
+             break;
+         }
+     }
+@@ -217,6 +255,7 @@ void WINAPI RtlDeleteGrowableFunctionTable( void *table )
+         if (entry == table)
+         {
+             to_free = entry;
++            dynamic_unwind_cache = NULL;
+             list_remove( &entry->entry );
+             break;
+         }
+@@ -242,6 +281,7 @@ BOOLEAN CDECL RtlDeleteFunctionTable( RUNTIME_FUNCTION *table )
+         if (entry->table == table)
+         {
+             to_free = entry;
++            dynamic_unwind_cache = NULL;
+             list_remove( &entry->entry );
+             break;
+         }

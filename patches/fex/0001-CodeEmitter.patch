@@ -1,0 +1,43 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 1/5] CodeEmitter: Ember changes
+
+Base: FEX-Emu/FEX 48d7175 (+ submodules)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/CodeEmitter/CodeEmitter/Buffer.h b/CodeEmitter/CodeEmitter/Buffer.h
+index 602eeb6..eebf0a9 100644
+--- a/CodeEmitter/CodeEmitter/Buffer.h
++++ b/CodeEmitter/CodeEmitter/Buffer.h
+@@ -1,5 +1,8 @@
+ // SPDX-License-Identifier: MIT
+ #pragma once
++#ifdef _WIN32
++#include <FEXCore/Utils/AllocatorHooks.h>
++#endif
+ #include <cstddef>
+ #include <cstdint>
+ #include <cstring>
+@@ -63,6 +66,11 @@ public:
+   }
+ 
+   static void ClearICache(void* Begin, std::size_t Length) {
++#ifdef _WIN32
++    // Ember: 윈도우의 __clear_cache 는 NtFlushInstructionCache → FEX 자신의 BTCpu64FlushInstructionCache 콜백 →
++    // 코드 무효화(번역 잠금)로 되돌아와 번역 중 스스로 교착한다. FEX 자기 코드 버퍼라 통지할 필요가 없다.
++    FEXCore::Allocator::ScopedSuppressMemoryNotify Suppress;
++#endif
+     __builtin___clear_cache(static_cast<char*>(Begin), static_cast<char*>(Begin) + Length);
+   }
+ 
+diff --git a/CodeEmitter/CodeEmitter/Emitter.h b/CodeEmitter/CodeEmitter/Emitter.h
+index 001adcb..207890d 100644
+--- a/CodeEmitter/CodeEmitter/Emitter.h
++++ b/CodeEmitter/CodeEmitter/Emitter.h
+@@ -361,6 +361,7 @@ enum class SystemRegister : uint32_t {
+   RNDRRS = GenSystemReg<0b11, 0b011, 0b0010, 0b0100, 0b001>,
+   NZCV = GenSystemReg<0b11, 0b011, 0b0100, 0b0010, 0b000>,
+   FPCR = GenSystemReg<0b11, 0b011, 0b0100, 0b0100, 0b000>,
++  FPSR = GenSystemReg<0b11, 0b011, 0b0100, 0b0100, 0b001>,
+   TPIDRRO_EL0 = GenSystemReg<0b11, 0b011, 0b1101, 0b0000, 0b011>,
+   CNTFRQ_EL0 = GenSystemReg<0b11, 0b011, 0b1110, 0b0000, 0b000>,
+   CNTVCT_EL0 = GenSystemReg<0b11, 0b011, 0b1110, 0b0000, 0b010>,

@@ -1,0 +1,249 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 30/34] include: Ember changes
+
+Base: wine-11.18.tar.xz
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/include/Makefile.in b/include/Makefile.in
+index 008736e..12b7dc7 100644
+--- a/include/Makefile.in
++++ b/include/Makefile.in
+@@ -1146,8 +1146,10 @@ SOURCES = \
+ 	wine/server_protocol.h \
+ 	wine/strmbase.h \
+ 	wine/svcctl.idl \
++	wine/inproc_sync_macos.h \
+ 	wine/test.h \
+ 	wine/unixlib.h \
++	wine/usdaddr.h \
+ 	wine/vulkan.h \
+ 	wine/vulkan_driver.h \
+ 	wine/wgl.h \
+diff --git a/include/wine/asm.h b/include/wine/asm.h
+index 3cb2125..be04b94 100644
+--- a/include/wine/asm.h
++++ b/include/wine/asm.h
+@@ -275,7 +275,7 @@
+                        ".byte 0x4c,0x8b,0xd1\n\t" /* 00: movq %rcx,%r10 */ \
+                        ".byte 0xb8\n\t"           /* 03: movl $i,%eax */ \
+                        ".long (" #id ")\n\t"                            \
+-                       ".byte 0xf6,0x04,0x25,0x08,0x03,0xfe,0x7f,0x01\n\t" /* 08: testb $1,0x7ffe0308 */ \
++                       ".byte 0xf6,0xc4,0x00,0x90,0x90,0x90,0x90,0x90\n\t" /* 08: testb $0,%ah + nop*5 — macOS 는 0x7ffe0308 을 매핑 못 한다. ntdll signal_arm64ec.c 의 .Lsyscall_seq 와 반드시 같아야 한다 */ \
+                        ".byte 0x75,0x03\n\t"      /* 10: jne 15 */ \
+                        ".byte 0x0f,0x05\n\t"      /* 12: syscall */ \
+                        ".byte 0xc3\n\t"           /* 14: ret */ \
+@@ -293,7 +293,7 @@
+                        ".byte 0x4c,0x8b,0xd1\n\t" /* 00: movq %rcx,%r10 */ \
+                        ".byte 0xb8\n\t"           /* 03: movl $i,%eax */ \
+                        ".long (" #id ")\n\t" \
+-                       ".byte 0xf6,0x04,0x25,0x08,0x03,0xfe,0x7f,0x01\n\t" /* 08: testb $1,0x7ffe0308 */ \
++                       ".byte 0xf6,0xc4,0x00,0x90,0x90,0x90,0x90,0x90\n\t" /* 08: testb $0,%ah + nop*5 — macOS 는 0x7ffe0308 을 매핑 못 한다. ntdll signal_arm64ec.c 의 .Lsyscall_seq 와 반드시 같아야 한다 */ \
+                        ".byte 0x75,0x03\n\t"      /* 10: jne 15 */ \
+                        ".byte 0x0f,0x05\n\t"      /* 12: syscall */ \
+                        ".byte 0xc3\n\t"           /* 14: ret */ \
+diff --git a/include/wine/inproc_sync_macos.h b/include/wine/inproc_sync_macos.h
+new file mode 100644
+index 0000000..244c733
+--- /dev/null
++++ b/include/wine/inproc_sync_macos.h
+@@ -0,0 +1,44 @@
++/*
++ * macOS 용 in-process 동기화 객체의 공유 상태.
++ *
++ * 리눅스는 /dev/ntsync 커널 드라이버가 같은 일을 한다. macOS 에는 그런 게 없어서
++ * 객체마다 공유 메모리 한 장을 두고, 대기는 __ulock_wait 으로 한다.
++ * wineserver 가 만들어 fd 로 넘기고, 각 프로세스가 그 fd 를 mmap 해서 같은 장을 본다.
++ *
++ * 서버와 클라이언트가 같은 배치를 봐야 하므로 여기 한 곳에만 적는다.
++ */
++#ifndef __WINE_INPROC_SYNC_MACOS_H
++#define __WINE_INPROC_SYNC_MACOS_H
++
++struct macos_sync_state
++{
++    int          type;       /* enum inproc_sync_type */
++    int          manual;     /* 이벤트: 수동 리셋인가 */
++    unsigned int max;        /* 세마포어: 최대값 */
++    int          owner;      /* 뮤텍스: 가진 스레드, 0 이면 비어 있음 */
++    unsigned int count;      /* 이벤트: 0/1, 세마포어: 남은 수, 뮤텍스: 재진입 횟수 */
++    int          abandoned;  /* 뮤텍스: 주인이 죽은 채 남았는가 */
++    unsigned int seq;        /* 깨우기 신호. 값이 바뀌면 대기자가 다시 확인한다 */
++    unsigned int waiters;    /* 이 객체 하나만 보고 자는 수. 0 이면 깨우기 syscall 을 건너뛴다 */
++    unsigned int multi;      /* 이 객체를 다중 대기 목록에 넣고 자는 수 */
++    unsigned int pad;
++    /* 대기 타이머(로컬 처리). 서버는 타이머를 켤 때 만료 시각(1601 기준 100ns, 0 이면 없음)과
++     * 주기(ms)만 여기 적고 자기 타임아웃을 걸지 않는다. 만료 판정·소모는 대기자가 한다.
++     * 실측(2026-09-24, 로아 FEX): wineserver 시간의 절반이 타이머 만료→신호→깨우기 왕복이었다. */
++    long long    due;
++    unsigned int period_ms;
++    unsigned int pad2;
++};
++
++/* 객체 여러 개를 한꺼번에 기다릴 때 쓴다. __ulock_wait 은 주소 하나만 볼 수 있어서,
++ * 어떤 객체가 신호를 받든 이 값이 함께 올라가게 해 두고 대기자가 여기서 깨어나
++ * 다시 확인한다. wineserver 가 만들어 모든 프로세스에 fd 로 넘긴다. */
++struct macos_sync_global
++{
++    unsigned int seq;
++    unsigned int waiters;
++};
++
++#define MACOS_SYNC_MAP_SIZE 4096
++
++#endif
+diff --git a/include/wine/unixlib.h b/include/wine/unixlib.h
+index a4b9d36..2fa2bed 100644
+--- a/include/wine/unixlib.h
++++ b/include/wine/unixlib.h
+@@ -302,4 +302,10 @@ static inline NTSTATUS __wine_unix_call( unixlib_handle_t handle, unsigned int c
+ 
+ #endif /* WINE_UNIX_LIB */
+ 
++/* fex32: macOS arm64 유닉스 라이브러리의 wow64 썽크는 32비트 포인터를 게스트 창으로 푼다 */
++#if defined(WINE_UNIX_LIB) && defined(__aarch64__) && defined(__APPLE__)
++#define WINE_WOW64_REBASE
++#include "wine/wow64base.h"
++#endif
++
+ #endif  /* __WINE_WINE_UNIXLIB_H */
+diff --git a/include/wine/usdaddr.h b/include/wine/usdaddr.h
+new file mode 100644
+index 0000000..2fe6254
+--- /dev/null
++++ b/include/wine/usdaddr.h
+@@ -0,0 +1,23 @@
++/*
++ * KUSER_SHARED_DATA 의 배치 주소.
++ *
++ * 윈도우는 이것을 0x7ffe0000 에 둔다. 그런데 macOS 의 ARM64 프로세스는
++ * __PAGEZERO 가 4GB 로 고정되고(그보다 작게 링크하면 커널이 SIGKILL 한다),
++ * 실측상 0x140000000 아래로는 mmap(MAP_FIXED) 이 전부 실패한다.
++ * 실행 중에 __PAGEZERO 를 해제해도 최소 주소는 내려가지 않는다.
++ *
++ * 그래서 이 포트에서는 4GB 위로 옮긴다. 이 주소를 직접 읽는 게스트 프로그램은
++ * 깨지지만, Wine 의 DLL 들은 전부 이 상수를 거쳐 가므로 함께 옮겨진다.
++ *
++ * 유닉스 쪽과 PE 쪽(aarch64/x86_64/i386-windows)이 같은 값을 써야 한다.
++ * 한쪽만 바뀌면 게스트가 엉뚱한 페이지를 읽는다.
++ */
++#ifndef __WINE_USDADDR_H
++#define __WINE_USDADDR_H
++
++/* 이 트리는 macOS ARM64 포트다. 빌드 플래그에 기대지 않고 여기서 정한다.
++ * 32비트(i386) 빌드에서는 상위 비트가 잘려 0x7ffe0000 이 되는데, 32비트 게스트는
++ * 어차피 하위 4GB 를 못 쓰므로 그대로 둔다. */
++#define WINE_USD_ADDR 0x17ffe0000ull
++
++#endif /* __WINE_USDADDR_H */
+diff --git a/include/wine/wow64base.h b/include/wine/wow64base.h
+new file mode 100644
+index 0000000..08acf2a
+--- /dev/null
++++ b/include/wine/wow64base.h
+@@ -0,0 +1,53 @@
++/*
++ * fex32: 32비트(WoW64) 게스트 주소공간을 4GB 위의 창(window)에 둔다.
++ *
++ * macOS arm64 프로세스는 4GB 아래를 매핑할 수 없다(__PAGEZERO 4GB 강제).
++ * 그래서 32비트 게스트의 4GB 주소공간 전체를 호스트 주소 [BASE, BASE+4G) 에 둔다.
++ * BASE 는 4GB 정렬이므로
++ *   - 호스트 → 게스트: 하위 32비트 자르기(PtrToUlong) 그대로 맞다.
++ *   - 게스트 → 호스트: BASE 를 OR 해야 한다 (0x10000 미만 값은 정수 자원 ID·핸들류라 그대로 둔다).
++ * FEX JIT 는 게스트 메모리 접근마다 BASE 를 더한다.
++ * 64비트 호스트 코드(wow64·wow64win·ntdll unix·unixlib 의 wow64 썽크)는 32비트 포인터를
++ * 풀 때 wine_wow64_g2h() 를 쓴다.
++ */
++#ifndef __WINE_WOW64BASE_H
++#define __WINE_WOW64BASE_H
++
++#define WINE_WOW64_GUEST_BASE 0x3f0000000000ull  /* 63TB, 4GB 정렬. Wine 64비트 힙(1TB 근처)·DLL(0x6fff…)과 안 겹치게 */
++
++#if defined(_WIN64) || defined(__LP64__)
++#ifdef WINE_UNIX_LIB
++/* 유닉스 쪽은 64비트 전용 프로세스에서도 불리므로 실제 창이 있을 때만(ntdll.so 가 채움) */
++extern unsigned long long __wine_wow64_guest_base;
++#define WINE_WOW64_BASE_RT __wine_wow64_guest_base
++#else
++/* PE 쪽 wow64.dll·wow64win.dll 은 wow64 프로세스에만 올라온다 */
++#define WINE_WOW64_BASE_RT WINE_WOW64_GUEST_BASE
++#endif
++static inline void *wine_wow64_g2h( unsigned int x )
++{
++    if (x < 0x10000 || !WINE_WOW64_BASE_RT) return (void *)(unsigned long long)x;
++    return (void *)(unsigned long long)(WINE_WOW64_BASE_RT | (unsigned long long)x);
++}
++#endif
++
++/* 32비트 게스트 코드가 64비트 구조(PEB64/TEB64)에 포인터를 쓸 때: 게스트 주소 → 호스트 64비트 값 */
++#if !defined(_WIN64) && !defined(__LP64__)
++static inline unsigned long long wine_wow64_h64( const void *p )
++{
++    unsigned int x = (unsigned int)(unsigned long)p;
++    return x < 0x10000 ? x : (WINE_WOW64_GUEST_BASE | x);
++}
++#endif
++
++#endif /* __WINE_WOW64BASE_H */
++
++/* wow64 썽크 소스(모든 #include 뒤)에서 #define WINE_WOW64_REBASE 후 이 헤더를 넣으면
++ * ULongToPtr/UlongToPtr 가 게스트 창 변환으로 바뀐다 */
++#if defined(WINE_WOW64_REBASE) && (defined(_WIN64) || defined(__LP64__))
++#undef ULongToPtr
++#undef UlongToPtr
++#define ULongToPtr(ul) wine_wow64_g2h( (unsigned int)(ul) )
++#define UlongToPtr(ul) wine_wow64_g2h( (unsigned int)(ul) )
++#endif
++
+diff --git a/include/winnt.h b/include/winnt.h
+index 0cde7ab..f794e23 100644
+--- a/include/winnt.h
++++ b/include/winnt.h
+@@ -2576,6 +2576,10 @@ typedef struct _NT_TIB64
+ 
+ struct _TEB;
+ 
++/* macOS ARM64 포트: TEB 를 담는 pthread 직접 TSD 슬롯.
++ * 유닉스 쪽(ntdll.so)과 PE 쪽이 반드시 같은 값을 써야 한다. */
++#define WINE_MACOS_TEB_TSD_SLOT 767   /* 동적 키 범위(256~767)의 끝. 0~255 는 시스템 프레임워크가 정적 키로 쓴다(95 = CoreText 가 써서 충돌했다) */
++
+ #ifdef WINE_UNIX_LIB
+ # ifdef __GNUC__
+ NTSYSAPI struct _TEB * WINAPI NtCurrentTeb(void) __attribute__((pure));
+@@ -2597,15 +2601,36 @@ static FORCEINLINE struct _TEB * WINAPI NtCurrentTeb(void)
+     return (struct _TEB *)__readfsdword( 0x18 );
+ }
+ #elif (defined(__aarch64__) || defined(__arm64ec__)) && defined(__GNUC__)
++/* 이 트리는 macOS ARM64 전용 포트다. 빌드 플래그에 기대면 Makefile 재생성 때
++ * 날아가므로 여기서 조건 없이 정한다. */
++#if 1
++/* macOS 는 x18 을 플랫폼 예약으로 두고 예외 복귀마다 0 으로 지운다. 시스템콜이나
++ * 시그널만이 아니라 타이머 선점만으로도 지워진다(실측 2~4ms). 그래서 윈도우 ABI 가
++ * 정한 "x18 = TEB" 를 이 호스트에서는 지킬 수 없다.
++ *
++ * TPIDRRO_EL0 는 macOS 가 보존한다. 거기서 pthread 의 직접 TSD 배열을 얻어
++ * 우리가 잡아 둔 슬롯에서 TEB 를 읽는다. 유닉스 쪽이 스레드마다 이 슬롯을 채운다. */
++static FORCEINLINE struct _TEB * WINAPI NtCurrentTeb(void)
++{
++    unsigned long long __tsd;   /* 윈도우에서 long 은 32비트다. 반드시 64비트로 받는다. */
++    __asm__ __volatile__( "mrs %0, tpidrro_el0" : "=r" (__tsd) );
++    return ((struct _TEB **)(unsigned long long)(__tsd & ~7ull))[WINE_MACOS_TEB_TSD_SLOT];
++}
++#else
+ register struct _TEB *__wine_current_teb __asm__("x18");
+ static FORCEINLINE struct _TEB * WINAPI NtCurrentTeb(void)
+ {
+     return __wine_current_teb;
+ }
++#endif
+ #elif (defined(__aarch64__) || defined(__arm64ec__)) && defined(_MSC_VER)
++/* Wine 은 PE 를 -target aarch64-windows(MSVC 환경)로 빌드한다. 그래서 __GNUC__ 가
++ * 아니라 이 분기를 탄다. macOS 에서 x18 을 못 쓰는 사정은 위와 같다. */
+ static FORCEINLINE struct _TEB * WINAPI NtCurrentTeb(void)
+ {
+-    return (struct _TEB *)__getReg(18);
++    unsigned long long __tsd;
++    __asm__ __volatile__( "mrs %0, tpidrro_el0" : "=r" (__tsd) );
++    return ((struct _TEB **)(unsigned long long)(__tsd & ~7ull))[WINE_MACOS_TEB_TSD_SLOT];
+ }
+ #elif defined(__x86_64__) && defined(__GNUC__)
+ static FORCEINLINE struct _TEB * WINAPI NtCurrentTeb(void)

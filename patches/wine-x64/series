@@ -1,0 +1,12 @@
+0001-dlls-bcrypt.patch
+0002-dlls-dwrite.patch
+0003-dlls-kernelbase.patch
+0004-dlls-nsi.patch
+0005-dlls-ntdll.patch
+0006-dlls-secur32.patch
+0007-dlls-win32u.patch
+0008-dlls-winecoreaudio.drv.patch
+0009-dlls-winemac.drv.patch
+0010-dlls-wintypes.patch
+0011-include.patch
+0012-server.patch

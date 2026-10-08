@@ -1,0 +1,37 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 51/74] dlls-setupapi: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/setupapi/devinst.c b/dlls/setupapi/devinst.c
+index 8d832d1..248dc99 100644
+--- a/dlls/setupapi/devinst.c
++++ b/dlls/setupapi/devinst.c
+@@ -4554,6 +4554,8 @@ CONFIGRET WINAPI CM_Get_Device_IDA(DEVINST devnode, char *buffer, ULONG len, ULO
+ {
+     TRACE("%lu, %p, %lu, %#lx\n", devnode, buffer, len, flags);
+ 
++    if (!buffer) return CR_INVALID_POINTER;
++
+     if (devnode >= devinst_table_size || !devinst_table[devnode])
+         return CR_NO_SUCH_DEVINST;
+ 
+@@ -4569,6 +4571,8 @@ CONFIGRET WINAPI CM_Get_Device_IDW(DEVINST devnode, WCHAR *buffer, ULONG len, UL
+ {
+     TRACE("%lu, %p, %lu, %#lx\n", devnode, buffer, len, flags);
+ 
++    if (!buffer) return CR_INVALID_POINTER;  /* Ember: 전에는 NULL 에 써서 튕겼다 */
++
+     if (devnode >= devinst_table_size || !devinst_table[devnode])
+         return CR_NO_SUCH_DEVINST;
+ 
+@@ -4584,6 +4588,8 @@ CONFIGRET WINAPI CM_Get_Device_ID_Size(ULONG *len, DEVINST devnode, ULONG flags)
+ {
+     TRACE("%p, %lu, %#lx\n", len, devnode, flags);
+ 
++    if (!len) return CR_INVALID_POINTER;
++
+     if (devnode >= devinst_table_size || !devinst_table[devnode])
+         return CR_NO_SUCH_DEVINST;
+ 

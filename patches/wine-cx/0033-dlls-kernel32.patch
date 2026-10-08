@@ -1,0 +1,29 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 33/74] dlls-kernel32: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/kernel32/kernel32.spec b/dlls/kernel32/kernel32.spec
+index 6a35f53..1cea7e0 100644
+--- a/dlls/kernel32/kernel32.spec
++++ b/dlls/kernel32/kernel32.spec
+@@ -1222,8 +1222,8 @@
+ @ stdcall -import RaiseFailFastException(ptr ptr long)
+ @ stdcall -import ReadConsoleA(long ptr long ptr ptr)
+ @ stdcall -import ReadConsoleInputA(long ptr long ptr)
+-@ stub ReadConsoleInputExA
+-@ stub ReadConsoleInputExW
++@ stdcall -import ReadConsoleInputExA(long ptr long ptr long)
++@ stdcall -import ReadConsoleInputExW(long ptr long ptr long)
+ @ stdcall -import ReadConsoleInputW(long ptr long ptr)
+ @ stdcall -import ReadConsoleOutputA(long ptr long long ptr)
+ @ stdcall -import ReadConsoleOutputAttribute(long ptr long long ptr)
+@@ -1508,6 +1508,7 @@
+ @ stdcall SetThreadpoolThreadMaximum(ptr long) NTDLL.TpSetPoolMaxThreads
+ @ stdcall SetThreadpoolThreadMinimum(ptr long) NTDLL.TpSetPoolMinThreads
+ @ stdcall SetThreadpoolTimer(ptr ptr long long) NTDLL.TpSetTimer
++@ stdcall SetThreadpoolTimerEx(ptr ptr long long) NTDLL.TpSetTimerEx
+ @ stdcall SetThreadpoolWait(ptr long ptr) NTDLL.TpSetWait
+ @ stdcall -import SetTimeZoneInformation(ptr)
+ @ stub SetTimerQueueTimer

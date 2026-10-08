@@ -1,0 +1,38 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 3/74] dlls-bcrypt: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/bcrypt/gnutls.c b/dlls/bcrypt/gnutls.c
+index cff9526..d8305c5 100644
+--- a/dlls/bcrypt/gnutls.c
++++ b/dlls/bcrypt/gnutls.c
+@@ -667,6 +667,8 @@ static NTSTATUS key_symmetric_vector_reset( void *args )
+     return STATUS_SUCCESS;
+ }
+ 
++static const unsigned char zero_vector[16];
++
+ static NTSTATUS init_cipher_handle( struct key *key )
+ {
+     gnutls_cipher_algorithm_t cipher;
+@@ -682,7 +684,17 @@ static NTSTATUS init_cipher_handle( struct key *key )
+     vector.data = key->u.s.vector;
+     vector.size = key->u.s.vector_len;
+ 
+-    if ((ret = pgnutls_cipher_init( &key_data(key)->cipher, cipher, &secret, key->u.s.vector ? &vector : NULL )))
++    /* Ember: IV 없이 CBC(ECB 흉내 포함)·CFB 를 만들면 gnutls 의 nettle 뒷단은 IV 크기를 0 으로 둔 채 복호화해
++     * nettle_cbc_decrypt 가 블록 크기 0 으로 나눠 프로세스가 통째로 죽었다(유닉스 쪽 SIGFPE).
++     * 윈도우처럼 0 IV 를 준다(블록 크기만큼). GCM 은 IV 가 따로 필수라 그대로. */
++    if (!key->u.s.vector && key->u.s.mode != CHAIN_MODE_GCM && key->u.s.block_size &&
++        key->u.s.block_size <= sizeof(zero_vector))
++    {
++        vector.data = (unsigned char *)zero_vector;
++        vector.size = key->u.s.block_size;
++    }
++
++    if ((ret = pgnutls_cipher_init( &key_data(key)->cipher, cipher, &secret, vector.data ? &vector : NULL )))
+     {
+         pgnutls_perror( ret );
+         return STATUS_INTERNAL_ERROR;

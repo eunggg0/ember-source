@@ -1,0 +1,265 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 61/74] dlls-wined3d: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/wined3d/adapter_vk.c b/dlls/wined3d/adapter_vk.c
+index 665f9a7..510994c 100644
+--- a/dlls/wined3d/adapter_vk.c
++++ b/dlls/wined3d/adapter_vk.c
+@@ -508,6 +508,7 @@ static void adapter_vk_get_wined3d_caps(const struct wined3d_adapter *adapter, s
+     const VkPhysicalDeviceLimits *limits = &adapter_vk->device_limits;
+     bool sampler_anisotropy = limits->maxSamplerAnisotropy > 1.0f;
+     const struct wined3d_vk_info *vk_info = &adapter_vk->vk_info;
++    VkFormatProperties properties;
+ 
+     caps->ddraw_caps.dds_caps |= WINEDDSCAPS_BACKBUFFER
+             | WINEDDSCAPS_COMPLEX
+@@ -600,6 +601,10 @@ static void adapter_vk_get_wined3d_caps(const struct wined3d_adapter *adapter, s
+             | WINED3DSTENCILCAPS_TWOSIDED;
+ 
+     caps->DeclTypes |= WINED3DDTCAPS_FLOAT16_2 | WINED3DDTCAPS_FLOAT16_4;
++    VK_CALL(vkGetPhysicalDeviceFormatProperties(adapter_vk->physical_device,
++            VK_FORMAT_R8G8B8A8_USCALED, &properties));
++    if (!(properties.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT))
++        caps->DeclTypes &= ~WINED3DDTCAPS_UBYTE4;
+ 
+     caps->MaxPixelShader30InstructionSlots = WINED3DMAX30SHADERINSTRUCTIONS;
+     caps->MaxVertexShader30InstructionSlots = WINED3DMAX30SHADERINSTRUCTIONS;
+diff --git a/dlls/wined3d/context_vk.c b/dlls/wined3d/context_vk.c
+index 540a88a..a856557 100644
+--- a/dlls/wined3d/context_vk.c
++++ b/dlls/wined3d/context_vk.c
+@@ -2685,6 +2685,29 @@ static VkFormat vk_format_from_component_type(enum wined3d_component_type compon
+     return VK_FORMAT_UNDEFINED;
+ }
+ 
++static VkFormat vk_vertex_format_from_wined3d(const struct wined3d_format *format,
++        const struct wined3d_shader *vertex_shader)
++{
++    /* SM1-3 and fixed-function vertex inputs convert unnormalized integers
++     * to floats. SM4+ inputs retain the declaration's integer type. */
++    if (!vertex_shader || vertex_shader->reg_maps.shader_version.major < 4)
++    {
++        switch (format->id)
++        {
++            case WINED3DFMT_R8G8B8A8_UINT:
++                return VK_FORMAT_R8G8B8A8_USCALED;
++            case WINED3DFMT_R16G16_SINT:
++                return VK_FORMAT_R16G16_SSCALED;
++            case WINED3DFMT_R16G16B16A16_SINT:
++                return VK_FORMAT_R16G16B16A16_SSCALED;
++            default:
++                break;
++        }
++    }
++
++    return wined3d_format_vk(format)->vk_format;
++}
++
+ static bool wined3d_context_vk_update_graphics_pipeline_key(struct wined3d_context_vk *context_vk,
+         const struct wined3d_state *state, VkPipelineLayout vk_pipeline_layout, uint32_t *null_buffer_binding)
+ {
+@@ -2728,6 +2751,7 @@ static bool wined3d_context_vk_update_graphics_pipeline_key(struct wined3d_conte
+         VkVertexInputAttributeDescription *a;
+         VkVertexInputBindingDescription *b;
+ 
++        vertex_shader = state->shader[WINED3D_SHADER_TYPE_VERTEX];
+         wined3d_stream_info_from_declaration(&stream_info, state, d3d_info);
+         divisor_count = 0;
+         for (i = 0, mask = 0, attribute_count = 0, binding_count = 0; i < ARRAY_SIZE(stream_info.elements); ++i)
+@@ -2745,7 +2769,7 @@ static bool wined3d_context_vk_update_graphics_pipeline_key(struct wined3d_conte
+ 
+             a->location = i;
+             a->binding = binding;
+-            a->format = wined3d_format_vk(e->format)->vk_format;
++            a->format = vk_vertex_format_from_wined3d(e->format, vertex_shader);
+             a->offset = (UINT_PTR)e->data.addr - state->streams[binding].offset;
+ 
+             if (mask & (1u << binding))
+@@ -2765,7 +2789,6 @@ static bool wined3d_context_vk_update_graphics_pipeline_key(struct wined3d_conte
+             }
+         }
+ 
+-        vertex_shader = state->shader[WINED3D_SHADER_TYPE_VERTEX];
+         if (vertex_shader && (mask = ~stream_info.use_map & vertex_shader->reg_maps.input_registers))
+         {
+             struct wined3d_shader_signature_element *element;
+@@ -3748,6 +3771,26 @@ static VkPipeline wined3d_context_vk_get_graphics_pipeline(struct wined3d_contex
+     if ((entry = wine_rb_get(&context_vk->graphics_pipelines, key)))
+         return WINE_RB_ENTRY_VALUE(entry, struct wined3d_graphics_pipeline_vk, entry)->vk_pipeline;
+ 
++    /* Scaled formats are optional. Check new pipelines before handing an
++     * unsupported vertex format to the driver; cached pipelines are valid. */
++    for (unsigned int i = 0; i < key->input_desc.vertexAttributeDescriptionCount; ++i)
++    {
++        VkFormat format = key->attributes[i].format;
++        VkFormatProperties properties;
++
++        if (format != VK_FORMAT_R8G8B8A8_USCALED && format != VK_FORMAT_R16G16_SSCALED
++                && format != VK_FORMAT_R16G16B16A16_SSCALED)
++            continue;
++
++        VK_CALL(vkGetPhysicalDeviceFormatProperties(wined3d_adapter_vk(device_vk->d.adapter)->physical_device,
++                format, &properties));
++        if (!(properties.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT))
++        {
++            ERR("Scaled vertex format %u is not supported.\n", format);
++            return VK_NULL_HANDLE;
++        }
++    }
++
+     if (!(pipeline_vk = malloc(sizeof(*pipeline_vk))))
+         return VK_NULL_HANDLE;
+     pipeline_vk->key = *key;
+diff --git a/dlls/wined3d/shader_spirv.c b/dlls/wined3d/shader_spirv.c
+index d5fa401..808f43c 100644
+--- a/dlls/wined3d/shader_spirv.c
++++ b/dlls/wined3d/shader_spirv.c
+@@ -24,6 +24,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(d3d_shader);
+ 
+ static const struct wined3d_shader_backend_ops spirv_shader_backend_vk;
+ 
++static void shader_spirv_precompile(void *shader_priv, struct wined3d_shader *shader);
++
+ struct shader_spirv_resource_bindings
+ {
+     struct vkd3d_shader_resource_binding *bindings;
+@@ -726,6 +728,13 @@ static bool shader_spirv_resource_bindings_init(struct shader_spirv_resource_bin
+         if (!(shader_mask & (1u << shader_type)) || !(shader = state->shader[shader_type]))
+             continue;
+ 
++        /* Reset releases backend programs while the shader objects survive.
++         * Recreate their scan metadata before deriving descriptor bindings. */
++        if (!shader->backend_data)
++            shader_spirv_precompile(shader->device->shader_priv, shader);
++        if (!shader->backend_data)
++            return false;
++
+         if (shader_type == WINED3D_SHADER_TYPE_COMPUTE)
+         {
+             descriptor_info = &((struct shader_spirv_compute_program_vk *)shader->backend_data)->descriptor_info;
+@@ -809,7 +818,7 @@ static bool shader_spirv_resource_bindings_init(struct shader_spirv_resource_bin
+     return true;
+ }
+ 
+-static void shader_spirv_scan_shader(struct wined3d_shader *shader,
++static bool shader_spirv_scan_shader(struct wined3d_shader *shader,
+         struct vkd3d_shader_scan_descriptor_info *descriptor_info,
+         struct vkd3d_shader_scan_signature_info *signature_info)
+ {
+@@ -863,20 +872,25 @@ static void shader_spirv_scan_shader(struct wined3d_shader *shader,
+         FIXME("\n");
+     }
+     vkd3d_shader_free_messages(messages);
++    return ret >= 0;
+ }
+ 
+ static void shader_spirv_precompile_compute(struct wined3d_shader *shader)
+ {
+     struct shader_spirv_compute_program_vk *program_vk;
+ 
+-    if (!(program_vk = shader->backend_data))
++    if (!(program_vk = calloc(1, sizeof(*program_vk))))
+     {
+-        if (!(program_vk = calloc(1, sizeof(*program_vk))))
+-            ERR("Failed to allocate program.\n");
+-        shader->backend_data = program_vk;
++        ERR("Failed to allocate program.\n");
++        return;
+     }
+-
+-    shader_spirv_scan_shader(shader, &program_vk->descriptor_info, NULL);
++    if (!shader_spirv_scan_shader(shader, &program_vk->descriptor_info, NULL))
++    {
++        /* vkd3d-shader frees scan outputs when the scan fails. */
++        free(program_vk);
++        return;
++    }
++    shader->backend_data = program_vk;
+ }
+ 
+ static void shader_spirv_precompile(void *shader_priv, struct wined3d_shader *shader)
+@@ -885,20 +899,27 @@ static void shader_spirv_precompile(void *shader_priv, struct wined3d_shader *sh
+ 
+     TRACE("shader_priv %p, shader %p.\n", shader_priv, shader);
+ 
++    if (shader->backend_data)
++        return;
++
+     if (shader->reg_maps.shader_version.type == WINED3D_SHADER_TYPE_COMPUTE)
+     {
+         shader_spirv_precompile_compute(shader);
+         return;
+     }
+ 
+-    if (!(program_vk = shader->backend_data))
++    if (!(program_vk = calloc(1, sizeof(*program_vk))))
+     {
+-        if (!(program_vk = calloc(1, sizeof(*program_vk))))
+-            ERR("Failed to allocate program.\n");
+-        shader->backend_data = program_vk;
++        ERR("Failed to allocate program.\n");
++        return;
+     }
+-
+-    shader_spirv_scan_shader(shader, &program_vk->descriptor_info, &program_vk->signature_info);
++    if (!shader_spirv_scan_shader(shader, &program_vk->descriptor_info, &program_vk->signature_info))
++    {
++        /* vkd3d-shader frees scan outputs when the scan fails. */
++        free(program_vk);
++        return;
++    }
++    shader->backend_data = program_vk;
+ }
+ 
+ static void shader_spirv_apply_draw_state(void *shader_priv, struct wined3d_context *context,
+@@ -927,6 +948,16 @@ static void shader_spirv_apply_draw_state(void *shader_priv, struct wined3d_cont
+     if (context->shader_update_mask & (1u << WINED3D_SHADER_TYPE_GEOMETRY))
+         context->shader_update_mask |= 1u << bindings->so_stage;
+ 
++    /* SM1-3 vertex interfaces are remapped to the pixel shader signature.
++     * Revisit the variant cache when that signature can change, even if the
++     * vertex shader and descriptor binding base stayed the same. This also
++     * clears the varying map after a pixel shader is unbound. */
++    if ((context->shader_update_mask & (1u << WINED3D_SHADER_TYPE_PIXEL))
++            && (shader = state->shader[WINED3D_SHADER_TYPE_VERTEX])
++            && shader->source_type == VKD3D_SHADER_SOURCE_D3D_BYTECODE
++            && shader->reg_maps.shader_version.major < 4)
++        context->shader_update_mask |= 1u << WINED3D_SHADER_TYPE_VERTEX;
++
+     layout_vk = wined3d_context_vk_get_pipeline_layout(context_vk, bindings->vk_bindings, bindings->vk_binding_count);
+     context_vk->graphics.vk_set_layout = layout_vk->vk_set_layout;
+     context_vk->graphics.vk_pipeline_layout = layout_vk->vk_pipeline_layout;
+@@ -965,7 +996,10 @@ static void shader_spirv_apply_compute_state(void *shader_priv,
+ 
+     if (!shader_spirv_resource_bindings_init(&priv->bindings,
+             &context_vk->compute.bindings, state, 1u << WINED3D_SHADER_TYPE_COMPUTE))
++    {
+         ERR("Failed to initialise shader resource bindings.\n");
++        goto fail;
++    }
+ 
+     if ((shader = state->shader[WINED3D_SHADER_TYPE_COMPUTE]))
+         program = shader_spirv_find_compute_program_vk(priv, context_vk, shader, &priv->bindings);
+@@ -977,13 +1011,13 @@ static void shader_spirv_apply_compute_state(void *shader_priv,
+         context_vk->compute.vk_pipeline = program->vk_pipeline;
+         context_vk->compute.vk_set_layout = program->vk_set_layout;
+         context_vk->compute.vk_pipeline_layout = program->vk_pipeline_layout;
++        return;
+     }
+-    else
+-    {
+-        context_vk->compute.vk_pipeline = VK_NULL_HANDLE;
+-        context_vk->compute.vk_set_layout = VK_NULL_HANDLE;
+-        context_vk->compute.vk_pipeline_layout = VK_NULL_HANDLE;
+-    }
++
++fail:
++    context_vk->compute.vk_pipeline = VK_NULL_HANDLE;
++    context_vk->compute.vk_set_layout = VK_NULL_HANDLE;
++    context_vk->compute.vk_pipeline_layout = VK_NULL_HANDLE;
+ }
+ 
+ static void shader_spirv_disable(void *shader_priv, struct wined3d_context *context)

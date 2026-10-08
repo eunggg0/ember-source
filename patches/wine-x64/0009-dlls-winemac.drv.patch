@@ -1,0 +1,544 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 9/12] dlls-winemac.drv: Ember changes
+
+Base: wine-11.0.tar.xz
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/winemac.drv/cocoa_app.m b/dlls/winemac.drv/cocoa_app.m
+index 2a9dab2..1d336d5 100644
+--- a/dlls/winemac.drv/cocoa_app.m
++++ b/dlls/winemac.drv/cocoa_app.m
+@@ -1437,7 +1437,7 @@ - (void) handleMouseMove:(NSEvent*)anEvent
+             }
+             else
+             {
+-                double scale = retina_on ? 2 : 1;
++                double scale = retina_on ? retina_scale : 1;
+ 
+                 /* Add event delta to accumulated delta error */
+                 /* deltaY is already flipped */
+diff --git a/dlls/winemac.drv/cocoa_cursorclipping.m b/dlls/winemac.drv/cocoa_cursorclipping.m
+index b6151a2..285cb63 100644
+--- a/dlls/winemac.drv/cocoa_cursorclipping.m
++++ b/dlls/winemac.drv/cocoa_cursorclipping.m
+@@ -103,7 +103,7 @@ static void clip_cursor_location(CGRect cursorClipRect, CGPoint *location)
+ 
+ static void scale_rect_for_retina_mode(BOOL mode, CGRect *cursorClipRect)
+ {
+-    double scale = mode ? 0.5 : 2.0;
++    double scale = mode ? 1.0 / retina_scale : retina_scale;
+     cursorClipRect->origin.x *= scale;
+     cursorClipRect->origin.y *= scale;
+     cursorClipRect->size.width *= scale;
+diff --git a/dlls/winemac.drv/cocoa_window.m b/dlls/winemac.drv/cocoa_window.m
+index 7d6d704..f0994cf 100644
+--- a/dlls/winemac.drv/cocoa_window.m
++++ b/dlls/winemac.drv/cocoa_window.m
+@@ -701,7 +701,7 @@ - (WineMetalView*) newMetalViewWithDevice:(id<MTLDevice>)device
+ 
+     - (void) setLayerRetinaProperties:(BOOL)mode
+     {
+-        [self layer].contentsScale = mode ? 2.0 : 1.0;
++        [self layer].contentsScale = mode ? retina_scale : 1.0;
+         [self layer].minificationFilter = mode ? kCAFilterLinear : kCAFilterNearest;
+         [self layer].magnificationFilter = mode ? kCAFilterLinear : kCAFilterNearest;
+ 
+@@ -973,7 +973,7 @@ - (void) dealloc
+ 
+     - (void) setRetinaMode:(BOOL)mode
+     {
+-        self.layer.contentsScale = mode ? 2.0 : 1.0;
++        self.layer.contentsScale = mode ? retina_scale : 1.0;
+         [super setRetinaMode:mode];
+     }
+ 
+@@ -984,7 +984,7 @@ - (CALayer*) makeBackingLayer
+         layer.framebufferOnly = YES;
+         layer.magnificationFilter = kCAFilterNearest;
+         layer.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
+-        layer.contentsScale = retina_on ? 2.0 : 1.0;
++        layer.contentsScale = retina_on ? retina_scale : 1.0;
+         return layer;
+     }
+ 
+@@ -2735,7 +2735,7 @@ - (void) setRetinaMode:(BOOL)mode
+ 
+         [transform scaleBy:scale];
+ 
+-        [[self contentView] layer].mask.contentsScale = mode ? 2.0 : 1.0;
++        [[self contentView] layer].mask.contentsScale = mode ? retina_scale : 1.0;
+ 
+         for (WineBaseView* subview in [self.contentView subviews])
+         {
+@@ -3938,6 +3938,7 @@ void macdrv_release_metal_device(macdrv_metal_device d)
+ }
+ }
+ 
++__attribute__((visibility("default")))
+ macdrv_metal_view macdrv_view_create_metal_view(macdrv_view v, macdrv_metal_device d)
+ {
+     id<MTLDevice> device = (id<MTLDevice>)d;
+@@ -3946,11 +3947,15 @@ macdrv_metal_view macdrv_view_create_metal_view(macdrv_view v, macdrv_metal_devi
+ 
+     OnMainThread(^{
+         metalView = [view newMetalViewWithDevice:device];
++        /* 이 뷰는 DXMT 를 위해 미리 만들어 두고 숨겨 놓은 것이다.
++         * 실제로 Metal 뷰가 붙는 지금이 보여 줄 때다. */
++        if (metalView) [view setHidden:NO];
+     });
+ 
+     return (macdrv_metal_view)metalView;
+ }
+ 
++__attribute__((visibility("default")))
+ macdrv_metal_layer macdrv_view_get_metal_layer(macdrv_metal_view v)
+ {
+     WineMetalView* view = (WineMetalView*)v;
+@@ -3963,6 +3968,7 @@ macdrv_metal_layer macdrv_view_get_metal_layer(macdrv_metal_view v)
+     return (macdrv_metal_layer)layer;
+ }
+ 
++__attribute__((visibility("default")))
+ void macdrv_view_release_metal_view(macdrv_metal_view v)
+ {
+     WineMetalView* view = (WineMetalView*)v;
+diff --git a/dlls/winemac.drv/display.c b/dlls/winemac.drv/display.c
+index 506335a..b3c7b3f 100644
+--- a/dlls/winemac.drv/display.c
++++ b/dlls/winemac.drv/display.c
+@@ -418,8 +418,8 @@ static CFDictionaryRef create_mode_dict(CGDisplayModeRef display_mode, BOOL is_o
+ 
+     if (retina_enabled && is_original)
+     {
+-        width *= 2;
+-        height *= 2;
++        width = width * retina_scale + 0.5;
++        height = height * retina_scale + 0.5;
+     }
+ 
+     io_flags &= kDisplayModeInterlacedFlag | kDisplayModeStretchedFlag | kDisplayModeTelevisionFlag;
+@@ -709,8 +709,8 @@ static CGDisplayModeRef find_best_display_mode(DEVMODEW *devmode, CFArrayRef dis
+ 
+         if (is_original && retina_enabled)
+         {
+-            width *= 2;
+-            height *= 2;
++            width = width * retina_scale + 0.5;
++            height = height * retina_scale + 0.5;
+         }
+ 
+         if (bpp != mode_bpp)
+@@ -850,8 +850,8 @@ static DEVMODEW *display_get_modes(CGDirectDisplayID display_id, int *modes_coun
+ 
+         if (retina_enabled && display_mode_matches_descriptor(mode, desc))
+         {
+-            devmodes[i].dmPelsWidth *= 2;
+-            devmodes[i].dmPelsHeight *= 2;
++            devmodes[i].dmPelsWidth = devmodes[i].dmPelsWidth * retina_scale + 0.5;
++            devmodes[i].dmPelsHeight = devmodes[i].dmPelsHeight * retina_scale + 0.5;
+         }
+     }
+     free_display_mode_descriptor(desc);
+@@ -897,8 +897,8 @@ static void display_get_current_mode(struct macdrv_monitor *monitor, DEVMODEW *d
+         struct display_mode_descriptor *desc = create_original_display_mode_descriptor(display_id);
+         if (display_mode_matches_descriptor(display_mode, desc))
+         {
+-            devmode->dmPelsWidth *= 2;
+-            devmode->dmPelsHeight *= 2;
++            devmode->dmPelsWidth = devmode->dmPelsWidth * retina_scale + 0.5;
++            devmode->dmPelsHeight = devmode->dmPelsHeight * retina_scale + 0.5;
+         }
+         free_display_mode_descriptor(desc);
+     }
+diff --git a/dlls/winemac.drv/gdi.c b/dlls/winemac.drv/gdi.c
+index 2ef941a..81398bd 100644
+--- a/dlls/winemac.drv/gdi.c
++++ b/dlls/winemac.drv/gdi.c
+@@ -220,7 +220,7 @@ static INT macdrv_GetDeviceCaps(PHYSDEV dev, INT cap)
+         dev = GET_NEXT_PHYSDEV( dev, pGetDeviceCaps );
+         ret = dev->funcs->pGetDeviceCaps( dev, cap );
+         if ((cap == HORZRES || cap == VERTRES) && retina_on)
+-            ret *= 2;
++            ret = (int)(ret * retina_scale + 0.5);
+         return ret;
+     }
+ 
+@@ -290,6 +290,169 @@ static const struct user_driver_funcs macdrv_funcs =
+ };
+ 
+ 
++/***********************************************************************
++ *              macdrv_functions
++ *
++ * 애플 D3DMetal 과 크로스오버가 번들하는 DXMT 는 winemac.drv 가 이 이름으로
++ * 내보내는 함수 포인터 표를 dlsym 으로 찾아 쓴다. upstream Wine 에는 없다.
++ *
++ * 항목 24개와 그 순서는 크로스오버 winemac.so 안의 추적 문자열에서 확인했다.
++ * 앞 10개는 DXMT 소스(`src/winemetal/unix/winemetal_unix.c`)의 선언과도 맞는다.
++ * 뒤 14개는 유닉스 쪽에서 쓸 수 없는 Win32 함수들이라, win32u 의 NtUser·레지스트리
++ * 호출로 같은 일을 하도록 감쌌다.
++ */
++extern void OnMainThreadAsync( dispatch_block_t block );
++
++static void macdrv_init_display_devices_wrap( BOOL force )
++{
++    /* 화면 구성은 winemac.drv 가 이미 들고 있다. 여기서 더 할 일은 없다. */
++}
++
++static void macdrv_on_main_thread( dispatch_block_t block )
++{
++    OnMainThreadAsync( block );
++}
++
++/* --- 레지스트리: A 문자열을 받아 유니코드로 바꿔 ntdll 로 넘긴다 --- */
++
++static HKEY reg_open_ascii( HKEY root, const char *name )
++{
++    WCHAR buf[MAX_PATH];
++    DWORD len = asciiz_to_unicode( buf, name ? name : "" );
++    return reg_open_key( root, buf, len - sizeof(WCHAR) );
++}
++
++static LONG macdrv_RegOpenKeyExA( HKEY root, const char *name, DWORD options, REGSAM access, HKEY *out )
++{
++    HKEY key = reg_open_ascii( root, name );
++    if (!key) return ERROR_FILE_NOT_FOUND;
++    *out = key;
++    return ERROR_SUCCESS;
++}
++
++static LONG macdrv_RegCreateKeyExA( HKEY root, const char *name, DWORD reserved, char *cls,
++                                    DWORD options, REGSAM access, void *sa, HKEY *out, DWORD *disp )
++{
++    /* 여는 것으로 충분하다. D3DMetal 은 설정을 읽기만 한다. */
++    HKEY key = reg_open_ascii( root, name );
++    if (!key) return ERROR_FILE_NOT_FOUND;
++    *out = key;
++    if (disp) *disp = REG_OPENED_EXISTING_KEY;
++    return ERROR_SUCCESS;
++}
++
++static LONG macdrv_RegQueryValueExA( HKEY key, const char *name, DWORD *reserved,
++                                     DWORD *type, BYTE *data, DWORD *count )
++{
++    char buffer[offsetof(KEY_VALUE_PARTIAL_INFORMATION, Data[1024])];
++    KEY_VALUE_PARTIAL_INFORMATION *info = (void *)buffer;
++    WCHAR nameW[256];
++    UNICODE_STRING str;
++    DWORD size;
++
++    str.Buffer = nameW;
++    str.Length = asciiz_to_unicode( nameW, name ? name : "" ) - sizeof(WCHAR);
++    str.MaximumLength = sizeof(nameW);
++    if (NtQueryValueKey( key, &str, KeyValuePartialInformation, buffer, sizeof(buffer), &size ))
++        return ERROR_FILE_NOT_FOUND;
++    if (type) *type = info->Type;
++    if (data && count && *count >= info->DataLength) memcpy( data, info->Data, info->DataLength );
++    else if (data) return ERROR_MORE_DATA;
++    if (count) *count = info->DataLength;
++    return ERROR_SUCCESS;
++}
++
++static LONG macdrv_RegSetValueExA( HKEY key, const char *name, DWORD reserved,
++                                   DWORD type, const BYTE *data, DWORD count )
++{
++    /* 설정을 되쓸 일은 없다. 성공으로 답해 흐름만 유지한다. */
++    return ERROR_SUCCESS;
++}
++
++static LONG macdrv_RegCloseKey( HKEY key )
++{
++    NtClose( key );
++    return ERROR_SUCCESS;
++}
++
++/* --- 창·모니터: 유닉스 쪽에서는 win32u 를 통해 부른다 --- */
++
++static BOOL macdrv_EnumDisplayMonitors( HDC hdc, RECT *rect, MONITORENUMPROC proc, LPARAM lp )
++{
++    return NtUserEnumDisplayMonitors( hdc, rect, proc, lp );
++}
++
++static BOOL macdrv_GetMonitorInfoA( HMONITOR mon, MONITORINFO *info )
++{
++    return NtUserGetMonitorInfo( mon, info );
++}
++
++static BOOL macdrv_AdjustWindowRectEx( RECT *rect, DWORD style, BOOL menu, DWORD ex_style )
++{
++    return NtUserAdjustWindowRect( rect, style, menu, ex_style, 0 );
++}
++
++static LONG_PTR macdrv_GetWindowLongPtrW( HWND hwnd, INT offset )
++{
++    return NtUserGetWindowLongPtrW( hwnd, offset );
++}
++
++static LONG_PTR macdrv_SetWindowLongPtrW( HWND hwnd, INT offset, LONG_PTR val )
++{
++    return NtUserSetWindowLongPtr( hwnd, offset, val, FALSE );
++}
++
++static BOOL macdrv_GetWindowRect( HWND hwnd, RECT *rect )
++{
++    return NtUserGetWindowRect( hwnd, rect, NtUserGetWinMonitorDpi( hwnd, MDT_RAW_DPI ) );
++}
++
++static BOOL macdrv_MoveWindow( HWND hwnd, INT x, INT y, INT cx, INT cy, BOOL repaint )
++{
++    UINT flags = SWP_NOZORDER | SWP_NOACTIVATE | (repaint ? 0 : SWP_NOREDRAW);
++    return NtUserSetWindowPos( hwnd, 0, x, y, cx, cy, flags );
++}
++
++static BOOL macdrv_SetWindowPos( HWND hwnd, HWND after, INT x, INT y, INT cx, INT cy, UINT flags )
++{
++    return NtUserSetWindowPos( hwnd, after, x, y, cx, cy, flags );
++}
++
++static INT macdrv_GetSystemMetrics( INT index )
++{
++    return NtUserGetSystemMetrics( index );
++}
++
++__attribute__((visibility("default")))
++void *macdrv_functions[24] =
++{
++    macdrv_init_display_devices_wrap,
++    get_win_data,
++    release_win_data,
++    macdrv_get_cocoa_window,
++    macdrv_create_metal_device,
++    macdrv_release_metal_device,
++    macdrv_view_create_metal_view,
++    macdrv_view_get_metal_layer,
++    macdrv_view_release_metal_view,
++    macdrv_on_main_thread,
++    macdrv_RegQueryValueExA,
++    macdrv_RegSetValueExA,
++    macdrv_RegOpenKeyExA,
++    macdrv_RegCreateKeyExA,
++    macdrv_RegCloseKey,
++    macdrv_EnumDisplayMonitors,
++    macdrv_GetMonitorInfoA,
++    macdrv_AdjustWindowRectEx,
++    macdrv_GetWindowLongPtrW,
++    macdrv_GetWindowRect,
++    macdrv_MoveWindow,
++    macdrv_SetWindowPos,
++    macdrv_GetSystemMetrics,
++    macdrv_SetWindowLongPtrW,
++};
++
++
+ void init_user_driver(void)
+ {
+     __wine_set_user_driver( &macdrv_funcs, WINE_GDI_DRIVER_VERSION );
+diff --git a/dlls/winemac.drv/macdrv.h b/dlls/winemac.drv/macdrv.h
+index ac2a785..ca45834 100644
+--- a/dlls/winemac.drv/macdrv.h
++++ b/dlls/winemac.drv/macdrv.h
+@@ -178,6 +178,10 @@ extern BOOL macdrv_SystemParametersInfo(UINT action, UINT int_param, void *ptr_p
+ {
+     HWND                hwnd;                   /* hwnd that this private data belongs to */
+     macdrv_window       cocoa_window;
++    /* DXMT 는 이 구조체를 직접 읽는다. CrossOver 계열 배치에 맞춰져 있어
++     * client view 가 오프셋 24 에 있다고 가정한다. 자리를 맞추기 위한 빈 칸이다.
++     * Wine 자체는 이 필드를 쓰지 않는다. */
++    macdrv_view         cocoa_view_unused;
+     macdrv_view         client_view;
+     struct window_rects rects;                  /* window rects in monitor DPI, relative to parent client area */
+     int                 pixel_format;           /* pixel format for GL */
+@@ -206,8 +210,8 @@ extern BOOL macdrv_SystemParametersInfo(UINT action, UINT int_param, void *ptr_p
+ 
+ extern struct macdrv_client_surface *macdrv_client_surface_create(HWND hwnd);
+ 
+-extern struct macdrv_win_data *get_win_data(HWND hwnd);
+-extern void release_win_data(struct macdrv_win_data *data);
++extern struct macdrv_win_data *get_win_data(HWND hwnd) __attribute__((visibility("default")));
++extern void release_win_data(struct macdrv_win_data *data) __attribute__((visibility("default")));
+ extern void init_win_context(void);
+ extern macdrv_window macdrv_get_cocoa_window(HWND hwnd, BOOL require_on_screen);
+ extern RGNDATA *get_region_data(HRGN hrgn, HDC hdc_lptodp);
+diff --git a/dlls/winemac.drv/macdrv_cocoa.h b/dlls/winemac.drv/macdrv_cocoa.h
+index 6a6b697..2e5e025 100644
+--- a/dlls/winemac.drv/macdrv_cocoa.h
++++ b/dlls/winemac.drv/macdrv_cocoa.h
+@@ -127,16 +127,17 @@
+ extern CFDictionaryRef localized_strings;
+ extern bool retina_enabled;  /* Whether Retina mode is enabled via registry setting. */
+ extern bool retina_on;       /* Whether Retina mode is currently active (enabled and display is in default mode). */
++extern double retina_scale;  /* Ember: Retina 배율. 기본 2(4K), 4/3 이면 QHD. EMBER_RETINA_SCALE 로 정한다. */
+ extern bool enable_app_nap;
+ 
+ static inline CGRect cgrect_mac_from_win(CGRect rect)
+ {
+     if (retina_on)
+     {
+-        rect.origin.x /= 2;
+-        rect.origin.y /= 2;
+-        rect.size.width /= 2;
+-        rect.size.height /= 2;
++        rect.origin.x /= retina_scale;
++        rect.origin.y /= retina_scale;
++        rect.size.width /= retina_scale;
++        rect.size.height /= retina_scale;
+     }
+ 
+     return rect;
+@@ -146,10 +147,10 @@ static inline CGRect cgrect_win_from_mac(CGRect rect)
+ {
+     if (retina_on)
+     {
+-        rect.origin.x *= 2;
+-        rect.origin.y *= 2;
+-        rect.size.width *= 2;
+-        rect.size.height *= 2;
++        rect.origin.x *= retina_scale;
++        rect.origin.y *= retina_scale;
++        rect.size.width *= retina_scale;
++        rect.size.height *= retina_scale;
+     }
+ 
+     return rect;
+@@ -159,8 +160,8 @@ static inline CGSize cgsize_mac_from_win(CGSize size)
+ {
+     if (retina_on)
+     {
+-        size.width /= 2;
+-        size.height /= 2;
++        size.width /= retina_scale;
++        size.height /= retina_scale;
+     }
+ 
+     return size;
+@@ -170,8 +171,8 @@ static inline CGSize cgsize_win_from_mac(CGSize size)
+ {
+     if (retina_on)
+     {
+-        size.width *= 2;
+-        size.height *= 2;
++        size.width *= retina_scale;
++        size.height *= retina_scale;
+     }
+ 
+     return size;
+@@ -181,8 +182,8 @@ static inline CGPoint cgpoint_mac_from_win(CGPoint point)
+ {
+     if (retina_on)
+     {
+-        point.x /= 2;
+-        point.y /= 2;
++        point.x /= retina_scale;
++        point.y /= retina_scale;
+     }
+ 
+     return point;
+@@ -192,8 +193,8 @@ static inline CGPoint cgpoint_win_from_mac(CGPoint point)
+ {
+     if (retina_on)
+     {
+-        point.x *= 2;
+-        point.y *= 2;
++        point.x *= retina_scale;
++        point.y *= retina_scale;
+     }
+ 
+     return point;
+diff --git a/dlls/winemac.drv/macdrv_main.c b/dlls/winemac.drv/macdrv_main.c
+index ed91383..3ffa22a 100644
+--- a/dlls/winemac.drv/macdrv_main.c
++++ b/dlls/winemac.drv/macdrv_main.c
+@@ -57,6 +57,7 @@ bool cursor_clipping_locks_windows = true;
+ bool use_precise_scrolling = true;
+ int gl_surface_mode = GL_SURFACE_IN_FRONT_OPAQUE;
+ bool retina_enabled = false;
++double retina_scale = 2.0;
+ bool enable_app_nap = false;
+ 
+ UINT64 app_icon_callback = 0;
+@@ -377,6 +378,16 @@ static void setup_options(void)
+     if (!get_config_key(hkey, NULL, "RetinaMode", buffer, sizeof(buffer)))
+         retina_enabled = IS_OPTION_TRUE(buffer[0]);
+ 
++    /* Ember: 게임별 해상도 선택. 1 = 화면 논리 해상도(FHD), 4/3 = QHD, 2 = 픽셀 그대로(4K). 레지스트리보다 우선. */
++    {
++        const char *e = getenv("EMBER_RETINA_SCALE");
++        if (e && *e)
++        {
++            double v = atof(e);
++            if (v > 1.01 && v <= 3.0) { retina_enabled = TRUE; retina_scale = v; }
++            else retina_enabled = FALSE;
++        }
++    }
+     retina_on = retina_enabled;
+ 
+     if (appkey) NtClose(appkey);
+diff --git a/dlls/winemac.drv/window.c b/dlls/winemac.drv/window.c
+index 9420e17..977de74 100644
+--- a/dlls/winemac.drv/window.c
++++ b/dlls/winemac.drv/window.c
+@@ -449,6 +449,35 @@ static void sync_window_min_max_info(HWND hwnd)
+  *
+  * Create the whole Mac window for a given window
+  */
++/**********************************************************************
++ *              sync_client_view
++ *
++ * DXMT 는 Metal 레이어를 client_view 에 붙인다. 그런데 Wine 11 은 OpenGL 이나
++ * Vulkan 이 처음 화면을 내보낼 때만 이 뷰를 만든다. DXMT 는 그보다 먼저 필요해서
++ * 늘 NULL 을 보고 포기한다. 그래서 창을 만들 때 미리 하나 붙여 둔다.
++ *
++ * 숨긴 채로 둔다. 실제로 Metal 뷰가 붙는 순간에만 보이게 한다.
++ * 그러지 않으면 일반 창에서 이 뷰가 그림을 가린다.
++ */
++static void sync_client_view(struct macdrv_win_data *data)
++{
++    RECT rect = data->rects.client;
++
++    if (!data->cocoa_window) return;
++
++    OffsetRect(&rect, -data->rects.visible.left, -data->rects.visible.top);
++    if (rect.right <= rect.left) rect.right = rect.left + 1;
++    if (rect.bottom <= rect.top) rect.bottom = rect.top + 1;
++
++    if (!data->client_view)
++    {
++        if (!(data->client_view = macdrv_create_view(cgrect_from_rect(rect)))) return;
++        macdrv_set_view_superview(data->client_view, NULL, data->cocoa_window, NULL, NULL);
++    }
++    else macdrv_set_view_frame(data->client_view, cgrect_from_rect(rect));
++}
++
++
+ static void create_cocoa_window(struct macdrv_win_data *data)
+ {
+     struct macdrv_thread_data *thread_data = macdrv_init_thread_data();
+@@ -487,6 +516,8 @@ static void create_cocoa_window(struct macdrv_win_data *data)
+ 
+     set_cocoa_window_properties(data);
+ 
++    sync_client_view(data);
++
+     /* set the window text */
+     if (!NtUserInternalGetWindowText(data->hwnd, text, ARRAY_SIZE(text))) text[0] = 0;
+     macdrv_set_cocoa_window_title(data->cocoa_window, text, wcslen(text));
+@@ -514,6 +545,11 @@ static void destroy_cocoa_window(struct macdrv_win_data *data)
+ 
+     TRACE("win %p Cocoa win %p\n", data->hwnd, data->cocoa_window);
+ 
++    if (data->client_view)
++    {
++        macdrv_dispose_view(data->client_view);
++        data->client_view = NULL;
++    }
+     macdrv_destroy_cocoa_window(data->cocoa_window);
+     data->cocoa_window = 0;
+     data->on_screen = FALSE;
+@@ -763,6 +799,7 @@ static void sync_window_position(struct macdrv_win_data *data, UINT swp_flags, c
+             frame.size.width = frame.size.height = 1;
+ 
+         macdrv_set_cocoa_window_frame(data->cocoa_window, &frame);
++        sync_client_view(data);
+     }
+ 
+     if (old_rects &&

@@ -1,0 +1,75 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 27/74] dlls-dsound: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/dsound/dsound_private.h b/dlls/dsound/dsound_private.h
+index 647f227..bbb45bc 100644
+--- a/dlls/dsound/dsound_private.h
++++ b/dlls/dsound/dsound_private.h
+@@ -71,6 +71,7 @@ typedef struct DSFilter {
+ struct DirectSoundDevice
+ {
+     LONG                        ref;
++    DWORD                       ember_mix_rate;  /* Ember: 앱이 주 버퍼 SetFormat 으로 준 믹스 속도(0 = 장치 속도) */
+ 
+     GUID                        guid;
+     DSCAPS                      drvcaps;
+diff --git a/dlls/dsound/primary.c b/dlls/dsound/primary.c
+index 7ed0dc7..dbe5b9d 100644
+--- a/dlls/dsound/primary.c
++++ b/dlls/dsound/primary.c
+@@ -123,9 +123,29 @@ static HRESULT DSOUND_WaveFormat(DirectSoundDevice *device, IAudioClient *client
+         wfe = *mixwfe;
+         CoTaskMemFree(mixwfe);
+ 
+-        wfe.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+-        wfe.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+-        wfe.Samples.wValidBitsPerSample = wfe.Format.wBitsPerSample = 32;
++        /* Ember: 믹스 표본율. 장치가 48kHz 인데 게임 버퍼가 44.1kHz 면 dsound 가 버퍼마다 FIR(약 66탭) 리샘플을 해서,
++         * 소리 버퍼가 수십 개인 게임(L4D2)은 32비트를 Rosetta 로 돌리며 믹서 스레드가 한 코어를 다 썼다
++         * (2026-10-03 dsmix: 44.1k 버퍼 32개 = 믹서 100%, 같은 수를 44.1k 로 믹스하면 43%). 그래서
++         *  - 게임이 주 버퍼에 SetFormat 으로 속도를 주면(44.1~192kHz) 그 속도로 믹스한다(XP 시절 윈도우와 같은 동작).
++         *  - EMBER_DSOUND_MIXRATE=N 이면 N 으로 강제, 0 이면 자동을 끈다(장치 속도).
++         * 장치 속도로의 변환은 원래 쓰던 AUTOCONVERTPCM 으로 macOS(AUHAL)가 네이티브로 한다. */
++        {
++            static int ember_force = -1;
++            DWORD rate = 0;
++            if (ember_force < 0)
++            {
++                char buf[16];
++                DWORD n = GetEnvironmentVariableA("EMBER_DSOUND_MIXRATE", buf, sizeof(buf));
++                ember_force = (n && n < sizeof(buf)) ? atoi(buf) : -2;   /* -2 = 지정 없음(자동) */
++            }
++            if (ember_force >= 8000 && ember_force <= 192000) rate = ember_force;
++            else if (ember_force == -2) rate = device->ember_mix_rate;
++            if (rate && wfe.Format.nSamplesPerSec != rate)
++            {
++                WARN("Ember: mixing at %lu Hz instead of device %lu Hz\n", rate, wfe.Format.nSamplesPerSec);
++                wfe.Format.nSamplesPerSec = rate;
++            }
++        }
+ 
+         if (wfe.Format.nChannels < device->num_speakers) {
+             device->speaker_config = DSOUND_FindSpeakerConfig(device->mmdevice, wfe.Format.nChannels);
+@@ -479,6 +499,19 @@ HRESULT primarybuffer_SetFormat(DirectSoundDevice *device, LPCWAVEFORMATEX passe
+ 		if (wfx) {
+ 			free(device->primary_pwfx);
+ 			device->primary_pwfx = wfx;
++			/* Ember: 게임이 준 주 버퍼 속도로 믹스(DSOUND_WaveFormat 설명). 장치를 다시 열어 바로 적용하고, 실패하면 그대로 둔다. */
++			if (wfx->nSamplesPerSec >= 44100 && wfx->nSamplesPerSec <= 192000 &&
++			    device->pwfx && device->pwfx->nSamplesPerSec != wfx->nSamplesPerSec &&
++			    device->ember_mix_rate != wfx->nSamplesPerSec)
++			{
++				DWORD old_rate = device->ember_mix_rate;
++				device->ember_mix_rate = wfx->nSamplesPerSec;
++				if (FAILED(DSOUND_ReopenDevice(device, FALSE)))
++				{
++					WARN("Ember: reopen at %lu Hz failed, keeping device rate\n", wfx->nSamplesPerSec);
++					device->ember_mix_rate = old_rate;
++				}
++			}
+ 		} else
+ 			err = DSERR_OUTOFMEMORY;
+ 	}

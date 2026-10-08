@@ -1,0 +1,19 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 10/74] dlls-d3dx9_28: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/d3dx9_28/d3dx9_28.spec b/dlls/d3dx9_28/d3dx9_28.spec
+index 48c143b..d1fabdf 100644
+--- a/dlls/d3dx9_28/d3dx9_28.spec
++++ b/dlls/d3dx9_28/d3dx9_28.spec
+@@ -167,7 +167,7 @@
+ @ stub D3DXGetTargetDescByVersion
+ @ stdcall D3DXGetVertexShaderProfile(ptr)
+ @ stdcall D3DXIntersect(ptr ptr ptr ptr ptr ptr ptr ptr ptr ptr)
+-@ stub D3DXIntersectSubset(ptr long ptr ptr ptr ptr ptr ptr ptr ptr ptr)
++@ stdcall D3DXIntersectSubset(ptr long ptr ptr ptr ptr ptr ptr ptr ptr ptr)
+ @ stdcall D3DXIntersectTri(ptr ptr ptr ptr ptr ptr ptr ptr)
+ @ stdcall D3DXLoadMeshFromXA(str long ptr ptr ptr ptr ptr ptr)
+ @ stdcall D3DXLoadMeshFromXInMemory(ptr long long ptr ptr ptr ptr ptr ptr)

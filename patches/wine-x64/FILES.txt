@@ -1,0 +1,37 @@
+# wine-x64 — base: wine-11.0.tar.xz
+# 
+# changed 34 files (new 1)
+M dlls/bcrypt/gnutls.c
+M dlls/dwrite/opentype.c
+M dlls/kernelbase/process.c
+M dlls/nsi/nsi.c
+M dlls/ntdll/loader.c
+M dlls/ntdll/ntdll.spec
+M dlls/ntdll/thread.c
+M dlls/ntdll/unix/loader.c
+M dlls/ntdll/unix/process.c
+M dlls/ntdll/unix/server.c
+M dlls/ntdll/unix/sync.c
+M dlls/ntdll/unix/thread.c
+M dlls/ntdll/unix/unix_private.h
+M dlls/ntdll/unix/virtual.c
+M dlls/ntdll/unwind.c
+M dlls/secur32/schannel_gnutls.c
+M dlls/win32u/freetype.c
+M dlls/winecoreaudio.drv/coreaudio.c
+M dlls/winemac.drv/cocoa_app.m
+M dlls/winemac.drv/cocoa_cursorclipping.m
+M dlls/winemac.drv/cocoa_window.m
+M dlls/winemac.drv/display.c
+M dlls/winemac.drv/gdi.c
+M dlls/winemac.drv/macdrv.h
+M dlls/winemac.drv/macdrv_cocoa.h
+M dlls/winemac.drv/macdrv_main.c
+M dlls/winemac.drv/window.c
+M dlls/wintypes/main.c
+M include/Makefile.in
+A include/wine/inproc_sync_macos.h
+M server/device.c
+M server/inproc_sync.c
+M server/object.h
+M server/timer.c

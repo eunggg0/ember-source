@@ -1,0 +1,415 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 62/74] dlls-winegstreamer: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/winegstreamer/quartz_parser.c b/dlls/winegstreamer/quartz_parser.c
+index f09e8b9..c5269c5 100644
+--- a/dlls/winegstreamer/quartz_parser.c
++++ b/dlls/winegstreamer/quartz_parser.c
+@@ -985,6 +985,7 @@ static bool amt_to_wg_format_video(const AM_MEDIA_TYPE *mt, struct wg_format *fo
+     format_map[] =
+     {
+         {&MEDIASUBTYPE_ARGB32,  WG_VIDEO_FORMAT_BGRA},
++        {&MEDIASUBTYPE_ABGR32,  WG_VIDEO_FORMAT_RGBA},   /* Ember(parity-avi): amt_from_wg_format 의 역. 8비트 팔레트 AVI(MS RLE·RGB8)가 RGBA 로 풀려 이 형식으로 연결되면 Run 에서 assert(abort) */
+         {&MEDIASUBTYPE_RGB32,   WG_VIDEO_FORMAT_BGRx},
+         {&MEDIASUBTYPE_RGB24,   WG_VIDEO_FORMAT_BGR},
+         {&MEDIASUBTYPE_RGB555,  WG_VIDEO_FORMAT_RGB15},
+@@ -2497,6 +2498,14 @@ static BOOL avi_splitter_filter_init_gst(struct parser *filter)
+     return TRUE;
+ }
+ 
++/* Ember: avidemux 뒤 decodebin 이 직접 푼 스트림(DivX·XviD·MJPEG 등, Wine 이 압축 형식으로 모르는 코덱)은 YUV 로 나온다.
++ * 기본 Video Renderer 는 RGB 만 받는데 이 핀은 YUV 하나만 내놓아 영상이 통째로 빠졌다(소리만 재생).
++ * decodebin 파서처럼 YUV·RGB 여러 형식을 내놓는다 — 변환은 파서 뒤 videoconvert 가 한다. */
++static BOOL avi_splitter_decoded_video(const struct wg_format *format)
++{
++    return format->major_type == WG_MAJOR_TYPE_VIDEO && !wg_video_format_is_rgb(format->u.video.format);
++}
++
+ static HRESULT avi_splitter_source_query_accept(struct parser_source *pin, const AM_MEDIA_TYPE *mt)
+ {
+     struct wg_format format;
+@@ -2504,6 +2513,8 @@ static HRESULT avi_splitter_source_query_accept(struct parser_source *pin, const
+     HRESULT hr;
+ 
+     wg_parser_stream_get_current_format(pin->wg_stream, &format);
++    if (avi_splitter_decoded_video(&format))
++        return decodebin_parser_source_query_accept(pin, mt);
+     if (wg_video_format_is_rgb(format.u.video.format))
+         format.u.video.height = -format.u.video.height;
+     if (!amt_from_wg_format(&pad_mt, &format, false))
+@@ -2531,10 +2542,13 @@ static HRESULT avi_splitter_source_get_media_type(struct parser_source *pin,
+ {
+     struct wg_format format;
+ 
++    wg_parser_stream_get_current_format(pin->wg_stream, &format);
++    if (avi_splitter_decoded_video(&format))
++        return decodebin_parser_source_get_media_type(pin, index, mt);
++
+     if (index > 1)
+         return VFW_S_NO_MORE_ITEMS;
+ 
+-    wg_parser_stream_get_current_format(pin->wg_stream, &format);
+     if (format.major_type == WG_MAJOR_TYPE_VIDEO
+         && format.u.video.format == WG_VIDEO_FORMAT_BGRx)
+     {
+diff --git a/dlls/winegstreamer/resampler.c b/dlls/winegstreamer/resampler.c
+index 910d109..a1ff243 100644
+--- a/dlls/winegstreamer/resampler.c
++++ b/dlls/winegstreamer/resampler.c
+@@ -364,6 +364,31 @@ static HRESULT WINAPI transform_SetInputType(IMFTransform *iface, DWORD id, IMFM
+ 
+     TRACE("iface %p, id %#lx, type %p, flags %#lx.\n", iface, id, type, flags);
+ 
++    if (!type)
++    {
++        /* Ember: NULL 은 형식 지우기(DMO 와 같다). 전에는 check_media_type 이 NULL 을 읽어 튕겼다. */
++        if (flags & MFT_SET_TYPE_TEST_ONLY)
++            return S_OK;
++        if (impl->input_type)
++        {
++            IMFMediaType_Release(impl->input_type);
++            impl->input_type = NULL;
++        }
++        if (impl->output_type)
++        {
++            IMFMediaType_Release(impl->output_type);
++            impl->output_type = NULL;
++        }
++        if (impl->wg_transform)
++        {
++            wg_transform_destroy(impl->wg_transform);
++            impl->wg_transform = 0;
++        }
++        impl->input_info.cbSize = 0;
++        impl->output_info.cbSize = 0;
++        return S_OK;
++    }
++
+     if (FAILED(hr = check_media_type(type)))
+         return hr;
+     if (FAILED(hr = IMFMediaType_GetUINT32(type, &MF_MT_AUDIO_BLOCK_ALIGNMENT, &block_alignment)))
+@@ -403,6 +428,24 @@ static HRESULT WINAPI transform_SetOutputType(IMFTransform *iface, DWORD id, IMF
+     if (!impl->input_type)
+         return MF_E_TRANSFORM_TYPE_NOT_SET;
+ 
++    if (!type)
++    {
++        if (flags & MFT_SET_TYPE_TEST_ONLY)
++            return S_OK;
++        if (impl->output_type)
++        {
++            IMFMediaType_Release(impl->output_type);
++            impl->output_type = NULL;
++        }
++        if (impl->wg_transform)
++        {
++            wg_transform_destroy(impl->wg_transform);
++            impl->wg_transform = 0;
++        }
++        impl->output_info.cbSize = 0;
++        return S_OK;
++    }
++
+     if (FAILED(hr = check_media_type(type)))
+         return hr;
+     if (FAILED(hr = IMFMediaType_GetUINT32(type, &MF_MT_AUDIO_BLOCK_ALIGNMENT, &block_alignment)))
+diff --git a/dlls/winegstreamer/unix_private.h b/dlls/winegstreamer/unix_private.h
+index 3199e36..a7e7296 100644
+--- a/dlls/winegstreamer/unix_private.h
++++ b/dlls/winegstreamer/unix_private.h
+@@ -39,6 +39,7 @@ extern GstElement *create_element(const char *name, const char *plugin_set);
+ GstElement *factory_create_element(GstElementFactory *factory);
+ extern GList *find_element_factories(GstElementFactoryListType type, GstRank min_rank,
+         GstCaps *element_sink_caps, GstCaps *element_src_caps);
++extern bool ember_skip_factory(const char *name, GstCaps *caps);
+ extern GstElement *find_element(GstElementFactoryListType type,
+         GstCaps *element_sink_caps, GstCaps *element_src_caps);
+ /*
+diff --git a/dlls/winegstreamer/unixlib.c b/dlls/winegstreamer/unixlib.c
+index 354a7ba..e54deb7 100644
+--- a/dlls/winegstreamer/unixlib.c
++++ b/dlls/winegstreamer/unixlib.c
+@@ -128,6 +128,26 @@ done:
+     return factories;
+ }
+ 
++/* Ember: 애플 하드웨어 디코더가 못 푸는 옛 형식. 건너뛰면 libav(avdec_*)가 받는다.
++ * - vtdec: AVI MJPEG(허프만 표 없는 프레임)을 -12910 으로 거부 → 파일 전체가 안 열렸다.
++ * - atdec: MPEG-1 오디오(MP2)를 몇 프레임 쥐고 내놓지 않아 DirectShow 버퍼가 바닥나 멈췄다(2026-09-26 실측). */
++bool ember_skip_factory(const char *name, GstCaps *caps)
++{
++    const GstStructure *st;
++    const char *mime;
++    gint version;
++
++    if (!name || !caps || gst_caps_is_empty(caps) || gst_caps_is_any(caps)) return false;
++    st = gst_caps_get_structure(caps, 0);
++    mime = gst_structure_get_name(st);
++    if (!strncmp(name, "vtdec", 5) && !strcmp(mime, "image/jpeg"))
++        return true;
++    if (!strcmp(name, "atdec") && !strcmp(mime, "audio/mpeg")
++            && gst_structure_get_int(st, "mpegversion", &version) && version == 1)
++        return true;
++    return false;
++}
++
+ GstElement *find_element(GstElementFactoryListType type, GstCaps *element_sink_caps, GstCaps *element_src_caps)
+ {
+     GstElement *element = NULL;
+@@ -149,6 +169,11 @@ GstElement *find_element(GstElementFactoryListType type, GstCaps *element_sink_c
+             GST_WARNING("Ignoring vaapidecodebin decoder.");
+             continue;
+         }
++        if (ember_skip_factory(name, element_sink_caps))
++        {
++            GST_WARNING("Ember: skipping %s for %" GST_PTR_FORMAT ".", name, element_sink_caps);
++            continue;
++        }
+ 
+         element = factory_create_element(GST_ELEMENT_FACTORY(tmp->data));
+     }
+diff --git a/dlls/winegstreamer/video_decoder.c b/dlls/winegstreamer/video_decoder.c
+index 0f40241..3607c9f 100644
+--- a/dlls/winegstreamer/video_decoder.c
++++ b/dlls/winegstreamer/video_decoder.c
+@@ -1768,9 +1768,30 @@ HRESULT h264_decoder_create(REFIID riid, void **out)
+ }
+ 
+ extern GUID MFVideoFormat_IV50;
++#define EMBER_FCC_GUID(a,b,c,d) {MAKEFOURCC(a,b,c,d), 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}}
++/* Ember: ir50_32 VfW 드라이버가 옛 AVI 코덱도 이 디코더로 푼다(wg_media_type.c init_caps_from_video_fourcc). */
++static const GUID ember_vfw_types[] =
++{
++    EMBER_FCC_GUID('M','J','P','G'), EMBER_FCC_GUID('A','V','R','N'), EMBER_FCC_GUID('A','V','D','J'),
++    EMBER_FCC_GUID('D','M','B','1'), EMBER_FCC_GUID('J','P','E','G'),
++    EMBER_FCC_GUID('M','P','G','4'), EMBER_FCC_GUID('M','P','4','1'), EMBER_FCC_GUID('M','P','4','2'),
++    EMBER_FCC_GUID('M','P','4','3'), EMBER_FCC_GUID('D','I','V','3'), EMBER_FCC_GUID('D','I','V','4'),
++    EMBER_FCC_GUID('M','P','G','3'),
++    EMBER_FCC_GUID('D','I','V','X'), EMBER_FCC_GUID('D','X','5','0'), EMBER_FCC_GUID('X','V','I','D'),
++    EMBER_FCC_GUID('F','M','P','4'), EMBER_FCC_GUID('M','P','4','V'), EMBER_FCC_GUID('M','4','S','2'),
++    EMBER_FCC_GUID('M','P','4','S'), EMBER_FCC_GUID('3','I','V','2'), EMBER_FCC_GUID('D','I','V','5'),
++    EMBER_FCC_GUID('I','V','3','1'), EMBER_FCC_GUID('I','V','3','2'), EMBER_FCC_GUID('I','V','4','1'),
++    EMBER_FCC_GUID('I','2','6','3'), EMBER_FCC_GUID('C','V','I','D'),
++};
+ static const GUID *const iv50_decoder_input_types[] =
+ {
+     &MFVideoFormat_IV50,
++    &ember_vfw_types[0], &ember_vfw_types[1], &ember_vfw_types[2], &ember_vfw_types[3], &ember_vfw_types[4],
++    &ember_vfw_types[5], &ember_vfw_types[6], &ember_vfw_types[7], &ember_vfw_types[8], &ember_vfw_types[9],
++    &ember_vfw_types[10], &ember_vfw_types[11], &ember_vfw_types[12], &ember_vfw_types[13], &ember_vfw_types[14],
++    &ember_vfw_types[15], &ember_vfw_types[16], &ember_vfw_types[17], &ember_vfw_types[18], &ember_vfw_types[19],
++    &ember_vfw_types[20], &ember_vfw_types[21], &ember_vfw_types[22], &ember_vfw_types[23], &ember_vfw_types[24],
++    &ember_vfw_types[25],
+ };
+ static const GUID *const iv50_decoder_output_types[] =
+ {
+diff --git a/dlls/winegstreamer/wg_format.c b/dlls/winegstreamer/wg_format.c
+index bed7ffb..8624b29 100644
+--- a/dlls/winegstreamer/wg_format.c
++++ b/dlls/winegstreamer/wg_format.c
+@@ -624,15 +624,19 @@ void wg_format_from_caps(struct wg_format *format, const GstCaps *caps)
+     {
+         GstAudioInfo info;
+ 
+-        if (gst_audio_info_from_caps(&info, caps))
++        if (gst_caps_is_fixed(caps) && gst_audio_info_from_caps(&info, caps))
+             wg_format_from_audio_info(format, &info);
++        else
++            GST_WARNING("Unable to get audio info from non-fixed or invalid caps.");
+     }
+     else if (!strcmp(name, "video/x-raw"))
+     {
+         GstVideoInfo info;
+ 
+-        if (gst_video_info_from_caps(&info, caps))
++        if (gst_caps_is_fixed(caps) && gst_video_info_from_caps(&info, caps))
+             wg_format_from_video_info(format, &info);
++        else
++            GST_WARNING("Unable to get video info from non-fixed or invalid caps.");
+     }
+     else if (!strcmp(name, "audio/mpeg") && gst_structure_get_boolean(structure, "parsed", &parsed) && parsed)
+     {
+diff --git a/dlls/winegstreamer/wg_media_type.c b/dlls/winegstreamer/wg_media_type.c
+index b5ce04e..7696413 100644
+--- a/dlls/winegstreamer/wg_media_type.c
++++ b/dlls/winegstreamer/wg_media_type.c
+@@ -336,8 +336,69 @@ static void init_caps_from_video_mpeg(GstCaps *caps, const struct mpeg_video_for
+     gst_caps_set_simple(caps, "parsed", G_TYPE_BOOLEAN, TRUE, NULL);
+ }
+ 
++/* Ember: VfW 시절 AVI 코덱(ir50_32 가 VfW 드라이버로 받는다) — MJPEG, MS MPEG-4 v1~3, MPEG-4 ASP(DivX·XviD). */
++static BOOL init_caps_from_video_fourcc(GstCaps *caps, const GUID *subtype, const MFVIDEOFORMAT *format, UINT format_size)
++{
++    GUID base = *subtype;
++    DWORD fcc;
++    base.Data1 = 0;
++    if (!IsEqualGUID(&base, &MFVideoFormat_Base)) return FALSE;
++    fcc = subtype->Data1;
++    { /* 글자만 대문자로(숫자는 그대로 — 0x20 을 지우면 '4' 가 깨진다) */
++        unsigned int i; BYTE *b = (BYTE *)&fcc;
++        for (i = 0; i < 4; i++) if (b[i] >= 'a' && b[i] <= 'z') b[i] -= 0x20;
++    }
++
++    switch (fcc)
++    {
++    case MAKEFOURCC('M','J','P','G'): case MAKEFOURCC('A','V','R','N'): case MAKEFOURCC('A','V','D','J'):
++    case MAKEFOURCC('D','M','B','1'): case MAKEFOURCC('J','P','E','G'):
++        gst_structure_remove_field(gst_caps_get_structure(caps, 0), "format");
++        gst_structure_set_name(gst_caps_get_structure(caps, 0), "image/jpeg");
++        /* AVI 청크 하나 = JPEG 한 장. avdec_mjpeg 는 parsed 만 받는다(jpegparse 는 없다). */
++        gst_caps_set_simple(caps, "parsed", G_TYPE_BOOLEAN, TRUE, NULL);
++        return TRUE;
++    case MAKEFOURCC('M','P','G','4'): case MAKEFOURCC('M','P','4','1'):
++    case MAKEFOURCC('M','P','4','2'): case MAKEFOURCC('M','P','4','3'): case MAKEFOURCC('D','I','V','3'):
++    case MAKEFOURCC('D','I','V','4'): case MAKEFOURCC('M','P','G','3'):
++        init_caps_codec_data(caps, format + 1, format_size - sizeof(*format));
++        gst_structure_remove_field(gst_caps_get_structure(caps, 0), "format");
++        gst_structure_set_name(gst_caps_get_structure(caps, 0), "video/x-msmpeg");
++        gst_caps_set_simple(caps, "msmpegversion", G_TYPE_INT,
++                fcc == MAKEFOURCC('M','P','G','4') || fcc == MAKEFOURCC('M','P','4','1') ? 41
++                : fcc == MAKEFOURCC('M','P','4','2') ? 42 : 43, NULL);
++        return TRUE;
++    case MAKEFOURCC('D','I','V','X'): case MAKEFOURCC('D','X','5','0'): case MAKEFOURCC('X','V','I','D'):
++    case MAKEFOURCC('F','M','P','4'): case MAKEFOURCC('M','P','4','V'): case MAKEFOURCC('M','4','S','2'):
++    case MAKEFOURCC('M','P','4','S'): case MAKEFOURCC('3','I','V','2'): case MAKEFOURCC('D','I','V','5'):
++        init_caps_codec_data(caps, format + 1, format_size - sizeof(*format));
++        gst_structure_remove_field(gst_caps_get_structure(caps, 0), "format");
++        gst_structure_set_name(gst_caps_get_structure(caps, 0), "video/mpeg");
++        gst_caps_set_simple(caps, "mpegversion", G_TYPE_INT, 4, "systemstream", G_TYPE_BOOLEAN, FALSE, NULL);
++        return TRUE;
++    /* Ember(parity-avi): Indeo 3·4(avdec_indeo3/4), Intel H.263(avdec_h263i) — riff-media 와 같은 caps */
++    case MAKEFOURCC('I','V','3','1'): case MAKEFOURCC('I','V','3','2'): case MAKEFOURCC('I','V','4','1'):
++        gst_structure_remove_field(gst_caps_get_structure(caps, 0), "format");
++        gst_structure_set_name(gst_caps_get_structure(caps, 0), "video/x-indeo");
++        gst_caps_set_simple(caps, "indeoversion", G_TYPE_INT, fcc == MAKEFOURCC('I','V','4','1') ? 4 : 3, NULL);
++        return TRUE;
++    case MAKEFOURCC('C','V','I','D'): /* Ember(parity-avi): VfW 경로(ir50_32)는 FourCC 를 대문자로 넘긴다 */
++        gst_structure_remove_field(gst_caps_get_structure(caps, 0), "format");
++        gst_structure_set_name(gst_caps_get_structure(caps, 0), "video/x-cinepak");
++        return TRUE;
++    case MAKEFOURCC('I','2','6','3'):
++        gst_structure_remove_field(gst_caps_get_structure(caps, 0), "format");
++        gst_structure_set_name(gst_caps_get_structure(caps, 0), "video/x-intel-h263");
++        gst_caps_set_simple(caps, "variant", G_TYPE_STRING, "intel", NULL);
++        return TRUE;
++    }
++    return FALSE;
++}
++
+ static void init_caps_from_video_subtype(GstCaps *caps, const GUID *subtype, const void *format, UINT format_size)
+ {
++    if (init_caps_from_video_fourcc(caps, subtype, format, format_size))
++        return;
+     if (IsEqualGUID(subtype, &MFVideoFormat_CVID))
+         return init_caps_from_video_cinepak(caps, format, format_size);
+     if (IsEqualGUID(subtype, &MFVideoFormat_H264))
+diff --git a/dlls/winegstreamer/wg_parser.c b/dlls/winegstreamer/wg_parser.c
+index 1a29015..1023d50 100644
+--- a/dlls/winegstreamer/wg_parser.c
++++ b/dlls/winegstreamer/wg_parser.c
+@@ -548,6 +548,11 @@ static GstAutoplugSelectResult autoplug_select_cb(GstElement *bin, GstPad *pad,
+         GST_WARNING("Disabled video acceleration since it breaks in wine.");
+         return GST_AUTOPLUG_SELECT_SKIP;
+     }
++    if (ember_skip_factory(gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(fact)), caps))
++    {
++        GST_WARNING("Ember: skipping %s.", name);
++        return GST_AUTOPLUG_SELECT_SKIP;
++    }
+ 
+     if (!parser->sink_caps && strstr(klass, GST_ELEMENT_FACTORY_KLASS_DEMUXER))
+         parser->sink_caps = g_strdup(gst_structure_get_name(gst_caps_get_structure(caps, 0)));
+@@ -825,9 +830,38 @@ static gboolean sink_query_cb(GstPad *pad, GstObject *parent, GstQuery *query)
+             }
+ 
+             gst_query_parse_accept_caps(query, &caps);
+-            wg_format_from_caps(&format, caps);
+-            wg_format_from_caps(&current_format, stream->desired_caps);
+-            ret = wg_format_compare(&format, &current_format);
++            if (!gst_caps_is_fixed(caps))
++            {
++                GstCaps *candidate_caps = gst_caps_copy(caps);
++                GstCaps *desired_caps = gst_caps_copy(stream->desired_caps);
++                gsize i;
++
++                /*
++                 * ACCEPT_CAPS queries may describe a set of formats. Converting
++                 * those caps to one wg_format both violates the GStreamer API
++                 * contract and rejects a set that contains the requested Media
++                 * Foundation output format. Compare the sets directly; the
++                 * eventual negotiated CAPS event remains fixed and is still
++                 * converted through wg_format_from_caps().
++                 */
++                for (i = 0; i < gst_caps_get_size(candidate_caps); ++i)
++                    gst_structure_remove_fields(gst_caps_get_structure(candidate_caps, i),
++                            "framerate", "pixel-aspect-ratio", NULL);
++                for (i = 0; i < gst_caps_get_size(desired_caps); ++i)
++                    gst_structure_remove_fields(gst_caps_get_structure(desired_caps, i),
++                            "framerate", "pixel-aspect-ratio", NULL);
++
++                ret = gst_caps_can_intersect(candidate_caps, desired_caps);
++                GST_LOG("Non-fixed caps intersection result: %d.", ret);
++                gst_caps_unref(desired_caps);
++                gst_caps_unref(candidate_caps);
++            }
++            else
++            {
++                wg_format_from_caps(&format, caps);
++                wg_format_from_caps(&current_format, stream->desired_caps);
++                ret = wg_format_compare(&format, &current_format);
++            }
+ 
+             pthread_mutex_unlock(&parser->mutex);
+ 
+diff --git a/dlls/winegstreamer/wma_decoder.c b/dlls/winegstreamer/wma_decoder.c
+index 76308a8..c6342be 100644
+--- a/dlls/winegstreamer/wma_decoder.c
++++ b/dlls/winegstreamer/wma_decoder.c
+@@ -353,6 +353,23 @@ static HRESULT WINAPI transform_SetInputType(IMFTransform *iface, DWORD id, IMFM
+ 
+     TRACE("iface %p, id %lu, type %p, flags %#lx.\n", iface, id, type, flags);
+ 
++    if (!type)
++    {
++        /* Ember: NULL 은 형식 지우기. 전에는 NULL 을 읽어 튕겼다. */
++        if (flags & MFT_SET_TYPE_TEST_ONLY)
++            return S_OK;
++        MoFreeMediaType(&decoder->output_type);
++        memset(&decoder->output_type, 0, sizeof(decoder->output_type));
++        MoFreeMediaType(&decoder->input_type);
++        memset(&decoder->input_type, 0, sizeof(decoder->input_type));
++        if (decoder->wg_transform)
++        {
++            wg_transform_destroy(decoder->wg_transform);
++            decoder->wg_transform = 0;
++        }
++        return S_OK;
++    }
++
+     if (FAILED(hr = IMFMediaType_GetGUID(type, &MF_MT_MAJOR_TYPE, &major)) ||
+         FAILED(hr = IMFMediaType_GetGUID(type, &MF_MT_SUBTYPE, &subtype)))
+         return hr;
+@@ -405,6 +422,20 @@ static HRESULT WINAPI transform_SetOutputType(IMFTransform *iface, DWORD id, IMF
+     if (IsEqualGUID(&decoder->input_type.majortype, &GUID_NULL))
+         return MF_E_TRANSFORM_TYPE_NOT_SET;
+ 
++    if (!type)
++    {
++        if (flags & MFT_SET_TYPE_TEST_ONLY)
++            return S_OK;
++        MoFreeMediaType(&decoder->output_type);
++        memset(&decoder->output_type, 0, sizeof(decoder->output_type));
++        if (decoder->wg_transform)
++        {
++            wg_transform_destroy(decoder->wg_transform);
++            decoder->wg_transform = 0;
++        }
++        return S_OK;
++    }
++
+     if (FAILED(hr = IMFMediaType_GetGUID(type, &MF_MT_MAJOR_TYPE, &major)) ||
+         FAILED(hr = IMFMediaType_GetGUID(type, &MF_MT_SUBTYPE, &subtype)))
+         return hr;

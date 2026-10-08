@@ -1,0 +1,106 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 30/74] dlls-iphlpapi: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/iphlpapi/iphlpapi.spec b/dlls/iphlpapi/iphlpapi.spec
+index 81aeecd..9da2a26 100644
+--- a/dlls/iphlpapi/iphlpapi.spec
++++ b/dlls/iphlpapi/iphlpapi.spec
+@@ -123,8 +123,8 @@
+ @ stdcall GetNetworkParams( ptr ptr )
+ @ stdcall GetNumberOfInterfaces( ptr )
+ #@ stub GetOwnerModuleFromPidAndInfo
+-#@ stub GetOwnerModuleFromTcp6Entry
+-#@ stub GetOwnerModuleFromTcpEntry
++@ stdcall GetOwnerModuleFromTcp6Entry( ptr long ptr ptr )
++@ stdcall GetOwnerModuleFromTcpEntry( ptr long ptr ptr )
+ #@ stub GetOwnerModuleFromUdp6Entry
+ #@ stub GetOwnerModuleFromUdpEntry
+ @ stdcall GetPerAdapterInfo( long ptr ptr )
+diff --git a/dlls/iphlpapi/iphlpapi_main.c b/dlls/iphlpapi/iphlpapi_main.c
+index 7b37c1e..ae15e20 100644
+--- a/dlls/iphlpapi/iphlpapi_main.c
++++ b/dlls/iphlpapi/iphlpapi_main.c
+@@ -5319,3 +5319,80 @@ DWORD WINAPI SetCurrentThreadCompartmentId( NET_IF_COMPARTMENT_ID id )
+     FIXME( "(%x): stub\n", id );
+     return ERROR_SUCCESS;
+ }
++
++/* Ember: Wine 11.18 에서 가져옴(전엔 미구현 함수라 부르면 튕겼다). */
++#ifndef TCPIP_OWNER_MODULE_INFO_BASIC_DEFINED
++#define TCPIP_OWNER_MODULE_INFO_BASIC_DEFINED
++typedef struct _TCPIP_OWNER_MODULE_BASIC_INFO
++{
++    WCHAR *pModuleName;
++    WCHAR *pModulePath;
++} TCPIP_OWNER_MODULE_BASIC_INFO, *PTCPIP_OWNER_MODULE_BASIC_INFO;
++
++typedef enum _TCPIP_OWNER_MODULE_INFO_CLASS
++{
++    TCPIP_OWNER_MODULE_INFO_BASIC
++} TCPIP_OWNER_MODULE_INFO_CLASS, *PTCPIP_OWNER_MODULE_INFO_CLASS;
++#endif
++DWORD WINAPI K32GetModuleFileNameExW(HANDLE, HMODULE, LPWSTR, DWORD);
++static DWORD get_owner_module_from_pid( TCPIP_OWNER_MODULE_INFO_CLASS class, void *buffer, DWORD *size, DWORD pid )
++{
++    WCHAR path[(MAX_PATH + 1) * sizeof(WCHAR)], *name;
++    TCPIP_OWNER_MODULE_BASIC_INFO *info = buffer;
++    DWORD len, ret_size;
++    HANDLE process;
++
++    if (class != TCPIP_OWNER_MODULE_INFO_BASIC)
++    {
++        FIXME( "Unsupported class %d.\n", class );
++        return ERROR_INVALID_PARAMETER;
++    }
++
++    if (!size) return ERROR_INVALID_PARAMETER;
++    if (!pid) return ERROR_NOT_FOUND;
++    if (!(process = OpenProcess( PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid ))) return GetLastError();
++    len = K32GetModuleFileNameExW( process, NULL, path, ARRAY_SIZE(path) );
++    CloseHandle( process );
++    if (!len) return ERROR_NOT_FOUND;
++    if (len == ARRAY_SIZE(path)) return ERROR_PATH_NOT_FOUND;
++    if (!(name = wcsrchr( path, '\\' ))) return ERROR_PATH_NOT_FOUND;
++    ++name;
++    len = wcslen( name ) + 1;
++    ret_size = sizeof(*info) + (len + wcslen( path ) + 1) * sizeof(WCHAR);
++    if (*size < ret_size)
++    {
++        *size = ret_size;
++        return ERROR_INSUFFICIENT_BUFFER;
++    }
++    info->pModuleName = (WCHAR *)(info + 1);
++    info->pModulePath = info->pModuleName + len;
++    memcpy( info->pModuleName, name, len * sizeof(WCHAR) );
++    wcscpy( info->pModulePath, path );
++    return ERROR_SUCCESS;
++}
++
++/******************************************************************
++ *    GetOwnerModuleFromTcpEntry (IPHLPAPI.@)
++ */
++DWORD WINAPI GetOwnerModuleFromTcpEntry( PMIB_TCPROW_OWNER_MODULE entry, TCPIP_OWNER_MODULE_INFO_CLASS class,
++                                         void *buffer, DWORD *size )
++{
++    TRACE( "entry %p, class %d, buffer %p, size %p.\n", entry, class, buffer, size );
++
++    if (!entry) return ERROR_INVALID_PARAMETER;
++
++    return get_owner_module_from_pid( class, buffer, size, entry->dwOwningPid );
++}
++
++/******************************************************************
++ *    GetOwnerModuleFromTcp6Entry (IPHLPAPI.@)
++ */
++DWORD WINAPI GetOwnerModuleFromTcp6Entry( PMIB_TCP6ROW_OWNER_MODULE entry, TCPIP_OWNER_MODULE_INFO_CLASS class,
++                                         void *buffer, DWORD *size )
++{
++    TRACE( "entry %p, class %d, buffer %p, size %p.\n", entry, class, buffer, size );
++
++    if (!entry) return ERROR_INVALID_PARAMETER;
++
++    return get_owner_module_from_pid( class, buffer, size, entry->dwOwningPid );
++}

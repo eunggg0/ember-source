@@ -1,0 +1,125 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 3/7] src-dxgi: Ember changes
+
+Base: 3Shain/dxmt 7c8dee1 (+ submodules)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/src/dxgi/dxgi.cpp b/src/dxgi/dxgi.cpp
+index e9d8100..d5185b7 100644
+--- a/src/dxgi/dxgi.cpp
++++ b/src/dxgi/dxgi.cpp
+@@ -33,9 +33,13 @@ static void InitializeVendorExtensionNV() {
+     goto cleanup;
+   }
+   if (env::getEnvVar("DXMT_ENABLE_NVEXT") != "1") {
+-    RegDeleteValueW(key1, name1);
+-    RegDeleteValueW(key2, name1);
+-    RegDeleteValueW(key3, name2);
++    // Ember: a process started later without NVEXT (launcher child, CEF helper, overlay) must not
++    // wipe the NGX core path a running DLSS game in the same prefix relies on.
++    if (env::getEnvVar("DXMT_NVEXT_KEEP_REGISTRY") != "1") {
++      RegDeleteValueW(key1, name1);
++      RegDeleteValueW(key2, name1);
++      RegDeleteValueW(key3, name2);
++    }
+   } else {
+     DWORD _1 = 1;
+     RegSetValueExW(key1, name1, 0, REG_DWORD, (const BYTE *)&_1, sizeof(_1));
+diff --git a/src/dxgi/dxgi_resource.hpp b/src/dxgi/dxgi_resource.hpp
+index 79fbcf0..8c2605e 100644
+--- a/src/dxgi/dxgi_resource.hpp
++++ b/src/dxgi/dxgi_resource.hpp
+@@ -5,6 +5,8 @@
+ #include "dxgi1_2.h"
+ #include "log/log.hpp"
+ 
++#include "d3d11_1.h"
++
+ namespace dxmt {
+ 
+ /* designed to be used as an aggregated object*/
+@@ -96,6 +98,84 @@ private:
+   IResource *resource_; // since it's aggregated, no extra reference is needed
+ };
+ 
++/* Ember: 2D 텍스처의 IDXGISurface(1/2). 없어서 Direct2D(CreateDxgiSurfaceRenderTarget)가 NULL 표면으로 죽었다.
++ * 집합(aggregated) 객체라 참조·QI 는 리소스에 맡긴다. Map·GetDC 는 아직 없음(실패를 돌려준다, 죽지 않는다). */
++template <typename IResource> class MTLDXGISurface : public IDXGISurface2 {
++public:
++  MTLDXGISurface(IResource *pResource) : resource_(pResource) {}
++  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) final { return resource_->QueryInterface(riid, ppvObject); }
++  ULONG STDMETHODCALLTYPE AddRef() final { return resource_->AddRef(); }
++  ULONG STDMETHODCALLTYPE Release() final { return resource_->Release(); }
++  HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID guid, UINT size, const void *data) final { return resource_->SetPrivateData(guid, size, data); }
++  HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID guid, const IUnknown *object) final { return resource_->SetPrivateDataInterface(guid, object); }
++  HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID guid, UINT *size, void *data) final { return resource_->GetPrivateData(guid, size, data); }
++  HRESULT STDMETHODCALLTYPE GetParent(REFIID riid, void **parent) final { return GetDevice(riid, parent); }
++  HRESULT STDMETHODCALLTYPE GetDevice(REFIID riid, void **ppDevice) final { return resource_->GetDeviceInterface(riid, ppDevice); }
++  HRESULT STDMETHODCALLTYPE GetDesc(DXGI_SURFACE_DESC *desc) final { return resource_->GetSurfaceDesc(desc); }
++  HRESULT STDMETHODCALLTYPE Map(DXGI_MAPPED_RECT *rect, UINT flags) final {
++    ERR_ONCE("DXGISurface::Map: not supported");
++    return DXGI_ERROR_INVALID_CALL;
++  }
++  HRESULT STDMETHODCALLTYPE Unmap() final { return DXGI_ERROR_INVALID_CALL; }
++  /* GDI 호환(D3D11_RESOURCE_MISC_GDI_COMPATIBLE, BGRA8) 텍스처를 DIB 로 빌려준다. Wine d2d1 의 DC 렌더 타깃(ID2D1DCRenderTarget)이
++   * 이것으로 GDI DC 에 옮긴다. discard 가 아니면 텍스처 내용을 읽어 채우고, ReleaseDC 에서 다시 올린다. */
++  HRESULT STDMETHODCALLTYPE GetDC(BOOL discard, HDC *out) final {
++    if (!out) return E_INVALIDARG;
++    *out = nullptr;
++    if (dc_) return DXGI_ERROR_INVALID_CALL;
++    ID3D11Texture2D *tex = nullptr;
++    if (FAILED(resource_->QueryInterface(__uuidof(ID3D11Texture2D), (void **)&tex))) return DXGI_ERROR_INVALID_CALL;
++    D3D11_TEXTURE2D_DESC d; tex->GetDesc(&d);
++    if (!(d.MiscFlags & D3D11_RESOURCE_MISC_GDI_COMPATIBLE)) { tex->Release(); return DXGI_ERROR_INVALID_CALL; }
++    BITMAPINFO bi = {};
++    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER); bi.bmiHeader.biWidth = (LONG)d.Width; bi.bmiHeader.biHeight = -(LONG)d.Height;
++    bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
++    dib_ = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits_, nullptr, 0);
++    if (!dib_) { tex->Release(); return E_OUTOFMEMORY; }
++    dc_ = CreateCompatibleDC(nullptr); old_ = SelectObject(dc_, dib_); w_ = d.Width; h_ = d.Height;
++    if (!discard) {
++      ID3D11Device *dev = nullptr; ID3D11DeviceContext *ctx = nullptr; ID3D11Texture2D *stg = nullptr;
++      tex->GetDevice(&dev); dev->GetImmediateContext(&ctx);
++      D3D11_TEXTURE2D_DESC sd = d; sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ; sd.MiscFlags = 0;
++      sd.MipLevels = 1; sd.ArraySize = 1;
++      if (SUCCEEDED(dev->CreateTexture2D(&sd, nullptr, &stg))) {
++        ctx->CopySubresourceRegion(stg, 0, 0, 0, 0, tex, 0, nullptr);
++        D3D11_MAPPED_SUBRESOURCE m;
++        if (SUCCEEDED(ctx->Map(stg, 0, D3D11_MAP_READ, 0, &m))) {
++          for (UINT y = 0; y < h_; y++) memcpy((char *)bits_ + y * w_ * 4, (char *)m.pData + y * m.RowPitch, w_ * 4);
++          ctx->Unmap(stg, 0);
++        }
++        stg->Release();
++      }
++      ctx->Release(); dev->Release();
++    }
++    tex->Release();
++    *out = dc_;
++    return S_OK;
++  }
++  HRESULT STDMETHODCALLTYPE ReleaseDC(RECT *dirty) final {
++    if (!dc_) return DXGI_ERROR_INVALID_CALL;
++    ID3D11Texture2D *tex = nullptr;
++    if (SUCCEEDED(resource_->QueryInterface(__uuidof(ID3D11Texture2D), (void **)&tex))) {
++      ID3D11Device *dev = nullptr; ID3D11DeviceContext *ctx = nullptr;
++      tex->GetDevice(&dev); dev->GetImmediateContext(&ctx);
++      GdiFlush();
++      ctx->UpdateSubresource(tex, 0, nullptr, bits_, w_ * 4, 0);
++      ctx->Release(); dev->Release(); tex->Release();
++    }
++    SelectObject(dc_, old_); DeleteDC(dc_); DeleteObject(dib_);
++    dc_ = nullptr; dib_ = nullptr; bits_ = nullptr;
++    return S_OK;
++  }
++  HRESULT STDMETHODCALLTYPE GetResource(REFIID riid, void **parent, UINT *subresource) final {
++    if (subresource) *subresource = 0;
++    return resource_->QueryInterface(riid, parent);
++  }
++private:
++  IResource *resource_;
++  HDC dc_ = nullptr; HBITMAP dib_ = nullptr; HGDIOBJ old_ = nullptr; void *bits_ = nullptr; UINT w_ = 0, h_ = 0;
++};
++
+ template <typename IResource, typename IDeviceContext>
+ class MTLDXGIKeyedMutex : public IDXGIKeyedMutex {
+ public:

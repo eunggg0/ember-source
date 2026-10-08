@@ -1,0 +1,278 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 42/74] dlls-msvcrt: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/msvcrt/heap.c b/dlls/msvcrt/heap.c
+index 70e4ecb..63c5a7c 100644
+--- a/dlls/msvcrt/heap.c
++++ b/dlls/msvcrt/heap.c
+@@ -33,7 +33,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(msvcrt);
+ #define UNLOCK_HEAP _unlock( _HEAP_LOCK )
+ 
+ /* _aligned */
+-#define SAVED_PTR(x) ((void *)((DWORD_PTR)((char *)x - sizeof(void *)) & \
++#define SAVED_PTR(x) ((void **)((DWORD_PTR)((char *)x - sizeof(void *)) & \
+                                ~(sizeof(void *) - 1)))
+ #define ALIGN_PTR(ptr, alignment, offset) ((void *) \
+     ((((DWORD_PTR)((char *)ptr + alignment + sizeof(void *) + offset)) & \
+@@ -612,8 +612,9 @@ void * CDECL _aligned_malloc(size_t size, size_t alignment)
+ void * CDECL _aligned_offset_realloc(void *memblock, size_t size,
+                                      size_t alignment, size_t offset)
+ {
+-    void * temp, **saved;
++    void *temp, *alloc_ptr;
+     size_t old_padding, new_padding, old_size;
++
+     TRACE("(%p, %Iu, %Iu, %Iu)\n", memblock, size, alignment, offset);
+ 
+     if (!memblock)
+@@ -643,18 +644,11 @@ void * CDECL _aligned_offset_realloc(void *memblock, size_t size,
+     if (alignment < sizeof(void *))
+         alignment = sizeof(void *);
+ 
+-    /* make sure alignment and offset didn't change */
+-    saved = SAVED_PTR(memblock);
+-    if (memblock != ALIGN_PTR(*saved, alignment, offset))
+-    {
+-        *_errno() = EINVAL;
+-        return NULL;
+-    }
+-
+-    old_padding = (char *)memblock - (char *)*saved;
++    alloc_ptr = *SAVED_PTR(memblock);
++    old_padding = (char *)memblock - (char *)alloc_ptr;
+ 
+     /* Get previous size of block */
+-    old_size = _msize(*saved);
++    old_size = _msize(alloc_ptr);
+     if (old_size == -1)
+     {
+         /* It seems this function was called with an invalid pointer. Bail out. */
+@@ -669,55 +663,34 @@ void * CDECL _aligned_offset_realloc(void *memblock, size_t size,
+     }
+     old_size -= old_padding;
+ 
+-    temp = realloc(*saved, size + alignment + sizeof(void *));
++    /* Ensure data is preserved if padding block is shrinked */
++    if (alignment + sizeof(void *) < old_padding)
++    {
++        memmove(alloc_ptr, memblock, old_size);
++        old_padding = 0;
++    }
+ 
++    temp = realloc(alloc_ptr, size + alignment + sizeof(void *));
+     if (!temp)
++    {
++        if (!old_padding)
++        {
++            memmove(memblock, alloc_ptr, old_size);
++            *SAVED_PTR(memblock) = alloc_ptr;
++        }
+         return NULL;
++    }
+ 
+     /* adjust pointer for proper alignment and offset */
+     memblock = ALIGN_PTR(temp, alignment, offset);
+-
+-    /* Save the real allocation address below returned address */
+-    /* so it can be found later to free. */
+-    saved = SAVED_PTR(memblock);
+-
+     new_padding = (char *)memblock - (char *)temp;
+-
+-/*
+-   Memory layout of old block is as follows:
+-   +-------+---------------------+-+--------------------------+-----------+
+-   |  ...  | "old_padding" bytes | | ... "old_size" bytes ... |    ...    |
+-   +-------+---------------------+-+--------------------------+-----------+
+-           ^                     ^ ^
+-           |                     | |
+-        *saved               saved memblock
+-
+-   Memory layout of new block is as follows:
+-   +-------+-----------------------------+-+----------------------+-------+
+-   |  ...  |    "new_padding" bytes      | | ... "size" bytes ... |  ...  |
+-   +-------+-----------------------------+-+----------------------+-------+
+-           ^                             ^ ^
+-           |                             | |
+-          temp                       saved memblock
+-
+-   However, in the new block, actual data is still written as follows
+-   (because it was copied by realloc):
+-   +-------+---------------------+--------------------------------+-------+
+-   |  ...  | "old_padding" bytes |   ... "old_size" bytes ...     |  ...  |
+-   +-------+---------------------+--------------------------------+-------+
+-           ^                             ^ ^
+-           |                             | |
+-          temp                       saved memblock
+-
+-   Therefore, min(old_size,size) bytes of actual data have to be moved
+-   from the offset they were at in the old block (temp + old_padding),
+-   to the offset they have to be in the new block (temp + new_padding == memblock).
+-*/
++    /* copy data to new location */
+     if (new_padding != old_padding)
+         memmove((char *)memblock, (char *)temp + old_padding, (old_size < size) ? old_size : size);
+ 
+-    *saved = temp;
+-
++    /* Save the real allocation address below returned address */
++    /* so it can be found later to free. */
++    *SAVED_PTR(memblock) = temp;
+     return memblock;
+ }
+ 
+diff --git a/dlls/msvcrt/printf.h b/dlls/msvcrt/printf.h
+index be30d6a..9244596 100644
+--- a/dlls/msvcrt/printf.h
++++ b/dlls/msvcrt/printf.h
+@@ -255,13 +255,28 @@ static inline int FUNC_NAME(pf_output_format_str)(FUNC_NAME(puts_clbk) pf_puts,
+     return r>=0 ? ret : r;
+ }
+ 
++static inline BOOL FUNC_NAME(pf_is_str_wide)(pf_flags *flags, BOOL legacy_wide)
++{
++    BOOL api_is_wide = sizeof(APICHAR) == sizeof(wchar_t);
++    BOOL complement_is_narrow = legacy_wide && api_is_wide;
++
++    if((flags->NaturalString && api_is_wide) || flags->WideString || flags->IntegerLength == LEN_LONG)
++        return TRUE;
++    if((flags->NaturalString && !api_is_wide) || flags->IntegerLength == LEN_SHORT)
++        return FALSE;
++
++#if _MSVCR_VER < 140
++    if (flags->Format == 'Z')
++        return FALSE;
++#endif
++
++    return (flags->Format=='s' || flags->Format=='c') == complement_is_narrow;
++}
++
+ static inline int FUNC_NAME(pf_handle_string)(FUNC_NAME(puts_clbk) pf_puts, void *puts_ctx,
+         const void *str, int len, pf_flags *flags, _locale_t locale, BOOL legacy_wide)
+ {
+-    BOOL api_is_wide = sizeof(APICHAR) == sizeof(wchar_t);
+-    BOOL complement_is_narrow = legacy_wide ? api_is_wide : FALSE;
+ #ifdef PRINTF_WIDE
+-
+     if(!str)
+         return FUNC_NAME(pf_output_format_wstr)(pf_puts, puts_ctx, L"(null)", 6, flags, locale);
+ #else
+@@ -269,15 +284,10 @@ static inline int FUNC_NAME(pf_handle_string)(FUNC_NAME(puts_clbk) pf_puts, void
+         return FUNC_NAME(pf_output_format_str)(pf_puts, puts_ctx, "(null)", 6, flags, locale);
+ #endif
+ 
+-    if((flags->NaturalString && api_is_wide) || flags->WideString || flags->IntegerLength == LEN_LONG)
++    if(FUNC_NAME(pf_is_str_wide)(flags, legacy_wide))
+         return FUNC_NAME(pf_output_format_wstr)(pf_puts, puts_ctx, str, len, flags, locale);
+-    if((flags->NaturalString && !api_is_wide) || flags->IntegerLength == LEN_SHORT)
+-        return FUNC_NAME(pf_output_format_str)(pf_puts, puts_ctx, str, len, flags, locale);
+-
+-    if((flags->Format=='S' || flags->Format=='C') == complement_is_narrow)
+-        return FUNC_NAME(pf_output_format_str)(pf_puts, puts_ctx, str, len, flags, locale);
+     else
+-        return FUNC_NAME(pf_output_format_wstr)(pf_puts, puts_ctx, str, len, flags, locale);
++        return FUNC_NAME(pf_output_format_str)(pf_puts, puts_ctx, str, len, flags, locale);
+ }
+ 
+ static inline int FUNC_NAME(pf_output_special_fp)(FUNC_NAME(puts_clbk) pf_puts, void *puts_ctx,
+@@ -375,7 +385,7 @@ static inline int FUNC_NAME(pf_output_special_fp)(FUNC_NAME(puts_clbk) pf_puts,
+     if(!flags->Alternate && (flags->Format == 'g' || flags->Format == 'G')) sfx_len = frac_len;
+     else sfx_len = flags->Precision;
+ 
+-    if(sfx_len == -1) {
++    if(sfx_len < 0) {
+         if(strchr("fFeE", flags->Format)) sfx_len = 6;
+         else if(flags->Format == 'a' || flags->Format == 'A') sfx_len = 13;
+     }
+@@ -614,7 +624,7 @@ static inline int FUNC_NAME(pf_output_fp)(FUNC_NAME(puts_clbk) pf_puts, void *pu
+     ULONGLONG m;
+     DWORD l;
+ 
+-    if(flags->Precision == -1)
++    if(flags->Precision < 0)
+         flags->Precision = 6;
+ 
+     v = frexp(v, &e2);
+@@ -1142,6 +1152,21 @@ int FUNC_NAME(pf_printf)(FUNC_NAME(puts_clbk) pf_puts, void *puts_ctx, const API
+ 
+             i = FUNC_NAME(pf_handle_string)(pf_puts, puts_ctx, &ch, 1, &flags, locale, legacy_wide);
+             if(i < 0) i = 0; /* ignore conversion error */
++        } else if(flags.Format == 'Z') {
++            /* UNICODE_STRING and ANSI_STRING have the same layout. */
++            UNICODE_STRING *ustr = pf_args(args_ctx, pos, VT_PTR, valist).get_ptr;
++            void *str = ustr ? ustr->Buffer : NULL;
++            int len = ustr ? ustr->Length : 0;
++
++            if(FUNC_NAME(pf_is_str_wide)(&flags, legacy_wide)) {
++                if(len % sizeof(wchar_t)) {
++                    *_errno() = EINVAL;
++                    return -1;
++                }
++                len /= sizeof(wchar_t);
++            }
++            i = FUNC_NAME(pf_handle_string)(pf_puts, puts_ctx, str, len,
++                    &flags, locale, legacy_wide);
+         } else if(flags.Format == 'p') {
+             flags.Format = 'X';
+             flags.PadZero = TRUE;
+diff --git a/dlls/msvcrt/scanf.h b/dlls/msvcrt/scanf.h
+index 079414e..50a7d81 100644
+--- a/dlls/msvcrt/scanf.h
++++ b/dlls/msvcrt/scanf.h
+@@ -25,6 +25,7 @@
+ 
+ #ifdef WIDE_SCANF
+ #define _CHAR_ wchar_t
++#define _UCHAR_ wchar_t
+ #define _EOF_ WEOF
+ #define _EOF_RET (short)WEOF
+ #define _ISSPACE_(c) iswspace(c)
+@@ -34,6 +35,7 @@
+ #define _BITMAPSIZE_ 256*256
+ #else /* WIDE_SCANF */
+ #define _CHAR_ char
++#define _UCHAR_ unsigned char
+ #define _EOF_ EOF
+ #define _EOF_RET EOF
+ #define _ISSPACE_(c) isspace(c)
+@@ -652,13 +654,13 @@ _FUNCTION_ {
+ 			/* According to msdn:
+ 			 * "Note that %[a-z] and %[z-a] are interpreted as equivalent to %[abcde...z]." */
+                         if(format[1] == '-' && format[2] && format[2] != ']') {
+-                            if (format[0] < format[2])
+-                                RtlSetBits(&bitMask, format[0], format[2] - format[0] + 1);
++                            if ((_UCHAR_)format[0] < (_UCHAR_)format[2])
++                                RtlSetBits(&bitMask, (_UCHAR_)format[0], (_UCHAR_)format[2] - (_UCHAR_)format[0] + 1);
+                             else
+-                                RtlSetBits(&bitMask, format[2], format[0] - format[2] + 1);
++                                RtlSetBits(&bitMask, (_UCHAR_)format[2], (_UCHAR_)format[0] - (_UCHAR_)format[2] + 1);
+ 			    format += 2;
+ 			} else
+-			    RtlSetBits(&bitMask, *format, 1);
++			    RtlSetBits(&bitMask, (_UCHAR_)*format, 1);
+ 			format++;
+ 		    }
+                     /* read until char is not suitable */
+@@ -730,6 +732,7 @@ _FUNCTION_ {
+ }
+ 
+ #undef _CHAR_
++#undef _UCHAR_
+ #undef _EOF_
+ #undef _EOF_RET
+ #undef _ISSPACE_
+diff --git a/dlls/msvcrt/wcs.c b/dlls/msvcrt/wcs.c
+index 1b7bc3e..9ad7181 100644
+--- a/dlls/msvcrt/wcs.c
++++ b/dlls/msvcrt/wcs.c
+@@ -28,6 +28,7 @@
+ #include <wctype.h>
+ #include "msvcrt.h"
+ #include "winnls.h"
++#include "winternl.h"
+ #include "wtypes.h"
+ #include "wine/debug.h"
+ 

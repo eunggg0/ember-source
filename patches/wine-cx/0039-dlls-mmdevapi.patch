@@ -1,0 +1,31 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 39/74] dlls-mmdevapi: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/mmdevapi/session.c b/dlls/mmdevapi/session.c
+index 8e63825..0e2d966 100644
+--- a/dlls/mmdevapi/session.c
++++ b/dlls/mmdevapi/session.c
+@@ -67,6 +67,8 @@ static inline struct audio_session_wrapper *impl_from_ISimpleAudioVolume(ISimple
+ 
+ static HRESULT WINAPI control_QueryInterface(IAudioSessionControl2 *iface, REFIID riid, void **ppv)
+ {
++    struct audio_session_wrapper *session = impl_from_IAudioSessionControl2(iface);
++
+     TRACE("(%p)->(%s, %p)\n", iface, debugstr_guid(riid), ppv);
+ 
+     if (!ppv)
+@@ -76,6 +78,11 @@ static HRESULT WINAPI control_QueryInterface(IAudioSessionControl2 *iface, REFII
+         IsEqualIID(riid, &IID_IAudioSessionControl) ||
+         IsEqualIID(riid, &IID_IAudioSessionControl2))
+         *ppv = iface;
++    /* Ember: 11.18 에서. 세션 컨트롤에서 볼륨 인터페이스를 QI 하는 게임이 NULL 을 받아 튕겼다. */
++    else if (IsEqualIID(riid, &IID_ISimpleAudioVolume))
++        *ppv = &session->ISimpleAudioVolume_iface;
++    else if (IsEqualIID(riid, &IID_IChannelAudioVolume))
++        *ppv = &session->IChannelAudioVolume_iface;
+     else {
+         *ppv = NULL;
+         return E_NOINTERFACE;

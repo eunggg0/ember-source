@@ -1,0 +1,29 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 66/74] dlls-winmm: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/winmm/waveform.c b/dlls/winmm/waveform.c
+index fa1c446..f670236 100644
+--- a/dlls/winmm/waveform.c
++++ b/dlls/winmm/waveform.c
+@@ -2746,9 +2746,17 @@ MMRESULT WINAPI waveOutOpen(LPHWAVEOUT lphWaveOut, UINT uDeviceID,
+ 
+     res = SendMessageW(g_devices_hwnd, WODM_OPEN, (DWORD_PTR)&info, 0);
+     InterlockedDecrement(&g_devthread_token);
+-    if(res != MMSYSERR_NOERROR || (dwFlags & WAVE_FORMAT_QUERY))
++    if (dwFlags & WAVE_FORMAT_QUERY)
+         return res;
+ 
++    /* Ember: 11.18 처럼 실패하면 핸들을 0 으로(윈도우 동작). 전에는 호출자 값이 그대로 남았다. */
++    if (res != MMSYSERR_NOERROR)
++    {
++        if (lphWaveOut)
++            *lphWaveOut = 0;
++        return res;
++    }
++
+     if(lphWaveOut)
+         *lphWaveOut = (HWAVEOUT)info.handle;
+ 

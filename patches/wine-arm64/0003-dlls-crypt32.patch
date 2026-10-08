@@ -1,0 +1,61 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 3/34] dlls-crypt32: Ember changes
+
+Base: wine-11.18.tar.xz
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/crypt32/unixlib.c b/dlls/crypt32/unixlib.c
+index 4b9f0da..4edd3e5 100644
+--- a/dlls/crypt32/unixlib.c
++++ b/dlls/crypt32/unixlib.c
+@@ -45,6 +45,36 @@
+ #include "crypt32_private.h"
+ #include "wine/debug.h"
+ 
++#ifdef __APPLE__
++#include <dlfcn.h>
++/* macOS 의 dlopen 은 맨 이름만 주면 DYLD_FALLBACK_LIBRARY_PATH 만 본다.
++ * 그 환경변수는 실행하는 쪽이 빠뜨리기 쉽다. 우리 .so 위치를 기준으로
++ * 절대 경로를 만들어 한 번 더 시도한다.
++ *   <root>/lib/wine/<arch>-unix/*.so  →  <root>/lib/<soname> */
++static void *dlopen_beside_wine( const char *soname )
++{
++    Dl_info info;
++    char path[1024];
++    size_t len;
++    char *p;
++    int i;
++
++    if (!dladdr( (void *)dlopen_beside_wine, &info ) || !info.dli_fname) return NULL;
++    len = strlen( info.dli_fname );
++    if (len >= sizeof(path)) return NULL;
++    memcpy( path, info.dli_fname, len + 1 );
++    for (i = 0; i < 3; i++)   /* 파일명, <arch>-unix, wine 을 차례로 벗긴다 */
++    {
++        if (!(p = strrchr( path, '/' ))) return NULL;
++        *p = 0;
++    }
++    if (strlen( path ) + strlen( soname ) + 2 >= sizeof(path)) return NULL;
++    strcat( path, "/" );
++    strcat( path, soname );
++    return dlopen( path, RTLD_NOW );
++}
++#endif
++
+ WINE_DEFAULT_DEBUG_CHANNEL(crypt);
+ 
+ #ifdef SONAME_LIBGNUTLS
+@@ -108,7 +138,13 @@ static NTSTATUS process_attach( void *args )
+         setenv("GNUTLS_SYSTEM_PRIORITY_FILE", "/dev/null", 0);
+     }
+ 
++#ifdef __APPLE__
+     if (!(libgnutls_handle = dlopen( SONAME_LIBGNUTLS, RTLD_NOW )))
++        libgnutls_handle = dlopen_beside_wine( SONAME_LIBGNUTLS );
++    if (!libgnutls_handle)
++#else
++    if (!(libgnutls_handle = dlopen( SONAME_LIBGNUTLS, RTLD_NOW )))
++#endif
+     {
+         ERR_(winediag)( "failed to load libgnutls, no support for pfx import/export\n" );
+         return STATUS_DLL_NOT_FOUND;

@@ -1,0 +1,126 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 5/34] dlls-ir50_32: Ember changes
+
+Base: wine-11.18.tar.xz
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/ir50_32/ir50.c b/dlls/ir50_32/ir50.c
+index 4959fd6..a98ad4d 100644
+--- a/dlls/ir50_32/ir50.c
++++ b/dlls/ir50_32/ir50.c
+@@ -38,6 +38,33 @@ static HINSTANCE IR50_32_hModule;
+ #define IV50_MAGIC mmioFOURCC('I','V','5','0')
+ #define compare_fourcc(fcc1, fcc2) (((fcc1)^(fcc2))&~0x20202020)
+ 
++/* Ember: 같은 GStreamer 디코더(winegstreamer_create_video_decoder)로 옛 게임 AVI 코덱도 푼다.
++ * 윈도우에서는 코덱 팩(ffdshow·DivX)이나 기본 MJPEG/MPEG-4 디코더가 하던 일. wine.inf 가 vidc.XXXX 로 등록한다. */
++static const DWORD ember_fourccs[] =
++{
++    mmioFOURCC('I','V','5','0'),
++    mmioFOURCC('M','J','P','G'), mmioFOURCC('A','V','R','N'), mmioFOURCC('A','V','D','J'), mmioFOURCC('D','M','B','1'),
++    mmioFOURCC('J','P','E','G'),
++    mmioFOURCC('M','P','G','4'), mmioFOURCC('M','P','4','1'), mmioFOURCC('M','P','4','2'), mmioFOURCC('M','P','4','3'),
++    mmioFOURCC('D','I','V','3'), mmioFOURCC('D','I','V','4'), mmioFOURCC('M','P','G','3'),
++    mmioFOURCC('D','I','V','X'), mmioFOURCC('D','X','5','0'), mmioFOURCC('X','V','I','D'), mmioFOURCC('F','M','P','4'),
++    mmioFOURCC('M','P','4','V'), mmioFOURCC('M','4','S','2'), mmioFOURCC('M','P','4','S'), mmioFOURCC('3','I','V','2'),
++    mmioFOURCC('D','I','V','5'),
++    /* Ember(parity-avi): Indeo 3·4, Intel H.263 — 90년대 게임 AVI(윈도우 XP 의 ir32_32·ir41_32 가 하던 일) */
++    mmioFOURCC('I','V','3','1'), mmioFOURCC('I','V','3','2'), mmioFOURCC('I','V','4','1'), mmioFOURCC('I','2','6','3'),
++    /* Ember(parity-avi): Cinepak — 업스트림 Wine 은 iccvid 를 i386 에만 빌드해 ARM64(FEX) 64비트 게임엔 풀 드라이버가 없다.
++     * vidc.cvid(iccvid)가 있으면 ICLocate 가 그쪽을 먼저 쓰고, 없을 때만 여기(avdec_cinepak)로 온다. */
++    mmioFOURCC('c','v','i','d'),
++};
++
++static BOOL supported_fourcc( DWORD fcc )
++{
++    unsigned int i;
++    for (i = 0; i < ARRAY_SIZE(ember_fourccs); i++)
++        if (!compare_fourcc( fcc, ember_fourccs[i] )) return TRUE;
++    return FALSE;
++}
++
+ DEFINE_MEDIATYPE_GUID(MFVideoFormat_IV50, MAKEFOURCC('I','V','5','0'));
+ 
+ static inline UINT64
+@@ -60,6 +87,17 @@ IV50_Open( const ICINFO *icinfo )
+     if ( FAILED(winegstreamer_create_video_decoder( &decoder )) )
+         return 0;
+ 
++    /* Ember(parity-avi): VfW 는 프레임 하나 넣으면 하나 나와야 한다(ICDecompress 동기). 낮은 지연을 켜면
++     * gst-libav 가 프레임 스레딩을 끄고(슬라이스만) 지연 없이 내보낸다 — 없으면 MPEG-4(XVID/DIVX)가 첫 15프레임을 검게 냈다. */
++    {
++        IMFAttributes *attrs;
++        if ( SUCCEEDED(IMFTransform_GetAttributes( decoder, &attrs )) )
++        {
++            IMFAttributes_SetUINT32( attrs, &MF_LOW_LATENCY, TRUE );
++            IMFAttributes_Release( attrs );
++        }
++    }
++
+     return (LRESULT)decoder;
+ }
+ 
+@@ -74,7 +112,7 @@ static LRESULT decompress_query( ICDECOMPRESSEX *params )
+     TRACE("in->compr   = %#lx\n", in->bmiHeader.biCompression);
+     TRACE("in offset (%d,%d), size %dx%d\n", params->xSrc, params->ySrc, params->dxSrc, params->dySrc);
+ 
+-    if (compare_fourcc(in->bmiHeader.biCompression, IV50_MAGIC))
++    if (!supported_fourcc(in->bmiHeader.biCompression))
+     {
+         TRACE("can't do %#lx compression\n", in->bmiHeader.biCompression);
+         return ICERR_BADFORMAT;
+@@ -130,7 +168,7 @@ IV50_DecompressGetFormat( LPBITMAPINFO in, LPBITMAPINFO out )
+ {
+     TRACE("ICM_DECOMPRESS_GETFORMAT %p %p\n", in, out);
+ 
+-    if (compare_fourcc(in->bmiHeader.biCompression, IV50_MAGIC))
++    if (!supported_fourcc(in->bmiHeader.biCompression))
+         return ICERR_BADFORMAT;
+ 
+     if ( out )
+@@ -155,7 +193,8 @@ static LRESULT decompress_begin( IMFTransform *decoder, ICDECOMPRESSEX *params )
+     IMFMediaType *input_type, *output_type;
+     const GUID *output_subtype;
+     LRESULT r = ICERR_INTERNAL;
+-    unsigned int stride;
++    int stride;
++    GUID input_subtype = MFVideoFormat_IV50;
+ 
+     TRACE( "decoder %p, in %p, out %p.\n", decoder, in, out );
+ 
+@@ -173,9 +212,15 @@ static LRESULT decompress_begin( IMFTransform *decoder, ICDECOMPRESSEX *params )
+     else
+         return ICERR_BADFORMAT;
+ 
+-    stride = (out->bmiHeader.biWidth + 3) & ~3;
++    /* 한 줄의 바이트 수(DIB 는 4바이트 정렬). 아래에서 위로 쌓인 DIB 면 음수. */
++    stride = (out->bmiHeader.biWidth * out->bmiHeader.biBitCount / 8 + 3) & ~3;
+     if (out->bmiHeader.biHeight >= 0)
+         stride = -stride;
++    input_subtype.Data1 = in->bmiHeader.biCompression;
++    { /* 글자만 대문자로(숫자는 그대로) — 디코더 입력 형식 목록은 대문자 FourCC */
++        unsigned int i; BYTE *b = (BYTE *)&input_subtype.Data1;
++        for (i = 0; i < 4; i++) if (b[i] >= 'a' && b[i] <= 'z') b[i] -= 0x20;
++    }
+ 
+     if ( FAILED(MFCreateMediaType( &input_type )) )
+         return ICERR_INTERNAL;
+@@ -187,11 +232,16 @@ static LRESULT decompress_begin( IMFTransform *decoder, ICDECOMPRESSEX *params )
+     }
+ 
+     if ( FAILED(IMFMediaType_SetGUID( input_type, &MF_MT_MAJOR_TYPE, &MFMediaType_Video )) ||
+-         FAILED(IMFMediaType_SetGUID( input_type, &MF_MT_SUBTYPE, &MFVideoFormat_IV50 )) )
++         FAILED(IMFMediaType_SetGUID( input_type, &MF_MT_SUBTYPE, &input_subtype )) )
++        goto done;
++    /* BITMAPINFOHEADER 뒤의 코덱 설정(MPEG-4 VOL 헤더 등) */
++    if (in->bmiHeader.biSize > sizeof(BITMAPINFOHEADER) &&
++            FAILED(IMFMediaType_SetBlob( input_type, &MF_MT_USER_DATA, (const UINT8 *)in + sizeof(BITMAPINFOHEADER),
++                    in->bmiHeader.biSize - sizeof(BITMAPINFOHEADER) )))
+         goto done;
+     if ( FAILED(IMFMediaType_SetUINT64(
+                     input_type, &MF_MT_FRAME_SIZE,
+-                    make_uint64( in->bmiHeader.biWidth, in->bmiHeader.biHeight ) )) )
++                    make_uint64( in->bmiHeader.biWidth, abs(in->bmiHeader.biHeight) ) )) )
+         goto done;
+ 
+     if ( FAILED(IMFMediaType_SetGUID( output_type, &MF_MT_MAJOR_TYPE, &MFMediaType_Video )) ||

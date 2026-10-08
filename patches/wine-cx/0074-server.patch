@@ -1,0 +1,224 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 74/74] server: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/server/main.c b/server/main.c
+index 19127ce..565ae6f 100644
+--- a/server/main.c
++++ b/server/main.c
+@@ -26,6 +26,7 @@
+ #include <signal.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
+ #include <sys/time.h>
+ #include <unistd.h>
+ #ifdef HAVE_SYS_RESOURCE_H
+@@ -35,6 +36,16 @@
+ # include <sys/sysctl.h>
+ #endif
+ 
++#ifdef __APPLE__
++#include <errno.h>
++#include <mach/mach_init.h>
++#include <mach/thread_act.h>
++#include <mach/mach_port.h>
++#include <mach/thread_policy.h>
++#include <mach/thread_info.h>
++#include <mach/policy.h>
++#endif
++
+ #include "object.h"
+ #include "file.h"
+ #include "thread.h"
+@@ -214,6 +225,62 @@ error:
+     exit(1);
+ }
+ 
++#ifdef __APPLE__
++/* Ember (gmserver): raise the server thread's scheduling priority on macOS.
++ *
++ * Every game thread blocks on server round-trips, so the server is on the critical path of each frame.
++ * On macOS it ended up behind the game:
++ *  - open_master_socket() daemonizes with fork(). The child's main thread loses its QoS class, falls back
++ *    to the legacy band (31 - nice) and pthread_set_qos_class_self_np() is refused afterwards (EPERM).
++ *    A launcher started from a niced shell left the server at priority 26 while game threads ran at 31-47.
++ *  - macOS Game Mode favours the game's coalition; the server lives in the launcher's coalition.
++ * The legacy precedence policy needs no privileges and ignores nice, so put the thread at a fixed
++ * (non-timeshare) priority in the foreground UI band, like CrossOver's msync message thread.
++ *   EMBER_SERVER_PRIO=0      leave the thread alone
++ *   EMBER_SERVER_PRIO=<n>    target base priority (default 47, max 63)
++ *   EMBER_SERVER_TIMESHARE=1 keep timeshare decay
++ *   EMBER_SERVER_ROLE=<n>    also set PRIO_DARWIN_ROLE on the process (1 = UI focal) */
++static void ember_raise_server_priority(void)
++{
++    const char *env = getenv( "EMBER_SERVER_PRIO" );
++    int target = env && *env ? atoi( env ) : 47;
++    thread_act_t self = mach_thread_self();
++    struct thread_precedence_policy precedence;
++    struct thread_extended_policy extended;
++    struct policy_timeshare_info info;
++    mach_msg_type_number_t count = POLICY_TIMESHARE_INFO_COUNT;
++    integer_t latency = LATENCY_QOS_TIER_0, throughput = THROUGHPUT_QOS_TIER_0;
++    int base = 31;
++
++    if ((env = getenv( "EMBER_SERVER_ROLE" )) && *env)
++    {
++        int role = atoi( env );
++        if (setpriority( 6 /* PRIO_DARWIN_ROLE */, 0, role ) && debug_level)
++            fprintf( stderr, "wineserver: PRIO_DARWIN_ROLE %d: %s\n", role, strerror( errno ));
++    }
++    if (target <= 0) goto done;
++    if (target > 63) target = 63;
++
++    /* importance 0 puts the thread on the legacy path; its base priority is then the task's (31 - nice) */
++    precedence.importance = 0;
++    thread_policy_set( self, THREAD_PRECEDENCE_POLICY, (thread_policy_t)&precedence, THREAD_PRECEDENCE_POLICY_COUNT );
++    if (thread_info( self, THREAD_SCHED_TIMESHARE_INFO, (thread_info_t)&info, &count ) == KERN_SUCCESS)
++        base = info.base_priority;
++
++    thread_policy_set( self, THREAD_LATENCY_QOS_POLICY, (thread_policy_t)&latency, THREAD_LATENCY_QOS_POLICY_COUNT );
++    thread_policy_set( self, THREAD_THROUGHPUT_QOS_POLICY, (thread_policy_t)&throughput, THREAD_THROUGHPUT_QOS_POLICY_COUNT );
++    env = getenv( "EMBER_SERVER_TIMESHARE" );
++    extended.timeshare = (env && atoi( env )) ? 1 : 0;
++    thread_policy_set( self, THREAD_EXTENDED_POLICY, (thread_policy_t)&extended, THREAD_EXTENDED_POLICY_COUNT );
++    precedence.importance = target - base;
++    thread_policy_set( self, THREAD_PRECEDENCE_POLICY, (thread_policy_t)&precedence, THREAD_PRECEDENCE_POLICY_COUNT );
++    if (debug_level)
++        fprintf( stderr, "wineserver: priority base %d -> %d (timeshare %d)\n", base, target, extended.timeshare );
++done:
++    mach_port_deallocate( mach_task_self(), self );
++}
++#endif
++
+ static void sigterm_handler( int signum )
+ {
+     exit(1);  /* make sure atexit functions get called */
+@@ -262,6 +329,9 @@ int main( int argc, char *argv[] )
+     open_master_socket();
+     msync_init();
+ 
++#ifdef __APPLE__
++    ember_raise_server_priority();
++#endif
+     if (debug_level) fprintf( stderr, "wineserver: starting (pid=%ld)\n", (long) getpid() );
+     set_current_time();
+     init_signals();
+diff --git a/server/msync.c b/server/msync.c
+index eecf9b3..1fae3b1 100644
+--- a/server/msync.c
++++ b/server/msync.c
+@@ -651,17 +651,51 @@ void msync_init(void)
+ }
+ 
+ static struct list mutex_list = LIST_INIT(mutex_list);
++static unsigned int zombie_count;   /* Ember perf2: 좀비가 없으면 destroy 마다 뮤텍스 목록을 훑지 않는다 */
++
++/* Ember: 마지막 핸들이 닫혀도 누가 쥐고 있는 뮤텍스는 바로 없애지 않는다.
++ * 윈도우에서는 기다리는 스레드가 객체를 붙잡고 있어서, 쥔 스레드가 죽으면 기다리던 쪽이 WAIT_ABANDONED 로 깬다.
++ * msync 는 기다림이 클라이언트 쪽이라 서버 참조가 없고, 여기서 바로 없애면 목록에서 빠져 버려
++ * msync_abandon_mutexes 가 못 찾는다 → 기다리던 스레드가 영영 멈췄다(kernel32 sync 테스트 488/492, 실측 2026-09-25).
++ * 공유 메모리 칸도 다른 객체에 다시 쓰일 수 있었다. 주인이 놓거나 죽을 때까지 "좀비"로 남겨 둔다. */
++static void msync_sweep_zombies(void)
++{
++    struct msync *msync, *next;
++
++    LIST_FOR_EACH_ENTRY_SAFE( msync, next, &mutex_list, struct msync, mutex_entry )
++    {
++        int tid;
++        if (!msync->zombie) continue;
++        tid = __atomic_load_n( (int *)get_shm( msync->shm_idx ), __ATOMIC_SEQ_CST );  /* struct mutex 의 첫 칸 = tid */
++        /* 쥔 스레드가 있거나(>0) 버려진 채 대기자가 가져가길 기다리는(~0) 것은 둔다. 버려진 채 아무도 안 가져가면
++         * 16바이트 칸 하나가 남는다 — 깨어난 대기자가 읽기 전에 칸을 없애는 것보다 낫다. */
++        if (tid) continue;
++        list_remove( &msync->mutex_entry );
++        destroy_all( msync->shm_idx );
++        free( msync );
++        zombie_count--;
++    }
++}
+ 
+ void msync_destroy( struct msync *msync )
+ {
+     struct msync_shm *shm = get_shm( msync->shm_idx );
+ 
+     if (shm->msync_type == MSYNC_MUTEX)
++    {
++        int tid = __atomic_load_n( (int *)shm, __ATOMIC_SEQ_CST );  /* struct mutex 의 첫 칸 = tid */
++        if (msync->shm_idx && tid && tid != ~0)
++        {
++            if (!msync->zombie) { msync->zombie = 1; zombie_count++; }
++            return;
++        }
+         list_remove( &msync->mutex_entry );
++    }
+     if (!msync->shm_idx) return;
+ 
+     destroy_all( msync->shm_idx );
+     free( msync );
++    if (zombie_count) msync_sweep_zombies();   /* Ember perf2: 좀비 있을 때만(전에는 모든 객체 파괴마다 목록 전체 순회) */
+ }
+ 
+ static void *get_shm( unsigned int idx )
+@@ -736,6 +770,7 @@ struct msync *create_msync( int low, int high, enum msync_type type )
+     if (msync)
+     {
+         msync->shm_idx = msync_alloc_shm( low, high, type );
++        msync->zombie = 0;
+         if (type == MSYNC_MUTEX)
+             list_add_tail( &mutex_list, &msync->mutex_entry );
+     }
+@@ -794,6 +829,8 @@ void msync_abandon_mutexes( thread_id_t tid )
+             signal_all ( msync->shm_idx, (int *)mutex );
+         }
+     }
++    /* 좀비는 버려진 채로 둔다: 깨어난 대기자가 ~0 을 보고 WAIT_ABANDONED 로 가져간다.
++     * 가져간 뒤 놓으면 다음 정리 때 없어진다. 대기자가 없으면 ~0 인 채로 다음 정리에서 없어진다. */
+ }
+ 
+ void msync_grab_object( struct msync *msync )
+diff --git a/server/msync.h b/server/msync.h
+index 4d834c4..c2b701f 100644
+--- a/server/msync.h
++++ b/server/msync.h
+@@ -39,6 +39,7 @@ struct msync
+ {
+     unsigned int    shm_idx;
+     struct list     mutex_entry;
++    int             zombie;   /* Ember: 핸들은 다 닫혔지만 아직 누가 쥔 뮤텍스 */
+ };
+ 
+ extern struct msync *create_msync( int low, int high, enum msync_type type );
+diff --git a/server/process.c b/server/process.c
+index edc57b1..658f0ce 100644
+--- a/server/process.c
++++ b/server/process.c
+@@ -663,7 +663,17 @@ unsigned int alloc_ptid( void *ptr )
+     }
+     else  /* need to grow the array */
+     {
+-        unsigned int count = alloc_ptid_entries + (alloc_ptid_entries / 2);
++        unsigned int count = alloc_ptid_entries + (alloc_ptid_entries / 2), skip = 0;
++        /* Ember: 세션마다 첫 ID 를 무작위로 민다(0~2047칸). Wine 은 매번 같은 작은 PID(0x24…)를 같은 순서로 줘서,
++         * 강제 종료로 남은 PID 잠금 파일(Qt QLockFile 등)을 새 프로세스가 "아직 살아 있는 자기 자신"으로 보고
++         * "이미 실행 중"이라며 끝났다(GOG 갤럭시: 한 번씩 번갈아 안 뜸, 2026-09-26). 윈도우처럼 예측 못 하게. */
++        if (!alloc_ptid_entries)
++        {
++            struct timeval tv;
++            gettimeofday( &tv, NULL );
++            skip = (unsigned int)(tv.tv_usec ^ (tv.tv_sec * 2654435761u) ^ getpid()) % 2048;
++            count = 512 + skip;
++        }
+         if (!count) count = 512;
+         if (!(entry = realloc( ptid_entries, count * sizeof(*entry) )))
+         {
+@@ -672,6 +682,7 @@ unsigned int alloc_ptid( void *ptr )
+         }
+         ptid_entries = entry;
+         alloc_ptid_entries = count;
++        for (; skip; skip--) { ptid_entries[used_ptid_entries].ptr = NULL; ptid_entries[used_ptid_entries++].next = 0; }
+         index = used_ptid_entries + PTID_OFFSET;
+         entry = &ptid_entries[used_ptid_entries++];
+     }

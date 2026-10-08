@@ -1,0 +1,1065 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 58/74] dlls-windowscodecs: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/windowscodecs/converter.c b/dlls/windowscodecs/converter.c
+index d6be592..356c80a 100644
+--- a/dlls/windowscodecs/converter.c
++++ b/dlls/windowscodecs/converter.c
+@@ -840,9 +840,9 @@ static HRESULT copypixels_to_32bppBGRA(struct FormatConverter *This, const WICRe
+             BYTE *srcdata;
+             UINT srcstride, srcdatasize;
+             const BYTE *srcrow;
+-            const BYTE *srcpixel;
++            const WORD *srcpixel;
+             BYTE *dstrow;
+-            DWORD *dstpixel;
++            BYTE *dstpixel;
+ 
+             srcstride = 8 * prc->Width;
+             srcdatasize = srcstride * prc->Height;
+@@ -857,15 +857,15 @@ static HRESULT copypixels_to_32bppBGRA(struct FormatConverter *This, const WICRe
+                 srcrow = srcdata;
+                 dstrow = pbBuffer;
+                 for (y=0; y<prc->Height; y++) {
+-                    srcpixel=srcrow;
+-                    dstpixel=(DWORD*)dstrow;
++                    srcpixel=(const WORD *)srcrow;
++                    dstpixel=dstrow;
+                     for (x=0; x<prc->Width; x++) {
+-                        BYTE red, green, blue, alpha;
+-                        srcpixel++; red = *srcpixel++;
+-                        srcpixel++; green = *srcpixel++;
+-                        srcpixel++; blue = *srcpixel++;
+-                        srcpixel++; alpha = *srcpixel++;
+-                        *dstpixel++=alpha<<24|red<<16|green<<8|blue;
++                        dstpixel[2] = (srcpixel[0] + 127) / 257;
++                        dstpixel[1] = (srcpixel[1] + 127) / 257;
++                        dstpixel[0] = (srcpixel[2] + 127) / 257;
++                        dstpixel[3] = (srcpixel[3] + 127) / 257;
++                        srcpixel += 4;
++                        dstpixel += 4;
+                     }
+                     srcrow += srcstride;
+                     dstrow += cbStride;
+@@ -1314,6 +1314,64 @@ static HRESULT copypixels_to_24bppBGR(struct FormatConverter *This, const WICRec
+             return res;
+         }
+         return S_OK;
++
++    case format_8bppIndexed:
++        if (prc)
++        {
++            HRESULT res;
++            INT x, y;
++            BYTE *srcdata;
++            UINT srcstride, srcdatasize;
++            const BYTE *srcrow;
++            const BYTE *srcbyte;
++            BYTE *dstrow;
++            BYTE *dstpixel;
++            WICColor colors[256];
++            IWICPalette *palette;
++            UINT actualcolors;
++
++            res = PaletteImpl_Create(&palette);
++            if (FAILED(res)) return res;
++
++            res = IWICBitmapSource_CopyPalette(This->source, palette);
++            if (SUCCEEDED(res))
++                res = IWICPalette_GetColors(palette, 256, colors, &actualcolors);
++
++            IWICPalette_Release(palette);
++
++            if (FAILED(res)) return res;
++
++            srcstride = prc->Width;
++            srcdatasize = srcstride * prc->Height;
++
++            srcdata = malloc(srcdatasize);
++            if (!srcdata) return E_OUTOFMEMORY;
++
++            res = IWICBitmapSource_CopyPixels(This->source, prc, srcstride, srcdatasize, srcdata);
++            if (SUCCEEDED(res))
++            {
++                srcrow = srcdata;
++                dstrow = pbBuffer;
++                for (y=0; y<prc->Height; y++) {
++                    srcbyte = srcrow;
++                    dstpixel = dstrow;
++                    for (x=0; x<prc->Width; x++)
++                    {
++                        DWORD argb = colors[*srcbyte++];
++                        *dstpixel++ = argb & 0xff;
++                        *dstpixel++ = (argb >> 8) & 0xff;
++                        *dstpixel++ = (argb >> 16) & 0xff;
++                    }
++                    srcrow += srcstride;
++                    dstrow += cbStride;
++                }
++            }
++
++            free(srcdata);
++            return res;
++        }
++        return S_OK;
++
+     case format_24bppBGR:
+     case format_24bppRGB:
+         if (prc)
+@@ -1477,8 +1535,44 @@ static HRESULT copypixels_to_24bppBGR(struct FormatConverter *This, const WICRec
+         return S_OK;
+ 
+     default:
+-        FIXME("Unimplemented conversion path!\n");
+-        return WINCODEC_ERR_UNSUPPORTEDOPERATION;
++    {
++        UINT srcstride, srcdatasize;
++        const BYTE *srcpixel, *srcrow;
++        BYTE *dstpixel, *srcdata, *dstrow;
++        INT x, y;
++
++        if (!prc)
++            return copypixels_to_32bppBGRA(This, NULL, 0, 0, NULL, source_format);
++
++        srcstride = 4 * prc->Width;
++        srcdatasize = srcstride * prc->Height;
++
++        srcdata = malloc(srcdatasize);
++        if (!srcdata) return E_OUTOFMEMORY;
++
++        hr = copypixels_to_32bppBGRA(This, prc, srcstride, srcdatasize, srcdata, source_format);
++        if (SUCCEEDED(hr))
++        {
++            srcrow = srcdata;
++            dstrow = pbBuffer;
++            for (y = 0; y < prc->Height; y++)
++            {
++                srcpixel = srcrow;
++                dstpixel = dstrow;
++                for (x = 0; x < prc->Width; x++)
++                {
++                    *dstpixel++ = *srcpixel++;
++                    *dstpixel++ = *srcpixel++;
++                    *dstpixel++ = *srcpixel++;
++                    srcpixel++;
++                }
++                srcrow += srcstride;
++                dstrow += cbStride;
++            }
++        }
++        free(srcdata);
++        return hr;
++    }
+     }
+ }
+ 
+@@ -1489,6 +1583,63 @@ static HRESULT copypixels_to_24bppRGB(struct FormatConverter *This, const WICRec
+ 
+     switch (source_format)
+     {
++    case format_8bppIndexed:
++        if (prc)
++        {
++            HRESULT res;
++            INT x, y;
++            BYTE *srcdata;
++            UINT srcstride, srcdatasize;
++            const BYTE *srcrow;
++            const BYTE *srcbyte;
++            BYTE *dstrow;
++            BYTE *dstpixel;
++            WICColor colors[256];
++            IWICPalette *palette;
++            UINT actualcolors;
++
++            res = PaletteImpl_Create(&palette);
++            if (FAILED(res)) return res;
++
++            res = IWICBitmapSource_CopyPalette(This->source, palette);
++            if (SUCCEEDED(res))
++                res = IWICPalette_GetColors(palette, 256, colors, &actualcolors);
++
++            IWICPalette_Release(palette);
++
++            if (FAILED(res)) return res;
++
++            srcstride = prc->Width;
++            srcdatasize = srcstride * prc->Height;
++
++            srcdata = malloc(srcdatasize);
++            if (!srcdata) return E_OUTOFMEMORY;
++
++            res = IWICBitmapSource_CopyPixels(This->source, prc, srcstride, srcdatasize, srcdata);
++            if (SUCCEEDED(res))
++            {
++                srcrow = srcdata;
++                dstrow = pbBuffer;
++                for (y=0; y<prc->Height; y++) {
++                    srcbyte = srcrow;
++                    dstpixel = dstrow;
++                    for (x=0; x<prc->Width; x++)
++                    {
++                        DWORD argb = colors[*srcbyte++];
++                        *dstpixel++ = (argb >> 16) & 0xff;
++                        *dstpixel++ = (argb >> 8) & 0xff;
++                        *dstpixel++ =  argb & 0xff;
++                    }
++                    srcrow += srcstride;
++                    dstrow += cbStride;
++                }
++            }
++
++            free(srcdata);
++            return res;
++        }
++        return S_OK;
++
+     case format_24bppBGR:
+     case format_24bppRGB:
+         if (prc)
+@@ -1550,7 +1701,7 @@ static HRESULT copypixels_to_24bppRGB(struct FormatConverter *This, const WICRec
+         }
+         return S_OK;
+     default:
+-        FIXME("Unimplemented conversion path!\n");
++        FIXME("Unimplemented conversion path! (%d)\n", source_format);
+         return WINCODEC_ERR_UNSUPPORTEDOPERATION;
+     }
+ }
+@@ -1773,6 +1924,122 @@ static HRESULT copypixels_to_8bppIndexed(struct FormatConverter *This, const WIC
+     return hr;
+ }
+ 
++static HRESULT copypixels_to_1bppIndexed(struct FormatConverter *This, const WICRect *prc,
++    UINT cbStride, UINT cbBufferSize, BYTE *pbBuffer, enum pixelformat source_format)
++{
++    switch (source_format)
++    {
++    case format_1bppIndexed:
++    case format_BlackWhite:
++        if (prc)
++            return IWICBitmapSource_CopyPixels(This->source, prc, cbStride, cbBufferSize, pbBuffer);
++        return S_OK;
++    default:
++        FIXME("Unimplemented conversion path! %d\n", source_format);
++        return WINCODEC_ERR_UNSUPPORTEDOPERATION;
++    }
++}
++
++static HRESULT copypixels_to_BlackWhite(struct FormatConverter *This, const WICRect *prc,
++    UINT cbStride, UINT cbBufferSize, BYTE *pbBuffer, enum pixelformat source_format)
++{
++    switch (source_format)
++    {
++    case format_BlackWhite:
++        if (prc)
++            return IWICBitmapSource_CopyPixels(This->source, prc, cbStride, cbBufferSize, pbBuffer);
++        return S_OK;
++
++    case format_1bppIndexed:
++        if (prc)
++        {
++            HRESULT res;
++            IWICPalette *palette;
++            WICColor colors[2];
++            UINT actualcolors;
++            BOOL invert = FALSE;
++
++            res = PaletteImpl_Create(&palette);
++            if (FAILED(res)) return res;
++
++            res = IWICBitmapSource_CopyPalette(This->source, palette);
++            if (SUCCEEDED(res))
++                res = IWICPalette_GetColors(palette, 2, colors, &actualcolors);
++
++            IWICPalette_Release(palette);
++            if (FAILED(res)) return res;
++
++            /* BlackWhite: bit 1 = white (0xFFFFFFFF), bit 0 = black (0xFF000000).
++             * If the indexed palette has white first, we need to invert. */
++            if (actualcolors >= 2 && (colors[0] & 0xFFFFFF) > (colors[1] & 0xFFFFFF))
++                invert = TRUE;
++
++            res = IWICBitmapSource_CopyPixels(This->source, prc, cbStride, cbBufferSize, pbBuffer);
++
++            if (SUCCEEDED(res) && invert)
++            {
++                UINT srcstride = (prc->Width + 7) / 8;
++                INT y;
++                BYTE *row = pbBuffer;
++                for (y = 0; y < prc->Height; y++)
++                {
++                    UINT i;
++                    for (i = 0; i < srcstride; i++)
++                        row[i] = ~row[i];
++                    row += cbStride;
++                }
++            }
++
++            return res;
++        }
++        return S_OK;
++
++    default:
++        /* For all other formats, convert via 32bppBGRA and threshold. */
++        if (prc)
++        {
++            HRESULT res;
++            INT x, y;
++            UINT bgra_stride, bgra_size;
++            BYTE *bgra_data, *bgra_row, *dst_row;
++
++            bgra_stride = prc->Width * 4;
++            bgra_size = bgra_stride * prc->Height;
++
++            bgra_data = malloc(bgra_size);
++            if (!bgra_data) return E_OUTOFMEMORY;
++
++            res = copypixels_to_32bppBGRA(This, prc, bgra_stride, bgra_size, bgra_data, source_format);
++
++            if (SUCCEEDED(res))
++            {
++                bgra_row = bgra_data;
++                dst_row = pbBuffer;
++                for (y = 0; y < prc->Height; y++)
++                {
++                    for (x = 0; x < prc->Width; x++)
++                    {
++                        BYTE b = bgra_row[x * 4];
++                        BYTE g = bgra_row[x * 4 + 1];
++                        BYTE r = bgra_row[x * 4 + 2];
++                        /* Luminance threshold: >= 128 -> white (bit=1), < 128 -> black (bit=0) */
++                        if ((r * 77 + g * 150 + b * 29) >= 128 * 256)
++                            dst_row[x >> 3] |= 0x80 >> (x & 7);
++                        else
++                            dst_row[x >> 3] &= ~(0x80 >> (x & 7));
++                    }
++                    bgra_row += bgra_stride;
++                    dst_row += cbStride;
++                }
++            }
++
++            free(bgra_data);
++            return res;
++        }
++        return S_OK;
++    }
++}
++
+ static HRESULT copypixels_to_16bppBGRA5551(struct FormatConverter *This, const WICRect *prc,
+     UINT cbStride, UINT cbBufferSize, BYTE *pbBuffer, enum pixelformat source_format)
+ {
+@@ -1891,9 +2158,144 @@ static HRESULT copypixels_to_64bppRGBA(struct FormatConverter *This, const WICRe
+         free(srcdata);
+         return hr;
+     }
++
++    case format_32bppRGBA:
++    {
++        UINT srcstride, srcdatasize;
++        const BYTE *srcpixel;
++        const BYTE *srcrow;
++        WORD *dstpixel;
++        BYTE *srcdata;
++        BYTE *dstrow;
++        INT x, y;
++
++        if (!prc)
++            return S_OK;
++
++        srcstride = 4 * prc->Width;
++        srcdatasize = srcstride * prc->Height;
++
++        srcdata = malloc(srcdatasize);
++        if (!srcdata) return E_OUTOFMEMORY;
++
++        hr = IWICBitmapSource_CopyPixels(This->source, prc, srcstride, srcdatasize, srcdata);
++        if (SUCCEEDED(hr))
++        {
++            srcrow = srcdata;
++            dstrow = pbBuffer;
++            for (y = 0; y < prc->Height; y++)
++            {
++                srcpixel = srcrow;
++                dstpixel = (WORD *)dstrow;
++                for (x = 0; x < prc->Width; x++)
++                {
++                    *dstpixel++ = srcpixel[0] * 257;
++                    *dstpixel++ = srcpixel[1] * 257;
++                    *dstpixel++ = srcpixel[2] * 257;
++                    *dstpixel++ = srcpixel[3] * 257;
++                    srcpixel += 4;
++                }
++                srcrow += srcstride;
++                dstrow += cbStride;
++            }
++        }
++        free(srcdata);
++        return hr;
++    }
++
+     default:
+-        FIXME("Unimplemented conversion path %d.\n", source_format);
+-        return WINCODEC_ERR_UNSUPPORTEDOPERATION;
++    case format_32bppBGRA:
++    {
++        UINT srcstride, srcdatasize;
++        const BYTE *srcpixel;
++        const BYTE *srcrow;
++        WORD *dstpixel;
++        BYTE *srcdata;
++        BYTE *dstrow;
++        INT x, y;
++
++        if (!prc)
++            return S_OK;
++
++        srcstride = 4 * prc->Width;
++        srcdatasize = srcstride * prc->Height;
++
++        srcdata = malloc(srcdatasize);
++        if (!srcdata) return E_OUTOFMEMORY;
++
++        if (source_format == format_32bppBGRA)
++            hr = IWICBitmapSource_CopyPixels(This->source, prc, srcstride, srcdatasize, srcdata);
++        else
++            hr = copypixels_to_32bppBGRA(This, prc, srcstride, srcdatasize, srcdata, source_format);
++        if (SUCCEEDED(hr))
++        {
++            srcrow = srcdata;
++            dstrow = pbBuffer;
++            for (y = 0; y < prc->Height; y++)
++            {
++                srcpixel = srcrow;
++                dstpixel = (WORD *)dstrow;
++                for (x = 0; x < prc->Width; x++)
++                {
++                    *dstpixel++ = srcpixel[2] * 257;
++                    *dstpixel++ = srcpixel[1] * 257;
++                    *dstpixel++ = srcpixel[0] * 257;
++                    *dstpixel++ = srcpixel[3] * 257;
++                    srcpixel += 4;
++                }
++                srcrow += srcstride;
++                dstrow += cbStride;
++            }
++        }
++        free(srcdata);
++        return hr;
++    }
++    }
++}
++
++static HRESULT copypixels_to_64bppPRGBA(struct FormatConverter *This, const WICRect *prc,
++    UINT cbStride, UINT cbBufferSize, BYTE *pbBuffer, enum pixelformat source_format)
++{
++    HRESULT hr;
++
++    switch (source_format)
++    {
++        case format_64bppPRGBA:
++            if (prc)
++                return IWICBitmapSource_CopyPixels(This->source, prc, cbStride, cbBufferSize, pbBuffer);
++            return S_OK;
++        case format_32bppPBGRA:
++        case format_32bppBGRA:
++        {
++            hr = copypixels_to_64bppRGBA(This, prc, cbStride, cbBufferSize, pbBuffer, source_format);
++            if (SUCCEEDED(hr) && prc)
++            {
++                WORD *dstrow;
++                INT x, y;
++
++                for (y=0; y<prc->Height; y++)
++                {
++                    dstrow = (WORD *)&pbBuffer[cbStride*y];
++                    for (x=0; x<prc->Width; x++)
++                    {
++                        WORD alpha = dstrow[4*x+3];
++
++                        if (alpha != 65535)
++                        {
++                            dstrow[4*x] = (dstrow[4*x] * alpha) / 65536;
++                            dstrow[4*x+1] = (dstrow[4*x+1] * alpha) / 65536;
++                            dstrow[4*x+2] = (dstrow[4*x+2] * alpha) / 65536;
++                        }
++                    }
++                }
++            }
++            return hr;
++        }
++        default:
++        {
++            FIXME("Unimplemented conversion path %d.\n", source_format);
++            return WINCODEC_ERR_UNSUPPORTEDOPERATION;
++        }
+     }
+ }
+ 
+@@ -1994,6 +2396,104 @@ static HRESULT copypixels_to_128bppRGBAFloat(struct FormatConverter *This, const
+         free(srcdata);
+         return hr;
+     }
++    case format_64bppPRGBA:
++    {
++        UINT srcstride, srcdatasize;
++        const WORD *srcpixel;
++        const BYTE *srcrow;
++        float *dstpixel;
++        BYTE *srcdata;
++        BYTE *dstrow;
++        INT x, y;
++
++        if (!prc)
++            return S_OK;
++
++        srcstride = 8 * prc->Width;
++        srcdatasize = srcstride * prc->Height;
++
++        srcdata = malloc(srcdatasize);
++        if (!srcdata) return E_OUTOFMEMORY;
++
++        hr = IWICBitmapSource_CopyPixels(This->source, prc, srcstride, srcdatasize, srcdata);
++        if (SUCCEEDED(hr))
++        {
++            srcrow = srcdata;
++            dstrow = pbBuffer;
++            for (y = 0; y < prc->Height; y++)
++            {
++                srcpixel = (WORD *)srcrow;
++                dstpixel= (float *)dstrow;
++                for (x = 0; x < prc->Width; x++)
++                {
++                    float alpha = srcpixel[3];
++                    if (alpha != 0)
++                    {
++                        *dstpixel++ = from_sRGB_component(srcpixel[0] / alpha);
++                        *dstpixel++ = from_sRGB_component(srcpixel[1] / alpha);
++                        *dstpixel++ = from_sRGB_component(srcpixel[2] / alpha);
++                    }
++                    else
++                    {
++                        *dstpixel++ = from_sRGB_component(srcpixel[0] / 65535.0f);
++                        *dstpixel++ = from_sRGB_component(srcpixel[1] / 65535.0f);
++                        *dstpixel++ = from_sRGB_component(srcpixel[2] / 65535.0f);
++                    }
++                    *dstpixel++ = alpha / 65535.0f;
++
++                    srcpixel += 4;
++                }
++                srcrow += srcstride;
++                dstrow += cbStride;
++            }
++        }
++
++        free(srcdata);
++        return hr;
++    }
++    default:
++        FIXME("Unimplemented conversion path %d.\n", source_format);
++        return WINCODEC_ERR_UNSUPPORTEDOPERATION;
++    }
++}
++
++static HRESULT copypixels_to_128bppPRGBAFloat(struct FormatConverter *This, const WICRect *prc,
++    UINT cbStride, UINT cbBufferSize, BYTE *pbBuffer, enum pixelformat source_format)
++{
++    HRESULT hr;
++
++    switch (source_format)
++    {
++    case format_128bppPRGBAFloat:
++        if (prc)
++            return IWICBitmapSource_CopyPixels(This->source, prc, cbStride, cbBufferSize, pbBuffer);
++        return S_OK;
++    case format_64bppPRGBA:
++        {
++            hr = copypixels_to_128bppRGBAFloat(This, prc, cbStride, cbBufferSize, pbBuffer, source_format);
++            if (SUCCEEDED(hr) && prc)
++            {
++                float *dstrow;
++                INT x, y;
++
++                for (y=0; y<prc->Height; y++)
++                {
++                    dstrow = (float *)&pbBuffer[cbStride*y];
++                    for (x=0; x<prc->Width; x++)
++                    {
++                        float alpha = dstrow[4*x+3];
++
++                        if (alpha != 65535)
++                        {
++                            dstrow[4*x] = dstrow[4*x] * alpha;
++                            dstrow[4*x+1] = dstrow[4*x+1] * alpha;
++                            dstrow[4*x+2] = dstrow[4*x+2] * alpha;
++                        }
++                    }
++                }
++            }
++            return hr;
++        }
+     default:
+         FIXME("Unimplemented conversion path %d.\n", source_format);
+         return WINCODEC_ERR_UNSUPPORTEDOPERATION;
+@@ -2189,11 +2689,11 @@ static HRESULT copypixels_to_128bppRGBFloat(struct FormatConverter *This, const
+ }
+ 
+ static const struct pixelformatinfo supported_formats[] = {
+-    {format_1bppIndexed, &GUID_WICPixelFormat1bppIndexed, NULL, TRUE},
++    {format_1bppIndexed, &GUID_WICPixelFormat1bppIndexed, copypixels_to_1bppIndexed, TRUE},
+     {format_2bppIndexed, &GUID_WICPixelFormat2bppIndexed, NULL, TRUE},
+     {format_4bppIndexed, &GUID_WICPixelFormat4bppIndexed, NULL, TRUE},
+     {format_8bppIndexed, &GUID_WICPixelFormat8bppIndexed, copypixels_to_8bppIndexed, TRUE},
+-    {format_BlackWhite, &GUID_WICPixelFormatBlackWhite, NULL},
++    {format_BlackWhite, &GUID_WICPixelFormatBlackWhite, copypixels_to_BlackWhite},
+     {format_2bppGray, &GUID_WICPixelFormat2bppGray, NULL},
+     {format_4bppGray, &GUID_WICPixelFormat4bppGray, NULL},
+     {format_8bppGray, &GUID_WICPixelFormat8bppGray, copypixels_to_8bppGray},
+@@ -2218,12 +2718,12 @@ static const struct pixelformatinfo supported_formats[] = {
+     {format_48bppBGR, &GUID_WICPixelFormat48bppBGR, NULL},
+     {format_64bppRGB, &GUID_WICPixelFormat64bppRGB, NULL},
+     {format_64bppBGRA, &GUID_WICPixelFormat64bppBGRA, NULL},
+-    {format_64bppPRGBA, &GUID_WICPixelFormat64bppPRGBA, NULL},
++    {format_64bppPRGBA, &GUID_WICPixelFormat64bppPRGBA, copypixels_to_64bppPRGBA},
+     {format_64bppPBGRA, &GUID_WICPixelFormat64bppPBGRA, NULL},
+     {format_32bppBGR101010, &GUID_WICPixelFormat32bppBGR101010, NULL},
+     {format_96bppRGBFloat, &GUID_WICPixelFormat96bppRGBFloat, NULL},
+     {format_128bppRGBAFloat, &GUID_WICPixelFormat128bppRGBAFloat, copypixels_to_128bppRGBAFloat },
+-    {format_128bppPRGBAFloat, &GUID_WICPixelFormat128bppPRGBAFloat, NULL},
++    {format_128bppPRGBAFloat, &GUID_WICPixelFormat128bppPRGBAFloat, copypixels_to_128bppPRGBAFloat},
+     {format_128bppRGBFloat, &GUID_WICPixelFormat128bppRGBFloat, copypixels_to_128bppRGBFloat },
+     {format_32bppR10G10B10A2, &GUID_WICPixelFormat32bppR10G10B10A2, NULL},
+     {format_48bppRGBHalf, &GUID_WICPixelFormat48bppRGBHalf},
+diff --git a/dlls/windowscodecs/gifformat.c b/dlls/windowscodecs/gifformat.c
+index 4fde4f8..7672b9c 100644
+--- a/dlls/windowscodecs/gifformat.c
++++ b/dlls/windowscodecs/gifformat.c
+@@ -37,6 +37,7 @@ struct gif_decoder
+ {
+     struct decoder decoder;
+     GifFileType *gif;
++    IStream *stream;  /* kept to allow on-demand frame decoding */
+ };
+ 
+ static inline struct gif_decoder *impl_from_decoder(struct decoder *iface)
+@@ -607,7 +608,7 @@ static HRESULT copy_interlaced_pixels(const BYTE *srcbuffer,
+     if (dststride < rc->Width)
+         return E_INVALIDARG;
+ 
+-    if ((dststride * rc->Height) > dstbuffersize)
++    if ((dststride * (rc->Height - 1)) + rc->Width > dstbuffersize)
+         return E_INVALIDARG;
+ 
+     row_offset = rc->X;
+@@ -646,6 +647,13 @@ static int _gif_inputfunc(GifFileType *gif, GifByteType *data, int len) {
+     return bytesread;
+ }
+ 
++static void gif_seek_stream(GifFileType *gif, int offset)
++{
++    LARGE_INTEGER seek;
++    seek.QuadPart = offset;
++    IStream_Seek((IStream *)gif->UserData, seek, STREAM_SEEK_SET, NULL);
++}
++
+ static HRESULT CDECL gif_decoder_initialize(struct decoder *iface, IStream *stream, struct decoder_stat *st)
+ {
+     struct gif_decoder *decoder = impl_from_decoder(iface);
+@@ -656,17 +664,31 @@ static HRESULT CDECL gif_decoder_initialize(struct decoder *iface, IStream *stre
+     seek.QuadPart = 0;
+     IStream_Seek(stream, seek, STREAM_SEEK_SET, NULL);
+ 
++    /* keep stream for on-demand frame decoding */
++    IStream_AddRef(stream);
++    decoder->stream = stream;
++
+     /* read all data from the stream */
+     decoder->gif = DGifOpen((void *)stream, _gif_inputfunc);
+     if (!decoder->gif)
++    {
++        IStream_Release(stream);
++        decoder->stream = NULL;
+         return E_FAIL;
++    }
++
++    /* Set up seek function for on-demand frame decoding */
++    decoder->gif->seekFunc = gif_seek_stream;
+ 
+-    ret = DGifSlurp(decoder->gif);
++    /* Only scan frame headers, skip pixel data for on-demand decoding */
++    ret = DGifSlurpHeaders(decoder->gif);
+     if (ret == GIF_ERROR)
++    {
++        DGifCloseFile(decoder->gif);
++        IStream_Release(stream);
++        decoder->stream = NULL;
+         return E_FAIL;
+-
+-    /* make sure we don't use the stream after this method returns */
+-    decoder->gif->UserData = NULL;
++    }
+ 
+     st->flags = WICBitmapDecoderCapabilityCanDecodeAllImages |
+                 WICBitmapDecoderCapabilityCanDecodeSomeImages |
+@@ -759,6 +781,14 @@ static HRESULT CDECL gif_decoder_copy_pixels(struct decoder *iface, UINT frame,
+ 
+     image = &decoder->gif->SavedImages[frame];
+ 
++    /* Decode this frame's pixel data on demand */
++    if (!image->RasterBits)
++    {
++        decoder->gif->UserData = (void *)decoder->stream;
++        if (DGifDecodeFrame(decoder->gif, frame) == GIF_ERROR)
++            return E_FAIL;
++    }
++
+     if (image->ImageDesc.Interlace)
+         return copy_interlaced_pixels(image->RasterBits, image->ImageDesc.Width,
+                 image->ImageDesc.Height, image->ImageDesc.Width, prc, stride, buffersize, buffer);
+@@ -871,6 +901,8 @@ static void CDECL gif_decoder_destroy(struct decoder *iface)
+ {
+     struct gif_decoder *decoder = impl_from_decoder(iface);
+ 
++    if (decoder->stream)
++        IStream_Release(decoder->stream);
+     DGifCloseFile(decoder->gif);
+     free(decoder);
+ }
+@@ -1415,7 +1447,7 @@ static inline int read_byte(struct input_stream *in, unsigned char *byte)
+     return 0;
+ }
+ 
+-static HRESULT gif_compress(IStream *out_stream, const BYTE *in_data, ULONG in_size)
++static HRESULT gif_compress(IStream *out_stream, const BYTE *in_data, ULONG in_size, int color_bits)
+ {
+     struct input_stream in;
+     struct output_stream out;
+@@ -1429,7 +1461,7 @@ static HRESULT gif_compress(IStream *out_stream, const BYTE *in_data, ULONG in_s
+     out.gif_block.len = 0;
+     out.out = out_stream;
+ 
+-    init_code_bits = suffix = 8;
++    init_code_bits = suffix = max(2, color_bits);
+     if (IStream_Write(out.out, &suffix, sizeof(suffix), NULL) != S_OK)
+         return E_FAIL;
+ 
+@@ -1534,6 +1566,7 @@ static HRESULT WINAPI GifFrameEncode_Commit(IWICBitmapFrameEncode *iface)
+             if (hr == S_OK)
+             {
+                 struct image_descriptor imd;
++                int colors, color_bits = 1;
+ 
+                 /* Image Descriptor */
+                 imd.left = 0;
+@@ -1548,23 +1581,33 @@ static HRESULT WINAPI GifFrameEncode_Commit(IWICBitmapFrameEncode *iface)
+                 }
+                 /* FIXME: interlace flag */
+                 hr = IStream_Write(This->encoder->stream, &imd, sizeof(imd), NULL);
+-                if (hr == S_OK && This->colors)
++                if (hr == S_OK)
+                 {
+-                    UINT i;
+-
+-                    /* Local Color Table */
+-                    memset(gif_palette, 0, sizeof(gif_palette));
+-                    for (i = 0; i < This->colors; i++)
++                    if (This->colors)
+                     {
+-                        gif_palette[i][0] = (This->palette[i] >> 16) & 0xff;
+-                        gif_palette[i][1] = (This->palette[i] >> 8) & 0xff;
+-                        gif_palette[i][2] = This->palette[i] & 0xff;
++                        UINT i;
++
++                        /* Local Color Table */
++                        memset(gif_palette, 0, sizeof(gif_palette));
++                        for (i = 0; i < This->colors; i++)
++                        {
++                            gif_palette[i][0] = (This->palette[i] >> 16) & 0xff;
++                            gif_palette[i][1] = (This->palette[i] >> 8) & 0xff;
++                            gif_palette[i][2] = This->palette[i] & 0xff;
++                        }
++                        hr = IStream_Write(This->encoder->stream, gif_palette, sizeof(gif_palette), NULL);
++                        if (hr == S_OK)
++                            colors = This->colors;
+                     }
+-                    hr = IStream_Write(This->encoder->stream, gif_palette, sizeof(gif_palette), NULL);
++                    else
++                        colors = This->encoder->colors;
++
+                     if (hr == S_OK)
+                     {
++                        while ((1 << color_bits) < colors) color_bits++;
++
+                         /* Image Data */
+-                        hr = gif_compress(This->encoder->stream, This->image_data, This->width * This->height);
++                        hr = gif_compress(This->encoder->stream, This->image_data, This->width * This->height, color_bits);
+                         if (hr == S_OK)
+                             This->committed = TRUE;
+                     }
+diff --git a/dlls/windowscodecs/ungif.c b/dlls/windowscodecs/ungif.c
+index aa0552c..6737958 100644
+--- a/dlls/windowscodecs/ungif.c
++++ b/dlls/windowscodecs/ungif.c
+@@ -452,9 +452,7 @@ DGifGetImageDesc(GifFileType * GifFile) {
+ 
+     Private->PixelCount = GifFile->Image.Width * GifFile->Image.Height;
+ 
+-    DGifSetupDecompress(GifFile);  /* Reset decompress algorithm parameters. */
+-
+-    return GIF_OK;
++    return DGifSetupDecompress(GifFile);  /* Reset decompress algorithm parameters. */
+ }
+ 
+ /******************************************************************************
+@@ -590,6 +588,24 @@ DGifGetCodeNext(GifFileType * GifFile,
+     return GIF_OK;
+ }
+ 
++/******************************************************************************
++ * Skip the LZW image sub-blocks without decoding any pixels.
++ * Called after DGifSetupDecompress has read the code size byte.
++ *****************************************************************************/
++static int
++DGifSkipImageData(GifFileType *GifFile)
++{
++    GifByteType *CodeBlock;
++    do {
++        if (DGifGetCodeNext(GifFile, &CodeBlock) == GIF_ERROR)
++        {
++            WARN("GIF is not properly terminated\n");
++            break;
++        }
++    } while (CodeBlock != NULL);
++    return GIF_OK;
++}
++
+ /******************************************************************************
+  * Setup the LZ decompression for this image:
+  *****************************************************************************/
+@@ -724,7 +740,9 @@ DGifDecompressLine(GifFileType * GifFile,
+                 while (StackPtr != 0 && i < LineLen)
+                     Line[i++] = Stack[--StackPtr];
+             }
+-            if (LastCode != NO_SUCH_CODE) {
++            if (LastCode != NO_SUCH_CODE &&
++                Private->RunningCode - 2 < (LZ_MAX_CODE + 1) &&
++                Prefix[Private->RunningCode - 2] == NO_SUCH_CODE) {
+                 Prefix[Private->RunningCode - 2] = LastCode;
+ 
+                 if (CrntCode == Private->RunningCode - 2) {
+@@ -891,7 +909,11 @@ DGifSlurp(GifFileType * GifFile) {
+               }
+               if (DGifGetLine(GifFile, sp->RasterBits, ImageSize) ==
+                   GIF_ERROR)
++              {
++                  free(sp->RasterBits);
++                  sp->RasterBits = NULL;
+                   return (GIF_ERROR);
++              }
+               if (temp_save.ExtensionBlocks) {
+                   sp->Extensions.ExtensionBlocks = temp_save.ExtensionBlocks;
+                   sp->Extensions.ExtensionBlockCount = temp_save.ExtensionBlockCount;
+@@ -975,6 +997,165 @@ DGifSlurp(GifFileType * GifFile) {
+     return (GIF_OK);
+ }
+ 
++/******************************************************************************
++ * Like DGifSlurp() but skips pixel data of each frame.
++ * Only reads frame headers (ImageDesc, extension blocks) so it is fast.
++ * Use DGifDecodeFrame() to decode individual frames on demand.
++ *****************************************************************************/
++int
++DGifSlurpHeaders(GifFileType *GifFile)
++{
++    GifRecordType RecordType;
++    SavedImage *sp;
++    GifByteType *ExtData;
++    Extensions temp_save;
++
++    temp_save.ExtensionBlocks = NULL;
++    temp_save.ExtensionBlockCount = 0;
++
++    do {
++        if (DGifGetRecordType(GifFile, &RecordType) == GIF_ERROR)
++            return GIF_ERROR;
++
++        switch (RecordType) {
++          case IMAGE_DESC_RECORD_TYPE:
++              if (DGifGetImageDesc(GifFile) == GIF_ERROR)
++                  return GIF_ERROR;
++
++              sp = &GifFile->SavedImages[GifFile->ImageCount - 1];
++              /* GetFileOffset is past the code size byte read by DGifSetupDecompress
++               * inside DGifGetImageDesc, so subtract 1 to point at the code size byte
++               * itself, so DGifDecodeFrame can re-read it correctly after seeking. */
++              sp->LZWDataOffset = GetFileOffset(GifFile) - 1;
++
++              /* Skip LZW image sub-blocks without decoding */
++              if (DGifSkipImageData(GifFile) == GIF_ERROR)
++                  return GIF_ERROR;
++
++              /* Attach pending extension to this frame */
++              if (temp_save.ExtensionBlocks) {
++                  sp->Extensions.ExtensionBlocks = temp_save.ExtensionBlocks;
++                  sp->Extensions.ExtensionBlockCount = temp_save.ExtensionBlockCount;
++                  temp_save.ExtensionBlocks = NULL;
++                  temp_save.ExtensionBlockCount = 0;
++                  sp->Extensions.Function = sp->Extensions.ExtensionBlocks[0].Function;
++              }
++              break;
++
++          case EXTENSION_RECORD_TYPE:
++          {
++              int Function;
++              Extensions *Extensions;
++
++              if (DGifGetExtension(GifFile, &Function, &ExtData) == GIF_ERROR)
++                  return GIF_ERROR;
++
++              if (GifFile->ImageCount || Function == GRAPHICS_EXT_FUNC_CODE)
++                  Extensions = &temp_save;
++              else
++                  Extensions = &GifFile->Extensions;
++
++              Extensions->Function = Function;
++
++              if (ExtData)
++              {
++                  if (AddExtensionBlock(Extensions, ExtData[0], &ExtData[1]) == GIF_ERROR)
++                      return GIF_ERROR;
++              }
++              else
++              {
++                  if (AddExtensionBlock(Extensions, 0, NULL) == GIF_ERROR)
++                      return GIF_ERROR;
++              }
++
++              while (ExtData != NULL) {
++                  int Len;
++                  GifByteType *Data;
++
++                  if (DGifGetExtensionNext(GifFile, &ExtData) == GIF_ERROR)
++                      return GIF_ERROR;
++
++                  if (ExtData)
++                  {
++                      Len = ExtData[0];
++                      Data = &ExtData[1];
++                  }
++                  else
++                  {
++                      Len = 0;
++                      Data = NULL;
++                  }
++
++                  if (AppendExtensionBlock(Extensions, Len, Data) == GIF_ERROR)
++                      return GIF_ERROR;
++              }
++              break;
++          }
++
++          case TERMINATE_RECORD_TYPE:
++              break;
++
++          default:
++              break;
++        }
++    } while (RecordType != TERMINATE_RECORD_TYPE);
++
++    if (temp_save.ExtensionBlocks)
++        FreeExtension(&temp_save);
++
++    return GIF_OK;
++}
++
++/******************************************************************************
++ * Decode a specific frame on demand.
++ * Requires DGifSlurpHeaders() to have been called first to populate SavedImages.
++ * On success the frame's RasterBits are allocated and filled; subsequent calls
++ * return immediately if the frame is already decoded.
++ *****************************************************************************/
++int
++DGifDecodeFrame(GifFileType *GifFile, int frame)
++{
++    GifFilePrivateType *Private = GifFile->Private;
++    SavedImage *sp;
++    int ImageSize;
++
++    if (frame < 0 || frame >= GifFile->ImageCount)
++        return GIF_ERROR;
++
++    sp = &GifFile->SavedImages[frame];
++
++    /* Already decoded */
++    if (sp->RasterBits)
++        return GIF_OK;
++
++    /* Seek to this frame's LZW data in the stream */
++    if (GifFile->seekFunc)
++    {
++        ((SeekFunc)GifFile->seekFunc)(GifFile, sp->LZWDataOffset);
++        /* Reset the decoder's byte offset counter so subsequent READ() calls
++         * start from the correct position */
++        Private->Offset = sp->LZWDataOffset;
++    }
++
++    ImageSize = sp->ImageDesc.Width * sp->ImageDesc.Height;
++
++    /* Re-initialize LZW decompress state (reads the code size byte) */
++    Private->PixelCount = ImageSize;
++    DGifSetupDecompress(GifFile);
++
++    sp->RasterBits = malloc(ImageSize * sizeof(GifPixelType));
++    if (!sp->RasterBits)
++        return GIF_ERROR;
++
++    if (DGifGetLine(GifFile, sp->RasterBits, ImageSize) != GIF_OK)
++    {
++        free(sp->RasterBits);
++        sp->RasterBits = NULL;
++        return GIF_ERROR;
++    }
++    return GIF_OK;
++}
++
+ /******************************************************************************
+  * GifFileType constructor with user supplied input function (TVT)
+  *****************************************************************************/
+diff --git a/dlls/windowscodecs/ungif.h b/dlls/windowscodecs/ungif.h
+index c402109..4c91c4c 100644
+--- a/dlls/windowscodecs/ungif.h
++++ b/dlls/windowscodecs/ungif.h
+@@ -124,6 +124,7 @@ typedef struct GifFileType {
+     struct SavedImage *SavedImages; /* Use this to accumulate file state */
+     void *UserData;             /* hook to attach user data (TVT) */
+     void *Private;              /* Don't mess with this! */
++    void *seekFunc;             /* SeekFunc: seek to absolute byte offset for on-demand decoding */
+ } GifFileType;
+ 
+ typedef enum {
+@@ -137,6 +138,9 @@ typedef enum {
+ /* func type to read gif data from arbitrary sources (TVT) */
+ typedef int (*InputFunc) (GifFileType *, GifByteType *, int);
+ 
++/* func type to seek to an absolute byte offset in the GIF data source */
++typedef void (*SeekFunc) (GifFileType *, int offset);
++
+ /*  GIF89 extension function codes */
+ 
+ #define COMMENT_EXT_FUNC_CODE     0xfe    /* comment */
+@@ -171,8 +175,12 @@ int DGifCloseFile(GifFileType * GifFile);
+ typedef struct SavedImage {
+     GifImageDesc ImageDesc;
+     int ImageDescOffset;
++    int LZWDataOffset;   /* byte offset to this frame's LZW sub-blocks in the stream */
+     unsigned char *RasterBits;
+     Extensions Extensions;
+ } SavedImage;
+ 
++int DGifSlurpHeaders(GifFileType *GifFile);   /* scan frame headers only, skip pixel data */
++int DGifDecodeFrame(GifFileType *GifFile, int frame); /* on-demand decode of a specific frame */
++
+ #endif /* _UNGIF_H_ */

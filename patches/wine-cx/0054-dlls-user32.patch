@@ -1,0 +1,49 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 54/74] dlls-user32: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/user32/input.c b/dlls/user32/input.c
+index 6d26e4f..8679ff0 100644
+--- a/dlls/user32/input.c
++++ b/dlls/user32/input.c
+@@ -848,3 +848,23 @@ HSYNTHETICPOINTERDEVICE WINAPI CreateSyntheticPointerDevice(POINTER_INPUT_TYPE t
+     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+     return NULL;
+ }
++
++
++/***********************************************************************
++ *           DelegateInput (USER32.@)
++ *
++ * Ember: Wine 11.18 스텁(1 을 돌려준다). CX 는 미구현이라 부르면 튕겼다. Undocumented.
++ */
++UINT_PTR WINAPI DelegateInput(void *p1, void *p2, void *p3, void *p4, void *p5, void *p6)
++{
++    FIXME( "p1 %p p2 %p p3 %p p4 %p p5 %p p6 %p stub!\n", p1, p2, p3, p4, p5, p6 );
++    return 1;
++}
++
++/***********************************************************************
++ *           UndelegateInput (USER32.@)
++ */
++void WINAPI UndelegateInput(void *p1, void *p2)
++{
++    FIXME( "p1 %p p2 %p stub!\n", p1, p2 );
++}
+diff --git a/dlls/user32/user32.spec b/dlls/user32/user32.spec
+index 0645792..b893964 100644
+--- a/dlls/user32/user32.spec
++++ b/dlls/user32/user32.spec
+@@ -14,8 +14,8 @@
+ 
+ 2010 stub -noname SlicerControl  # NtUserSlicerControl
+ 
+-2503 stub DelegateInput  # NtUserDelegateInput
+-2504 stub UndelegateInput  # NtUserUndelegateInput
++2503 stdcall DelegateInput(ptr ptr ptr ptr ptr ptr)  # NtUserDelegateInput
++2504 stdcall UndelegateInput(ptr ptr)  # NtUserUndelegateInput
+ 2505 stub HandleDelegatedInput  # NtUserHandleDelegatedInput
+ 2506 stub @
+ 2507 stub -noname SetAutoRotation  # NtUserSetAutoRotation

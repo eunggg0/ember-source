@@ -1,0 +1,65 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 41/74] dlls-msv1_0: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/msv1_0/main.c b/dlls/msv1_0/main.c
+index 37b564a..371e858 100644
+--- a/dlls/msv1_0/main.c
++++ b/dlls/msv1_0/main.c
+@@ -165,6 +165,23 @@ static char *get_domain_arg( const WCHAR *domain, int domain_len )
+ }
+ 
+ #define WINE_NO_CACHED_CREDENTIALS 0x10000000
++/* Ember: SEC_WINNT_AUTH_IDENTITY_EX(W/A) — 앞 ULONG 이 버전(0x200). CX 헤더에 없어 여기 둔다(윈도우 배치). */
++#define EMBER_AUTH_IDENTITY_VERSION 0x200
++struct ember_auth_identity_ex
++{
++    ULONG Version;
++    ULONG Length;
++    void *User;
++    ULONG UserLength;
++    void *Domain;
++    ULONG DomainLength;
++    void *Password;
++    ULONG PasswordLength;
++    ULONG Flags;
++    void *PackageList;
++    ULONG PackageListLength;
++};
++
+ static NTSTATUS NTAPI ntlm_SpAcquireCredentialsHandle( UNICODE_STRING *principal, ULONG cred_use, LUID *logon_id,
+                                                        void *auth_data, void *get_key_fn, void *get_key_arg,
+                                                        LSA_SEC_HANDLE *handle, TimeStamp *expiry )
+@@ -172,7 +189,7 @@ static NTSTATUS NTAPI ntlm_SpAcquireCredentialsHandle( UNICODE_STRING *principal
+     SECURITY_STATUS status = SEC_E_INSUFFICIENT_MEMORY;
+     struct ntlm_cred *cred = NULL;
+     WCHAR *domain = NULL, *user = NULL, *password = NULL;
+-    SEC_WINNT_AUTH_IDENTITY_W *id = NULL;
++    SEC_WINNT_AUTH_IDENTITY_W *id = NULL, id_ex_mapped;
+ 
+     TRACE( "%s, %#lx, %p, %p, %p, %p, %p, %p\n", debugstr_us(principal), cred_use, logon_id, auth_data,
+            get_key_fn, get_key_arg, cred, expiry );
+@@ -205,6 +222,21 @@ static NTSTATUS NTAPI ntlm_SpAcquireCredentialsHandle( UNICODE_STRING *principal
+         cred->password_len = 0;
+         cred->no_cached_credentials = (cred_use & WINE_NO_CACHED_CREDENTIALS);
+ 
++        /* Ember: EX 구조체를 일반 구조체로 읽으면 버전·길이를 포인터로 써서 튕겼다(11.18 map_auth_data 처럼 옮겨 읽는다) */
++        if (auth_data && *(ULONG *)auth_data == EMBER_AUTH_IDENTITY_VERSION)
++        {
++            const struct ember_auth_identity_ex *idex = auth_data;
++            if (idex->PackageList) FIXME( "ignoring package list\n" );
++            id_ex_mapped.User           = idex->User;
++            id_ex_mapped.UserLength     = idex->UserLength;
++            id_ex_mapped.Domain         = idex->Domain;
++            id_ex_mapped.DomainLength   = idex->DomainLength;
++            id_ex_mapped.Password       = idex->Password;
++            id_ex_mapped.PasswordLength = idex->PasswordLength;
++            id_ex_mapped.Flags          = idex->Flags;
++            auth_data = &id_ex_mapped;
++        }
++
+         if ((id = auth_data))
+         {
+             int domain_len = 0, user_len = 0, password_len = 0;

@@ -1,0 +1,122 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 64/74] dlls-winhttp: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/winhttp/net.c b/dlls/winhttp/net.c
+index 30e8dc8..46b5405 100644
+--- a/dlls/winhttp/net.c
++++ b/dlls/winhttp/net.c
+@@ -81,7 +81,8 @@ static int sock_recv(int fd, void *msg, size_t len, int flags)
+     return ret;
+ }
+ 
+-static DWORD netconn_verify_cert( PCCERT_CONTEXT cert, WCHAR *server, DWORD security_flags, BOOL check_revocation )
++static DWORD netconn_verify_cert( PCCERT_CONTEXT cert, WCHAR *server, DWORD security_flags, BOOL check_revocation,
++                                  PCCERT_CHAIN_CONTEXT *ret_chain )
+ {
+     HCERTSTORE store = cert->hCertStore;
+     BOOL ret;
+@@ -94,6 +95,7 @@ static DWORD netconn_verify_cert( PCCERT_CONTEXT cert, WCHAR *server, DWORD secu
+     TRACE("verifying %s\n", debugstr_w( server ));
+     chainPara.RequestedUsage.Usage.cUsageIdentifier = 1;
+     chainPara.RequestedUsage.Usage.rgpszUsageIdentifier = server_auth;
++    *ret_chain = NULL;  /* Ember: 11.18 — 검증한 체인을 연결에 남긴다(WINHTTP_OPTION_SERVER_CERT_CHAIN_CONTEXT) */
+     ret = CertGetCertificateChain( NULL, cert, NULL, store, &chainPara,
+                                    check_revocation ? CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT : 0,
+                                    NULL, &chain );
+@@ -169,7 +171,7 @@ static DWORD netconn_verify_cert( PCCERT_CONTEXT cert, WCHAR *server, DWORD secu
+                     err = ERROR_WINHTTP_SECURE_INVALID_CERT;
+             }
+         }
+-        CertFreeCertificateChain( chain );
++        *ret_chain = chain;
+     }
+     else
+         err = ERROR_WINHTTP_SECURE_CHANNEL_ERROR;
+@@ -297,6 +299,7 @@ void netconn_release( struct netconn *conn )
+         free(conn->ssl_write_buf);
+         free(conn->extra_buf);
+         DeleteSecurityContext(&conn->ssl_ctx);
++        if (conn->chain) CertFreeCertificateChain(conn->chain);
+     }
+     if (conn->socket != -1)
+         closesocket( conn->socket );
+@@ -400,7 +403,7 @@ DWORD netconn_secure_connect( struct netconn *conn, WCHAR *hostname, DWORD secur
+ 
+             status = QueryContextAttributesW(&ctx, SECPKG_ATTR_REMOTE_CERT_CONTEXT, (void*)&cert);
+             if(status == SEC_E_OK) {
+-                res = netconn_verify_cert(cert, hostname, security_flags, check_revocation);
++                res = netconn_verify_cert(cert, hostname, security_flags, check_revocation, &conn->chain);
+                 CertFreeCertificateContext(cert);
+                 if(res != ERROR_SUCCESS) {
+                     WARN( "cert verify failed: %lu\n", res );
+diff --git a/dlls/winhttp/session.c b/dlls/winhttp/session.c
+index 737272a..33ff05b 100644
+--- a/dlls/winhttp/session.c
++++ b/dlls/winhttp/session.c
+@@ -813,6 +813,22 @@ static BOOL request_query_option( struct object_header *hdr, DWORD option, void
+         *buflen = sizeof(cert);
+         return TRUE;
+     }
++    case WINHTTP_OPTION_SERVER_CERT_CHAIN_CONTEXT:  /* Ember: Wine 11.18 — 인증서 고정(pinning)하는 런처용 */
++    {
++        const CERT_CHAIN_CONTEXT *chain;
++
++        if (!validate_buffer( buffer, buflen, sizeof(chain) )) return FALSE;
++        if (!request->netconn || !request->netconn->chain)
++        {
++            SetLastError( ERROR_WINHTTP_INCORRECT_HANDLE_STATE );
++            *(CERT_CHAIN_CONTEXT **)buffer = NULL;
++            return FALSE;
++        }
++        if (!(chain = CertDuplicateCertificateChain( request->netconn->chain ))) return FALSE;
++        *(const CERT_CHAIN_CONTEXT **)buffer = chain;
++        *buflen = sizeof(chain);
++        return TRUE;
++    }
+     case WINHTTP_OPTION_SECURITY_CERTIFICATE_STRUCT:
+     {
+         const CERT_CONTEXT *cert = request->server_cert;
+@@ -1618,6 +1634,17 @@ static WCHAR *detect_autoproxyconfig_url_dns(void)
+         free( fqdn );
+         return NULL;
+     }
++    /* Ember: ".local" is the multicast DNS domain (RFC 6762) - macOS host names are "<name>.local", so this used to ask
++     * unicast DNS for "wpad.local". Some home routers / ISP resolvers answer that with a bogus address whose port 80
++     * never answers, and every Steam start then waited the full 60 s WPAD connect timeout (2026-09-30, +winhttp trace).
++     * Windows never devolves into the mDNS domain; skip it. */
++    if (!wcsicmp( domain, L"local" ) || is_domain_suffix( domain, L".local" ))
++    {
++        TRACE( "skipping mDNS domain %s\n", debugstr_w(domain) );
++        free( domain );
++        free( fqdn );
++        return NULL;
++    }
+     p = fqdn;
+     while ((p = wcschr( p, '.' )) && is_domain_suffix( p + 1, domain ))
+     {
+@@ -2066,7 +2093,9 @@ static char *download_script( const WCHAR *url, DWORD *out_size )
+     hostname[uc.dwHostNameLength] = 0;
+ 
+     if (!(ses = WinHttpOpen( NULL, WINHTTP_ACCESS_TYPE_NO_PROXY, NULL, NULL, 0 ))) goto done;
+-    WinHttpSetTimeouts( ses, 5000, 60000, 30000, 30000 );
++    /* Ember: 10 s connect (was 60 s). A WPAD/PAC host is expected on the local network; a dead one must not stall the
++     * caller's first request for a minute. */
++    WinHttpSetTimeouts( ses, 5000, 10000, 30000, 30000 );
+     if (!(con = WinHttpConnect( ses, hostname, uc.nPort, 0 ))) goto done;
+     if (uc.nScheme == INTERNET_SCHEME_HTTPS) flags |= WINHTTP_FLAG_SECURE;
+     if (!(req = WinHttpOpenRequest( con, NULL, uc.lpszUrlPath, NULL, NULL, acceptW, flags ))) goto done;
+diff --git a/dlls/winhttp/winhttp_private.h b/dlls/winhttp/winhttp_private.h
+index 4e33657..b4d0081 100644
+--- a/dlls/winhttp/winhttp_private.h
++++ b/dlls/winhttp/winhttp_private.h
+@@ -113,6 +113,7 @@ struct netconn
+     struct hostdata *host;
+     ULONGLONG keep_until;
+     CtxtHandle ssl_ctx;
++    const CERT_CHAIN_CONTEXT *chain;  /* Ember: 11.18 */
+     SecPkgContext_StreamSizes ssl_sizes;
+     char *ssl_read_buf, *ssl_write_buf;
+     char *extra_buf;

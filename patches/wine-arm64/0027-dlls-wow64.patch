@@ -1,0 +1,87 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 27/34] dlls-wow64: Ember changes
+
+Base: wine-11.18.tar.xz
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/wow64/process.c b/dlls/wow64/process.c
+index 16ea098..bfeccda 100644
+--- a/dlls/wow64/process.c
++++ b/dlls/wow64/process.c
+@@ -152,7 +152,7 @@ static PS_ATTRIBUTE_LIST *ps_attributes_32to64( PS_ATTRIBUTE_LIST **attr, const
+     {
+         ret->Attributes[i].Attribute    = attr32->Attributes[i].Attribute;
+         ret->Attributes[i].Size         = attr32->Attributes[i].Size;
+-        ret->Attributes[i].Value        = attr32->Attributes[i].Value;
++        ret->Attributes[i].Value        = (ULONG_PTR)ULongToPtr( attr32->Attributes[i].Value );  /* fex32: 포인터 값은 창으로(작은 값은 그대로) */
+         ret->Attributes[i].ReturnLength = NULL;
+         switch (ret->Attributes[i].Attribute)
+         {
+diff --git a/dlls/wow64/virtual.c b/dlls/wow64/virtual.c
+index 605abe1..7a0a160 100644
+--- a/dlls/wow64/virtual.c
++++ b/dlls/wow64/virtual.c
+@@ -597,7 +597,7 @@ NTSTATUS WINAPI wow64_NtQueryVirtualMemory( UINT *args )
+     case MemoryBasicInformation:  /* MEMORY_BASIC_INFORMATION */
+         if (len < sizeof(MEMORY_BASIC_INFORMATION32))
+             status = STATUS_INFO_LENGTH_MISMATCH;
+-        else if ((ULONG_PTR)addr > highest_user_address)
++        else if (PtrToUlong( addr ) > highest_user_address)
+             status = STATUS_INVALID_PARAMETER;
+         else
+         {
+@@ -613,8 +613,8 @@ NTSTATUS WINAPI wow64_NtQueryVirtualMemory( UINT *args )
+                 info32->State = info.State;
+                 info32->Protect = info.Protect;
+                 info32->Type = info.Type;
+-                if ((ULONG_PTR)info.BaseAddress + info.RegionSize > highest_user_address)
+-                    info32->RegionSize = highest_user_address - (ULONG_PTR)info.BaseAddress + 1;
++                if ((ULONG_PTR)PtrToUlong( info.BaseAddress ) + info.RegionSize > highest_user_address)
++                    info32->RegionSize = highest_user_address - (ULONG_PTR)PtrToUlong( info.BaseAddress ) + 1;
+             }
+         }
+         res_len = sizeof(MEMORY_BASIC_INFORMATION32);
+@@ -642,7 +642,7 @@ NTSTATUS WINAPI wow64_NtQueryVirtualMemory( UINT *args )
+     {
+         if (len < sizeof(MEMORY_REGION_INFORMATION32))
+             status = STATUS_INFO_LENGTH_MISMATCH;
+-        else if ((ULONG_PTR)addr > highest_user_address)
++        else if (PtrToUlong( addr ) > highest_user_address)
+             status = STATUS_INVALID_PARAMETER;
+         else
+         {
+@@ -658,8 +658,8 @@ NTSTATUS WINAPI wow64_NtQueryVirtualMemory( UINT *args )
+                 info32->CommitSize = info.CommitSize;
+                 info32->PartitionId = info.PartitionId;
+                 info32->NodePreference = info.NodePreference;
+-                if ((ULONG_PTR)info.AllocationBase + info.RegionSize > highest_user_address)
+-                    info32->RegionSize = highest_user_address - (ULONG_PTR)info.AllocationBase + 1;
++                if ((ULONG_PTR)PtrToUlong( info.AllocationBase ) + info.RegionSize > highest_user_address)
++                    info32->RegionSize = highest_user_address - (ULONG_PTR)PtrToUlong( info.AllocationBase ) + 1;
+             }
+         }
+         res_len = sizeof(MEMORY_REGION_INFORMATION32);
+@@ -689,7 +689,7 @@ NTSTATUS WINAPI wow64_NtQueryVirtualMemory( UINT *args )
+     {
+         if (len < sizeof(MEMORY_IMAGE_INFORMATION32)) return STATUS_INFO_LENGTH_MISMATCH;
+ 
+-        if ((ULONG_PTR)addr > highest_user_address) status = STATUS_INVALID_PARAMETER;
++        if (PtrToUlong( addr ) > highest_user_address) status = STATUS_INVALID_PARAMETER;
+         else
+         {
+             MEMORY_IMAGE_INFORMATION info;
+diff --git a/dlls/wow64/wow64_private.h b/dlls/wow64/wow64_private.h
+index b3ea679..a5f4c5c 100644
+--- a/dlls/wow64/wow64_private.h
++++ b/dlls/wow64/wow64_private.h
+@@ -24,6 +24,10 @@
+ #include "../ntdll/ntsyscalls.h"
+ #include "struct32.h"
+ 
++/* fex32: 32비트 포인터를 게스트 창(4GB 위)으로 푼다 */
++#define WINE_WOW64_REBASE
++#include "wine/wow64base.h"
++
+ #define SYSCALL_ENTRY(id,name,_args) extern NTSTATUS WINAPI wow64_ ## name( UINT *args );
+ ALL_SYSCALLS32
+ #undef SYSCALL_ENTRY

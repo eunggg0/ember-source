@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Wine 로더(bin/wine, lib/wine/*-unix/wine, wine-host)·wineserver·GStreamer 도우미 등 번들 안 모든 실행 파일 (Hardened Runtime, 출시 서명용).
+     wine-macos-arm64/wine.entitlements 에서 get-task-allow 를 뺀 것 — get-task-allow 가 있으면 공증이 거절한다.
+     allow-jit / allow-unsigned-executable-memory / disable-executable-page-protection: PE 이미지를 실행 페이지로 매핑·고치기, FEX JIT.
+     allow-dyld-environment-variables: Ember 가 DYLD_FALLBACK_LIBRARY_PATH·DYLD_FRAMEWORK_PATH 로 GStreamer·D3DMetal 을 찾게 한다.
+     disable-library-validation: 사용자가 설치한 애플 D3DMetal·Metal Shader Converter(팀 ID 다름)와 /usr/local 라이브러리를 올린다.
+     device.audio-input/camera: 게임이 직접 장치를 연다(Hardened Runtime 프로세스는 권한이 없으면 거부). -->
+<plist version="1.0"><dict>
+  <key>com.apple.security.cs.allow-jit</key><true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+  <key>com.apple.security.cs.disable-executable-page-protection</key><true/>
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
+  <key>com.apple.security.cs.disable-library-validation</key><true/>
+  <key>com.apple.security.device.audio-input</key><true/>
+  <key>com.apple.security.device.camera</key><true/>
+</dict></plist>

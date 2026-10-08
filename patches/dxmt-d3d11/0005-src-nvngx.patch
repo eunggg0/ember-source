@@ -1,0 +1,337 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 5/7] src-nvngx: Ember changes
+
+Base: 3Shain/dxmt 7c8dee1 (+ submodules)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/src/nvngx/nvngx.cpp b/src/nvngx/nvngx.cpp
+index 71055bc..249db4e 100644
+--- a/src/nvngx/nvngx.cpp
++++ b/src/nvngx/nvngx.cpp
+@@ -6,15 +6,41 @@
+ #include "nvngx_parameter.hpp"
+ #include "../d3d11/d3d11_interfaces.hpp"
+ #include "../dxgi/dxgi_interfaces.h"
++#include "util_env.hpp"
++#include <atomic>
+ #include <cmath>
++#include <memory>
+ 
+ namespace dxmt {
+ Logger Logger::s_instance("nvngx.log");
+ 
++static std::atomic<unsigned int> g_next_feature_id{1};
++
++// Sign overrides for convention mismatches between DLSS and MetalFX (default: pass through).
++// DXMT_NGX_JITTER_SIGN=-1 negates the jitter offsets, DXMT_NGX_MV_SIGN=-1 negates motion vectors.
++static float
++EnvSign(const char *name) {
++  return env::getEnvVar(name) == "-1" ? -1.0f : 1.0f;
++}
++
++static void
++TextureSize(ID3D11Resource *res, UINT *w, UINT *h) {
++  *w = 0;
++  *h = 0;
++  Com<ID3D11Texture2D> tex;
++  if (res && SUCCEEDED(res->QueryInterface(IID_PPV_ARGS(&tex)))) {
++    D3D11_TEXTURE2D_DESC desc;
++    tex->GetDesc(&desc);
++    *w = desc.Width;
++    *h = desc.Height;
++  }
++}
++
+ NVNGX_API NVNGX_RESULT
+ NVSDK_NGX_D3D11_Init_Ext(
+     unsigned long long id, const wchar_t *path, ID3D11Device *device, unsigned int sdk_version, const void *feature_info
+ ) {
++  Logger::info("NVSDK_NGX_D3D11_Init_Ext");
+   return NVNGX_RESULT_OK;
+ }
+ 
+@@ -22,6 +48,7 @@ NVNGX_API NVNGX_RESULT
+ NVSDK_NGX_D3D11_Init(
+     unsigned long long id, const wchar_t *path, ID3D11Device *device, const void *feature_info, unsigned int sdk_version
+ ) {
++  Logger::info("NVSDK_NGX_D3D11_Init");
+   return NVNGX_RESULT_OK;
+ }
+ 
+@@ -30,6 +57,7 @@ NVSDK_NGX_D3D11_Init_ProjectID(
+     const char *project, unsigned int engine_type, const char *engine_version, const wchar_t *path,
+     ID3D11Device *device, unsigned int sdk_version, const void *feature_info
+ ) {
++  Logger::info("NVSDK_NGX_D3D11_Init_ProjectID");
+   return NVNGX_RESULT_OK;
+ }
+ 
+@@ -38,6 +66,7 @@ NVSDK_NGX_D3D11_Init_with_ProjectID(
+     const char *project, unsigned int engine_type, const char *engine_version, const wchar_t *path,
+     ID3D11Device *device, const void *feature_info, unsigned int sdk_version
+ ) {
++  Logger::info("NVSDK_NGX_D3D11_Init_with_ProjectID");
+   return NVNGX_RESULT_OK;
+ }
+ 
+@@ -46,6 +75,8 @@ NVSDK_NGX_D3D11_CreateFeature(
+     ID3D11DeviceContext *context, unsigned int feature, NVNGXParameter *params, unsigned int **out_handle
+ ) {
+   auto parameters = static_cast<ParametersImpl *>(params);
++  if (!context || !params || !out_handle)
++    return NVNGX_RESULT_INVALID_PARAMETER;
+   Com<IMTLD3D11ContextExt1> pCtxExt = nullptr;
+   if (FAILED(context->QueryInterface(IID_PPV_ARGS(&pCtxExt))))
+     return NVNGX_RESULT_INVALID_PARAMETER;
+@@ -73,6 +104,11 @@ NVSDK_NGX_D3D11_CreateFeature(
+     if (NVNGX_FAILED(parameters->Get("DLSS.Enable.Output.Subrects", &dlss->enable_output_subrects)))
+       dlss->enable_output_subrects = 0;
+ 
++    dlss->handle = g_next_feature_id++;
++    Logger::info(str::format(
++        "NVSDK_NGX_D3D11_CreateFeature: DLSS #", dlss->handle, " ", dlss->width, "x", dlss->height, " -> ",
++        dlss->target_width, "x", dlss->target_height, " quality=", dlss->quality, " flags=0x", std::hex, dlss->flag
++    ));
+     *out_handle = &dlss.release()->handle;
+     return NVNGX_RESULT_OK;
+   }
+@@ -86,15 +122,17 @@ NVSDK_NGX_D3D11_EvaluateFeature(
+     ID3D11DeviceContext *context, const unsigned int *handle, NVNGXParameter *params, void *callback
+ ) {
+   auto parameters = static_cast<ParametersImpl *>(params);
+-  switch (static_cast<CommonFeature *>((void *)handle)->feature) {
++  if (!context || !handle || !params)
++    return NVNGX_RESULT_INVALID_PARAMETER;
++  switch (static_cast<const CommonFeature *>((const void *)handle)->feature) {
+   case NVNGX_FEATURE_SUPERSAMPLING: {
+     auto dlss = static_cast<DLSSFeature *>((void *)handle);
+ 
+-    IMTLD3D11ContextExt *pCtxExt = nullptr;
++    Com<IMTLD3D11ContextExt> pCtxExt = nullptr;
+     if (FAILED(context->QueryInterface(IID_PPV_ARGS(&pCtxExt))))
+       return NVNGX_RESULT_INVALID_PARAMETER;
+ 
+-    ID3D11Texture2D *input, *output, *depth, *mv, *exposure = nullptr;
++    ID3D11Texture2D *input = nullptr, *output = nullptr, *depth = nullptr, *mv = nullptr, *exposure = nullptr;
+ 
+     if (NVNGX_FAILED(parameters->Get(NVNGX_Parameter_Color, (ID3D11Resource **)&input)))
+       return NVNGX_RESULT_INVALID_PARAMETER;
+@@ -104,13 +142,24 @@ NVSDK_NGX_D3D11_EvaluateFeature(
+       return NVNGX_RESULT_INVALID_PARAMETER;
+     if (NVNGX_FAILED(parameters->Get(NVNGX_Parameter_MotionVectors, (ID3D11Resource **)&mv)))
+       return NVNGX_RESULT_INVALID_PARAMETER;
+-    parameters->Get(NVNGX_Parameter_ExposureTexture, (ID3D11Resource **)&exposure);
++    if (!input || !output || !depth || !mv)
++      return NVNGX_RESULT_INVALID_PARAMETER;
++    if (NVNGX_FAILED(parameters->Get(NVNGX_Parameter_ExposureTexture, (ID3D11Resource **)&exposure)))
++      exposure = nullptr;
+ 
++    // Render subrect: older SDK helpers don't set it, and 0 means "whole color texture".
++    // MetalFX needs a real content size (0 is not "full" for inputContentWidth), so resolve it here.
+     uint32_t width = 0, height = 0;
+     if (NVNGX_FAILED(parameters->Get(NVNGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, &width)))
+-      return NVNGX_RESULT_INVALID_PARAMETER;
++      width = 0;
+     if (NVNGX_FAILED(parameters->Get(NVNGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, &height)))
+-      return NVNGX_RESULT_INVALID_PARAMETER;
++      height = 0;
++    UINT color_width = 0, color_height = 0;
++    TextureSize(input, &color_width, &color_height);
++    if (width == 0 || width > color_width)
++      width = color_width;
++    if (height == 0 || height > color_height)
++      height = color_height;
+ 
+     MTL_TEMPORAL_UPSCALE_D3D11_DESC desc = {};
+     desc.InputContentWidth = width;
+@@ -138,13 +187,32 @@ NVSDK_NGX_D3D11_EvaluateFeature(
+       desc.MotionVectorScaleX = 1.0;
+     if (NVNGX_FAILED(parameters->Get(NVNGX_Parameter_MV_Scale_Y, &desc.MotionVectorScaleY)))
+       desc.MotionVectorScaleY = 1.0;
+-    if (NVNGX_FAILED(parameters->Get(NVNGX_Parameter_DLSS_Pre_Exposure, &desc.PreExposure)))
+-      desc.PreExposure = 0;
++    // DLSS treats a missing Pre.Exposure as 1.0, and apps that memset their eval params pass 0.
++    // MetalFX divides by preExposure, so 0 would blow the history up.
++    if (NVNGX_FAILED(parameters->Get(NVNGX_Parameter_DLSS_Pre_Exposure, &desc.PreExposure)) || !(desc.PreExposure > 0.0f))
++      desc.PreExposure = 1.0f;
++
++    static const float jitter_sign = EnvSign("DXMT_NGX_JITTER_SIGN");
++    static const float mv_sign = EnvSign("DXMT_NGX_MV_SIGN");
++    desc.JitterOffsetX *= jitter_sign;
++    desc.JitterOffsetY *= jitter_sign;
++    desc.MotionVectorScaleX *= mv_sign;
++    desc.MotionVectorScaleY *= mv_sign;
++
++    if (!dlss->logged_first_eval) {
++      dlss->logged_first_eval = true;
++      UINT out_width = 0, out_height = 0;
++      TextureSize(output, &out_width, &out_height);
++      Logger::info(str::format(
++          "NVSDK_NGX_D3D11_EvaluateFeature: DLSS #", dlss->handle, " color ", color_width, "x", color_height,
++          " content ", width, "x", height, " -> ", out_width, "x", out_height, " mvScale=", desc.MotionVectorScaleX,
++          ",", desc.MotionVectorScaleY, " exposureTex=", exposure ? 1 : 0, " autoExposure=", desc.AutoExposure,
++          " depthInverted=", desc.DepthReversed, " mvDisplayRes=", desc.MotionVectorInDisplayRes
++      ));
++    }
+ 
+     pCtxExt->TemporalUpscale(&desc);
+ 
+-    pCtxExt->Release();
+-
+     return NVNGX_RESULT_OK;
+     break;
+   }
+@@ -173,6 +241,8 @@ NVSDK_NGX_D3D11_GetScratchBufferSize(unsigned int feature, const NVNGXParameter
+ 
+ NVNGX_API NVNGX_RESULT
+ NVSDK_NGX_D3D11_ReleaseFeature(unsigned int *handle) {
++  if (!handle)
++    return NVNGX_RESULT_INVALID_PARAMETER;
+   switch (static_cast<CommonFeature *>((void *)handle)->feature) {
+   case NVNGX_FEATURE_SUPERSAMPLING:
+     delete static_cast<DLSSFeature *>((void *)handle);
+@@ -185,12 +255,16 @@ NVSDK_NGX_D3D11_ReleaseFeature(unsigned int *handle) {
+ 
+ NVNGX_API NVNGX_RESULT
+ NVSDK_NGX_D3D11_DestroyParameters(NVNGXParameter *params) {
++  if (!params)
++    return NVNGX_RESULT_INVALID_PARAMETER;
+   delete static_cast<ParametersImpl *>(params);
+   return NVNGX_RESULT_OK;
+ }
+ 
+ NVNGX_API NVNGX_RESULT
+ NVSDK_NGX_D3D11_AllocateParameters(NVNGXParameter **out_params) {
++  if (!out_params)
++    return NVNGX_RESULT_INVALID_PARAMETER;
+   *out_params = new ParametersImpl();
+   return NVNGX_RESULT_OK;
+ }
+@@ -271,6 +345,8 @@ NVNGX_DLSS_GetStatsCallback(NVNGXParameter *params) {
+ 
+ NVNGX_API NVNGX_RESULT
+ NVSDK_NGX_D3D11_GetCapabilityParameters(NVNGXParameter **out_params) {
++  if (!out_params)
++    return NVNGX_RESULT_INVALID_PARAMETER;
+   auto out_parameters = new ParametersImpl();
+ 
+   out_parameters->Set("SuperSampling.Available", 1u);
+@@ -313,7 +389,7 @@ NVSDK_NGX_D3D11_GetFeatureRequirements(
+     IDXGIAdapter *adapter, const NVNGX_FeatureDiscoveryInfo *discovery_info,
+     NVNGX_FeatureRequirement *requirement
+ ) {
+-  if (!requirement)
++  if (!requirement || !discovery_info)
+     return NVNGX_RESULT_INVALID_PARAMETER;
+   if (discovery_info->FeatureID == NVNGX_FEATURE_SUPERSAMPLING) {
+     requirement->FeatureSupported = NVNGX_FEATURE_SUPPORT_RESULT_SUPPORTED;
+diff --git a/src/nvngx/nvngx.hpp b/src/nvngx/nvngx.hpp
+index 82bae54..b48c7ff 100644
+--- a/src/nvngx/nvngx.hpp
++++ b/src/nvngx/nvngx.hpp
+@@ -5,14 +5,20 @@ struct ID3D12Resource;
+ 
+ #define NVNGX_API extern "C"
+ 
++// Values must match nvsdk_ngx_defs.h: the SDK tests failure with
++// ((r & 0xFFF00000) == 0xBAD00000). The old 0xbad0000 (one zero short) made every
++// failure look like success to the game (e.g. CreateFeature failing -> null handle used).
++// Verified against nvngx_dlss.dll 310.4 which returns 0xBAD00005 for invalid parameters.
+ enum NVNGX_RESULT : unsigned int {
+   NVNGX_RESULT_OK = 1,
+-  NVNGX_RESULT_FAIL = 0xbad0000,
+-  NVNGX_RESULT_FEATURE_NOT_SUPPORTED = 0xbad0001,
+-  NVNGX_RESULT_INVALID_PARAMETER = 0xbad0005,
++  NVNGX_RESULT_FAIL = 0xBAD00000,
++  NVNGX_RESULT_FEATURE_NOT_SUPPORTED = 0xBAD00001,
++  NVNGX_RESULT_PLATFORM_ERROR = 0xBAD00002,
++  NVNGX_RESULT_INVALID_PARAMETER = 0xBAD00005,
++  NVNGX_RESULT_NOT_INITIALIZED = 0xBAD0000E,
+ };
+ 
+-#define NVNGX_FAILED(result) (result & NVNGX_RESULT_FAIL) == NVNGX_RESULT_FAIL
++#define NVNGX_FAILED(result) ((((unsigned int)(result)) & 0xFFF00000u) == NVNGX_RESULT_FAIL)
+ 
+ enum NVNGX_FEATURE : unsigned int {
+   NVNGX_FEATURE_SUPERSAMPLING = 1,
+@@ -34,7 +40,12 @@ enum NVNGX_PERFQUALITY: unsigned int {
+   NVNGX_PERFQUALITY_DLAA,
+ };
+ 
+-class NVNGXParameter { // vtable seems to be inconsistent?
++// Declared in MSVC vtable order (MSVC groups overloads and emits them in reverse
++// declaration order). Slots verified from the NGX SDK helpers compiled into
++// NVUnityPlugin.dll (NVSDK_NGX_Parameter_SetVoidPointer=0x00 ... SetULL=0x38,
++// GetVoidPointer=0x40, GetD3d12Resource=0x48, GetD3d11Resource=0x50, GetI=0x58,
++// GetUI=0x60, GetD=0x68, GetF=0x70, GetULL=0x78) and nvngx_dlss.dll 310.4.
++class NVNGXParameter {
+ public:
+   virtual void Set(const char *name, void *value) = 0;
+   virtual void Set(const char *name, ID3D12Resource *value) = 0;
+@@ -47,10 +58,10 @@ public:
+ 
+   virtual NVNGX_RESULT Get(const char *name, void **out) const = 0;
+   virtual NVNGX_RESULT Get(const char *name, ID3D12Resource **out) const = 0;
+-  virtual NVNGX_RESULT Get(const char *name, double *out) const = 0;
+-  virtual NVNGX_RESULT Get(const char *name, unsigned int *out) const = 0;
+-  virtual NVNGX_RESULT Get(const char *name, int *out) const = 0;
+   virtual NVNGX_RESULT Get(const char *name, ID3D11Resource **out) const = 0;
++  virtual NVNGX_RESULT Get(const char *name, int *out) const = 0;
++  virtual NVNGX_RESULT Get(const char *name, unsigned int *out) const = 0;
++  virtual NVNGX_RESULT Get(const char *name, double *out) const = 0;
+   virtual NVNGX_RESULT Get(const char *name, float *out) const = 0;
+   virtual NVNGX_RESULT Get(const char *name, unsigned long long *out) const = 0;
+ 
+diff --git a/src/nvngx/nvngx_feature.hpp b/src/nvngx/nvngx_feature.hpp
+index 05f1fd0..626306f 100644
+--- a/src/nvngx/nvngx_feature.hpp
++++ b/src/nvngx/nvngx_feature.hpp
+@@ -17,6 +17,7 @@ struct DLSSFeature : CommonFeature {
+   int quality;
+   int flag;
+   int enable_output_subrects;
++  bool logged_first_eval = false;
+ };
+ 
+ }
+\ No newline at end of file
+diff --git a/src/nvngx/nvngx_parameter.hpp b/src/nvngx/nvngx_parameter.hpp
+index 93f06c8..0e2d22b 100644
+--- a/src/nvngx/nvngx_parameter.hpp
++++ b/src/nvngx/nvngx_parameter.hpp
+@@ -117,6 +117,35 @@ castable(unsigned int val, unsigned long long *out) {
+   return true;
+ }
+ 
++// Resources set through the generic void* setter (SetVoidPointer) and read back as a typed resource, and vice versa.
++template <>
++inline bool
++castable(void *val, ID3D11Resource **out) {
++  *out = (ID3D11Resource *)val;
++  return true;
++}
++
++template <>
++inline bool
++castable(ID3D11Resource *val, void **out) {
++  *out = (void *)val;
++  return true;
++}
++
++template <>
++inline bool
++castable(void *val, ID3D12Resource **out) {
++  *out = (ID3D12Resource *)val;
++  return true;
++}
++
++template <>
++inline bool
++castable(ID3D12Resource *val, void **out) {
++  *out = (void *)val;
++  return true;
++}
++
+ class ParametersImpl final : public NVNGXParameter {
+ public:
+   virtual void

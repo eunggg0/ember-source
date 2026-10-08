@@ -1,0 +1,45 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 28/74] dlls-dwrite: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/dwrite/opentype.c b/dlls/dwrite/opentype.c
+index 69b8bb5..ee50f3c 100644
+--- a/dlls/dwrite/opentype.c
++++ b/dlls/dwrite/opentype.c
+@@ -3128,20 +3128,22 @@ static unsigned int opentype_get_sbix_formats(IDWriteFontFace5 *fontface)
+                 if (!glyph_data)
+                     continue;
+ 
+-                switch (glyph_data->graphic_type)
++                /* Ember: 크기(strike)마다 실제 이미지가 있는 첫 글자의 형식만 본다. 원본은 모든 크기 × 모든 글자를 읽어,
++                 * 애플 컬러 이모지(크기 여러 개 × 글자 수천, 파일 수백 MB)를 열 때 수만 번 읽고 'flip' 경고를 9720줄 찍었다.
++                 * 로아 FEX 로딩 중 이 스레드가 dwrite 잠금을 몇 분 쥐어 다른 스레드가 60초 대기를 반복했다(실측 2026-09-24).
++                 * 'flip'(다른 글자를 뒤집어 쓰라는 참조)·'dupe'(다른 글자 재사용)는 형식이 아니므로 건너뛴다. */
++                if (glyph_data->graphic_type == MS_PNG__TAG) ret |= DWRITE_GLYPH_IMAGE_FORMATS_PNG;
++                else if (glyph_data->graphic_type == MS_JPG__TAG) ret |= DWRITE_GLYPH_IMAGE_FORMATS_JPEG;
++                else if (glyph_data->graphic_type == MS_TIFF_TAG) ret |= DWRITE_GLYPH_IMAGE_FORMATS_TIFF;
++                else
+                 {
+-                    case MS_PNG__TAG:
+-                        ret |= DWRITE_GLYPH_IMAGE_FORMATS_PNG;
+-                        break;
+-                    case MS_JPG__TAG:
+-                        ret |= DWRITE_GLYPH_IMAGE_FORMATS_JPEG;
+-                        break;
+-                    case MS_TIFF_TAG:
+-                        ret |= DWRITE_GLYPH_IMAGE_FORMATS_TIFF;
+-                        break;
+-                    default:
+-                        FIXME("unexpected bitmap format %s\n", debugstr_fourcc(GET_BE_DWORD(glyph_data->graphic_type)));
++                    static int once;
++                    unsigned int type = glyph_data->graphic_type;   /* 파일 바이트 그대로(원본 비교와 같게) */
++                    if (type != DWRITE_MAKE_OPENTYPE_TAG('f','l','i','p') && type != DWRITE_MAKE_OPENTYPE_TAG('d','u','p','e') && !once++)
++                        FIXME("unexpected bitmap format %s\n", debugstr_fourcc(GET_BE_DWORD(type)));
++                    continue;
+                 }
++                break;
+             }
+         }
+     }

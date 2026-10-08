@@ -1,0 +1,210 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 4/5] FEXCore-include: Ember changes
+
+Base: FEX-Emu/FEX 48d7175 (+ submodules)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/FEXCore/include/FEXCore/Core/CodeCache.h b/FEXCore/include/FEXCore/Core/CodeCache.h
+index 3f34a78..e18b8b1 100644
+--- a/FEXCore/include/FEXCore/Core/CodeCache.h
++++ b/FEXCore/include/FEXCore/Core/CodeCache.h
+@@ -161,6 +161,11 @@ public:
+   // Thread-safely commit any pending data to disk
+   void Flush(size_t Offset);
+ 
++  // Ember(10-01): 프로세스가 끝나기 직전 버퍼에 남은 기록을 쓴다(잠금을 못 잡으면 건너뜀). 파일이 열려 있지 않으면 아무것도 안 함.
++  void EmberFlushPending();
++  // Ember(10-01): 디스크 캐시 적중 때 — 처음 보는 이미지면 이미지 기록(경로·FileId)만 남긴다.
++  void EmberNoteLibrary(const ExecutableFileSectionInfo&);
++
+ private:
+   // Queues data into an internal ring buffer.
+   // Call Flush() to commit the data to disk.
+diff --git a/FEXCore/include/FEXCore/Core/DiskCache.h b/FEXCore/include/FEXCore/Core/DiskCache.h
+index 22cabec..561d1a8 100644
+--- a/FEXCore/include/FEXCore/Core/DiskCache.h
++++ b/FEXCore/include/FEXCore/Core/DiskCache.h
+@@ -5,6 +5,20 @@
+ 
+ #include <cstdint>
+ 
++namespace FEXCore::Context {
++class Context;
++}
++
+ namespace FEXCore::DiskCache {
+ FEX_DEFAULT_VISIBILITY uint16_t GetFormatVersion();
++
++// Ember AOT(10-01): 미리 번역 도구용. 쓰기 큐 비우기, 디스크 캐시 적중·저장 수, 이 프로세스가 쓰는 버킷 경로.
++FEX_DEFAULT_VISIBILITY void EmberAOTFlush(FEXCore::Context::Context* CTX);
++FEX_DEFAULT_VISIBILITY void EmberAOTStats(uint64_t* Hits, uint64_t* Stores);
++FEX_DEFAULT_VISIBILITY const char* EmberAOTBucketPath();
++FEX_DEFAULT_VISIBILITY int64_t EmberAOTPending();
++// 프로세스 종료가 시작됐다(다른 스레드가 곧/이미 죽음): 이후 디스크 캐시 조회·저장을 하지 않는다.
++FEX_DEFAULT_VISIBILITY void EmberSetProcessExiting();
++// Ember 코드 맵(10-01): 이 프로세스가 디스크 캐시에 쓰는 중인가(코드 맵을 버킷 폴더에 남길지).
++FEX_DEFAULT_VISIBILITY bool EmberDiskCacheWriting(FEXCore::Context::Context* CTX);
+ } // namespace FEXCore::DiskCache
+diff --git a/FEXCore/include/FEXCore/Core/GuestBase.h b/FEXCore/include/FEXCore/Core/GuestBase.h
+new file mode 100644
+index 0000000..ed706dd
+--- /dev/null
++++ b/FEXCore/include/FEXCore/Core/GuestBase.h
+@@ -0,0 +1,29 @@
++// SPDX-License-Identifier: MIT
++// fex32: 32비트 게스트 주소공간을 호스트의 4GB 정렬 창 [GuestBase, GuestBase+4G) 에 둔다.
++// macOS arm64 는 4GB 아래를 매핑할 수 없어서다. 0 이면 꺼짐(게스트 주소 = 호스트 주소).
++#pragma once
++#include <cstdint>
++
++namespace FEXCore::Core {
++extern uint64_t GuestBase;
++
++// 게스트 32비트 주소 → 호스트 포인터 값
++static inline uint64_t GuestToHost(uint64_t Addr) {
++  return GuestBase ? (GuestBase | (Addr & 0xFFFF'FFFFULL)) : Addr;
++}
++
++// 호스트(창 안) → 게스트 32비트 값
++static inline uint64_t HostToGuest(uint64_t Addr) {
++  return GuestBase ? (Addr & 0xFFFF'FFFFULL) : Addr;
++}
++
++// 어느 쪽이든 받아 호스트로 맞춘다(4GB 아래 값은 게스트 주소로 본다)
++static inline uint64_t NormalizeToHost(uint64_t Addr) {
++  return (GuestBase && Addr < (1ULL << 32)) ? (GuestBase | Addr) : Addr;
++}
++
++// 호스트 주소가 창 안인가
++static inline bool IsInGuestWindow(uint64_t Addr) {
++  return GuestBase && (Addr & ~0xFFFF'FFFFULL) == GuestBase;
++}
++} // namespace FEXCore::Core
+diff --git a/FEXCore/include/FEXCore/HLE/SyscallHandler.h b/FEXCore/include/FEXCore/HLE/SyscallHandler.h
+index 0ba0218..7c27cbc 100644
+--- a/FEXCore/include/FEXCore/HLE/SyscallHandler.h
++++ b/FEXCore/include/FEXCore/HLE/SyscallHandler.h
+@@ -21,6 +21,8 @@ struct ExecutableRangeInfo {
+   uint64_t Base;
+   uint64_t Size;
+   bool Writable;
++  // 쓰기 트랩을 포기한(너무 자주 폴트한) 페이지: 블록마다 코드 바이트를 검증해 SMC 를 잡는다
++  bool FullSMC {};
+ };
+ 
+ class SyscallHandler;
+diff --git a/FEXCore/include/FEXCore/Utils/AllocatorHooks.h b/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
+index c4cadf4..64dcfe4 100644
+--- a/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
++++ b/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
+@@ -37,8 +37,10 @@ FEX_DEFAULT_VISIBILITY void SetupHooks(size_t PageSize);
+ #else
+ using VirtualNamePtr = void (*)(const char*, const void*, size_t);
+ using VirtualTHPPtr = void (*)(const void*, size_t, THPControl);
++using JITWriteProtectPtr = void (*)(bool);
+ struct HookPtrs {
+   VirtualNamePtr VirtualName;
++  JITWriteProtectPtr JITWriteProtect;
+   VirtualTHPPtr VirtualTHPControl;
+ };
+ FEX_DEFAULT_VISIBILITY void SetupHooks(size_t PageSize, HookPtrs Ptrs);
+@@ -46,7 +48,30 @@ FEX_DEFAULT_VISIBILITY void SetupHooks(size_t PageSize, HookPtrs Ptrs);
+ FEX_DEFAULT_VISIBILITY void ClearHooks();
+ 
+ #ifdef _WIN32
++// Ember: FEX 가 자기 메모리(코드 버퍼 등)를 잡고 놓을 때 ARM64EC ntdll 래퍼가 FEX 자신의 Notify* 콜백을 되부른다.
++// 코드 버퍼를 바꿔 옛 것을 해제하는 순간은 번역 잠금(CodeInvalidationMutex)을 쥔 채라, 콜백의 무효화가 같은 잠금을
++// 다시 잡으려다 스스로 교착했다(.NET Mono·큰 게임, 2026-09-26 lldb 로 확인). 게스트 코드가 아니니 통지를 끈다.
++FEX_DEFAULT_VISIBILITY extern bool (*SuppressMemoryNotifyHook)(bool);
++// Ember perfpush: VirtualDontNeed(Recommit) 를 Wine 의 VirtualFree(DECOMMIT)+VirtualAlloc(COMMIT) 대신
++// 호스트 mmap(MAP_FIXED, RW, 익명) 한 번으로 — 같은 보호 그대로 0 으로 바뀌고, Wine 의 전역 virtual_mutex·페이지 표 갱신·
++// 비커밋 틈(다른 스레드가 그 사이 접근하면 AV)이 없다. SMC 무효화마다 모든 스레드의 4MB 콜-리턴 스택에 불린다.
++// 훅이 false 를 돌려주면(옛 unixlib 등) 원래 길로. EmberCallRetMode: 1=빠른 길(기본), 0=원래 길(EMBER_FEX_CALLRET=0).
++FEX_DEFAULT_VISIBILITY extern int EmberCallRetMode;
++FEX_DEFAULT_VISIBILITY extern bool (*ZeroRWPagesHook)(void*, size_t);
++struct ScopedSuppressMemoryNotify {
++  bool Prev;
++  ScopedSuppressMemoryNotify() {
++    Prev = SuppressMemoryNotifyHook ? SuppressMemoryNotifyHook(true) : false;
++  }
++  ~ScopedSuppressMemoryNotify() {
++    if (SuppressMemoryNotifyHook) {
++      SuppressMemoryNotifyHook(Prev);
++    }
++  }
++};
++
+ inline void* VirtualAlloc(void* Base, size_t Size, bool Execute = false, bool Commit = true) {
++  ScopedSuppressMemoryNotify Suppress;
+   // Allocate top-down to avoid polluting the lower VA space, as even on 64-bit some programs (i.e. LuaJIT) require allocations below 4GB.
+   DWORD Flags = (Commit ? MEM_COMMIT : 0) | MEM_RESERVE | MEM_TOP_DOWN;
+ #ifdef ARCHITECTURE_arm64ec
+@@ -67,10 +92,16 @@ inline void* VirtualAlloc(size_t Size, bool Execute = false, bool Commit = true)
+ }
+ 
+ inline void VirtualFree(void* Ptr, size_t Size) {
++  ScopedSuppressMemoryNotify Suppress;
+   ::VirtualFree(Ptr, 0, MEM_RELEASE);
+ }
+ 
+ inline void VirtualDontNeed(void* Ptr, size_t Size, bool Recommit = true) {
++  if (Recommit && EmberCallRetMode == 1 && ZeroRWPagesHook && ((reinterpret_cast<uintptr_t>(Ptr) | Size) & 0x3FFF) == 0 &&
++      ZeroRWPagesHook(Ptr, Size)) {
++    return;
++  }
++  ScopedSuppressMemoryNotify Suppress;
+   // Zero the page-aligned region, preserving permissions.
+   MEMORY_BASIC_INFORMATION Info;
+   ::VirtualQuery(Ptr, &Info, sizeof(Info));
+@@ -81,6 +112,7 @@ inline void VirtualDontNeed(void* Ptr, size_t Size, bool Recommit = true) {
+ }
+ 
+ inline bool VirtualProtect(void* Ptr, size_t Size, ProtectOptions options) {
++  ScopedSuppressMemoryNotify Suppress;
+   DWORD prot {PAGE_NOACCESS};
+ 
+   if (options == ProtectOptions::None) {
+@@ -103,6 +135,15 @@ inline bool VirtualProtect(void* Ptr, size_t Size, ProtectOptions options) {
+ 
+ FEX_DEFAULT_VISIBILITY extern VirtualNamePtr VirtualName;
+ FEX_DEFAULT_VISIBILITY extern VirtualTHPPtr VirtualTHPControl;
++FEX_DEFAULT_VISIBILITY extern JITWriteProtectPtr JITWriteProtect;
++
++// macOS(Wine) 의 MAP_JIT 코드 버퍼는 스레드별로 "쓰기" 또는 "실행" 한쪽만 열린다.
++// 코드를 쓰는 동안만 쓰기로 돌리고, 끝나면 실행으로 되돌린다. 다른 플랫폼에선 빈 동작.
++struct ScopedJITWrite {
++  ScopedJITWrite() { if (JITWriteProtect) JITWriteProtect(true); }
++  ~ScopedJITWrite() { if (JITWriteProtect) JITWriteProtect(false); }
++  ScopedJITWrite(const ScopedJITWrite&) = delete;
++};
+ #else
+ using MMAP_Hook = void* (*)(void*, size_t, int, int, int, off_t);
+ using MUNMAP_Hook = int (*)(void*, size_t);
+diff --git a/FEXCore/include/FEXCore/Utils/LongJump.h b/FEXCore/include/FEXCore/Utils/LongJump.h
+index df8e4b7..6d1cbd3 100644
+--- a/FEXCore/include/FEXCore/Utils/LongJump.h
++++ b/FEXCore/include/FEXCore/Utils/LongJump.h
+@@ -33,7 +33,10 @@ struct JumpBuf {
+ };
+ #endif
+ 
+-[[nodiscard]] FEX_DEFAULT_VISIBILITY uint64_t SetJump(JumpBuf& Buffer);
++// Ember cefsmc: setjmp 처럼 두 번 돌아온다고 컴파일러에 알린다. 이게 없으면 SetJump 뒤에 쓰는 지역값(스택 칸)을
++// 컴파일러가 다른 값에 재사용해, LongJump 로 돌아왔을 때 쓰레기를 읽는다(JIT 재시작 때 Relocations.resize(쓰레기) →
++// 128TB 할당 실패 → FEX 안에서 AV. 로아 CEF 렌더러가 시작하자마자 죽던 원인, 2026-10-01).
++[[nodiscard]] FEX_DEFAULT_VISIBILITY __attribute__((returns_twice)) uint64_t SetJump(JumpBuf& Buffer);
+ [[noreturn]] FEX_DEFAULT_VISIBILITY void LongJump(const JumpBuf& Buffer, uint64_t Value);
+ FEX_DEFAULT_VISIBILITY void ManuallyLoadJumpBuf(const JumpBuf& Buffer, uint64_t Value, uint64_t* GPRs, __uint128_t* FPRs, uint64_t* PC);
+ } // namespace FEXCore::UncheckedLongJump
+diff --git a/FEXCore/include/FEXCore/Utils/TypeDefines.h b/FEXCore/include/FEXCore/Utils/TypeDefines.h
+index ec03ac6..59cdc7c 100644
+--- a/FEXCore/include/FEXCore/Utils/TypeDefines.h
++++ b/FEXCore/include/FEXCore/Utils/TypeDefines.h
+@@ -9,4 +9,7 @@ namespace FEXCore::Utils {
+ constexpr size_t FEX_PAGE_SIZE = 4096;
+ constexpr size_t FEX_PAGE_SHIFT = 12;
+ constexpr size_t FEX_PAGE_MASK = ~(FEX_PAGE_SIZE - 1);
++// JIT 코드버퍼 끝 가드 크기. 호스트 페이지가 16K 인 macOS 에서 4K 가드는 앞 코드와 같은 페이지에
++// 묶여 보호가 안 된다. 할당 단위(64K)로 잡아 어느 호스트 페이지 크기에서도 온전히 떼어낼 수 있게 한다.
++constexpr size_t FEX_JIT_GUARD_SIZE = 64 * 1024;
+ } // namespace FEXCore::Utils

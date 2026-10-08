@@ -1,0 +1,7 @@
+prefix=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr
+includedir=${prefix}/include
+Name: zlib
+Description: macOS system zlib
+Version: 1.2.12
+Libs: -lz
+Cflags:

@@ -1,0 +1,52 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 26/74] dlls-dinput: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/dinput/dinput.c b/dlls/dinput/dinput.c
+index f851e17..c9c908c 100644
+--- a/dlls/dinput/dinput.c
++++ b/dlls/dinput/dinput.c
+@@ -280,8 +280,15 @@ static HRESULT WINAPI dinput7_CreateDeviceEx( IDirectInput7W *iface, const GUID
+     if (!guid) return E_POINTER;
+     if (!impl->dwVersion) return DIERR_NOTINITIALIZED;
+ 
+-    if (IsEqualGUID( &GUID_SysKeyboard, guid )) hr = keyboard_create_device( impl, guid, &device );
+-    else if (IsEqualGUID( &GUID_SysMouse, guid )) hr = mouse_create_device( impl, guid, &device );
++    /* Ember: 에뮬레이션 키보드·마우스 GUID(SysKeyboardEm/Em2·SysMouseEm/Em2)도 — Wine 11.18. 옛 DX5~7 게임이 쓴다. */
++    if (IsEqualGUID( &GUID_SysKeyboard, guid ) ||
++        IsEqualGUID( &GUID_SysKeyboardEm, guid ) ||
++        IsEqualGUID( &GUID_SysKeyboardEm2, guid ))
++        hr = keyboard_create_device( impl, guid, &device );
++    else if (IsEqualGUID( &GUID_SysMouse, guid ) ||
++             IsEqualGUID( &GUID_SysMouseEm, guid ) ||
++             IsEqualGUID( &GUID_SysMouseEm2, guid ))
++        hr = mouse_create_device( impl, guid, &device );
+     else hr = hid_joystick_create_device( impl, guid, &device );
+ 
+     if (FAILED(hr)) return hr;
+diff --git a/dlls/dinput/keyboard.c b/dlls/dinput/keyboard.c
+index 8ec9dd4..5f3710e 100644
+--- a/dlls/dinput/keyboard.c
++++ b/dlls/dinput/keyboard.c
+@@ -196,7 +196,6 @@ HRESULT keyboard_create_device( struct dinput *dinput, const GUID *guid, IDirect
+     TRACE( "dinput %p, guid %s, out %p.\n", dinput, debugstr_guid( guid ), out );
+ 
+     *out = NULL;
+-    if (!IsEqualGUID( &GUID_SysKeyboard, guid )) return DIERR_DEVICENOTREG;
+ 
+     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+     dinput_device_init( &impl->base, &keyboard_vtbl, guid, dinput );
+diff --git a/dlls/dinput/mouse.c b/dlls/dinput/mouse.c
+index eec0229..5c0bdbc 100644
+--- a/dlls/dinput/mouse.c
++++ b/dlls/dinput/mouse.c
+@@ -519,7 +519,6 @@ HRESULT mouse_create_device( struct dinput *dinput, const GUID *guid, IDirectInp
+     TRACE( "dinput %p, guid %s, out %p\n", dinput, debugstr_guid( guid ), out );
+ 
+     *out = NULL;
+-    if (!IsEqualGUID( &GUID_SysMouse, guid )) return DIERR_DEVICENOTREG;
+ 
+     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+     dinput_device_init( &impl->base, &mouse_vtbl, guid, dinput );

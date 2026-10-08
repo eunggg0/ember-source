@@ -1,0 +1,4 @@
+# upstream archives are release assets (scripts/fetch-upstream.sh), not stored in git
+upstream/*/
+*.part
+.DS_Store

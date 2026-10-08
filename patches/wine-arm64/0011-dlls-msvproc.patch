@@ -1,0 +1,34 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 11/34] dlls-msvproc: Ember changes
+
+Base: wine-11.18.tar.xz
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/msvproc/video_processor.c b/dlls/msvproc/video_processor.c
+index f2ad3e0..0be5b03 100644
+--- a/dlls/msvproc/video_processor.c
++++ b/dlls/msvproc/video_processor.c
+@@ -32,6 +32,7 @@
+ #include "mftransform.h"
+ 
+ #include <libavutil/avutil.h>
++#include <libavutil/cpu.h>
+ #include <libavutil/imgutils.h>
+ #include <libavutil/opt.h>
+ #include <libswscale/swscale.h>
+@@ -556,6 +557,15 @@ static HRESULT video_processor_init(struct video_processor *impl)
+         goto failed;
+     video_frame_init_aperture(&impl->output_frame, impl->input_format);
+ 
++#ifdef __arm64ec__
++    /* Ember(10-03 compat2): ARM64EC 용 swscale NEON(libs/ffmpeg/libswscale/arm64ec 의 .S)이 NV12→RGB32 에서 한 칸 걸러
++     * 파랑을 잃어 세로 줄무늬가 생긴다(발헤임 FEX 인트로, mfshared 실측: 이웃 화소 차 25.2 → C 경로 3.3, 기준 ffmpeg 3.3).
++     * 이 dll 안의 ffmpeg 정적 사본만 C 경로로. 시험용 EMBER_SWS_CPU=1 이면 NEON 을 그대로 쓴다. */
++    {
++        char buf[8];
++        if (!GetEnvironmentVariableA("EMBER_SWS_CPU", buf, sizeof(buf)) || buf[0] != '1') av_force_cpu_flags(0);
++    }
++#endif
+     av_opt_set(impl->context, "sws_flags", "neighbor", 0);
+     av_opt_set_int(impl->context, "threads", 0, 0);
+     av_opt_set_int(impl->context, "srcw", impl->input_frame.width, 0);

@@ -1,0 +1,30 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 1/74] dlls-advapi32: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/advapi32/advapi.c b/dlls/advapi32/advapi.c
+index 1d36dd4..19561ad 100644
+--- a/dlls/advapi32/advapi.c
++++ b/dlls/advapi32/advapi.c
+@@ -49,7 +49,8 @@ BOOL WINAPI GetUserNameA( LPSTR name, LPDWORD size )
+     BOOL ret;
+ 
+     /* CrossOver Hack 12735: Use a consistent username */
+-    if (!getenv( "CX_REPORT_REAL_USERNAME" ))
++    /* Ember: 늘 실제 이름을 쓴다. 서비스처럼 환경을 물려받지 않는 프로세스도 같은 이름을 봐야 프로필이 갈라지지 않는다. */
++    if (0)
+     {
+         len = sizeof("crossover");
+         if ((ret = (len <= *size))) strcpy( name, "crossover" );
+@@ -74,7 +75,8 @@ BOOL WINAPI GetUserNameW( LPWSTR name, LPDWORD size )
+     BOOL ret;
+ 
+     /* CrossOver Hack 12735: Use a consistent username */
+-    if (!getenv( "CX_REPORT_REAL_USERNAME" ))
++    /* Ember: 늘 실제 이름을 쓴다. 서비스처럼 환경을 물려받지 않는 프로세스도 같은 이름을 봐야 프로필이 갈라지지 않는다. */
++    if (0)
+     {
+         len = ARRAY_SIZE( L"crossover" );
+         if ((ret = (len <= *size))) wcscpy( name, L"crossover" );

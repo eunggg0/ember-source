@@ -1,0 +1,68 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 56/74] dlls-wbemprox: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/wbemprox/builtin.c b/dlls/wbemprox/builtin.c
+index de3c060..312221b 100644
+--- a/dlls/wbemprox/builtin.c
++++ b/dlls/wbemprox/builtin.c
+@@ -526,6 +526,7 @@ static const struct column col_systemenclosure[] =
+     { L"LockPresent",  CIM_BOOLEAN },
+     { L"Manufacturer", CIM_STRING|COL_FLAG_DYNAMIC },
+     { L"Name",         CIM_STRING },
++    { L"SerialNumber", CIM_STRING|COL_FLAG_DYNAMIC },  /* Ember: 11.18 */
+     { L"Tag",          CIM_STRING },
+ };
+ static const struct column col_systemsecurity[] =
+@@ -1129,6 +1130,7 @@ struct record_systemenclosure
+     int                 lockpresent;
+     const WCHAR        *manufacturer;
+     const WCHAR        *name;
++    const WCHAR        *serial_number;
+     const WCHAR        *tag;
+ };
+ struct record_videocontroller
+@@ -4588,6 +4590,13 @@ done:
+     return ret;
+ }
+ 
++static WCHAR *get_systemenclosure_serialnumber( const char *buf, UINT len )
++{
++    WCHAR *ret = get_smbios_string( SMBIOS_TYPE_CHASSIS, 0, offsetof(struct smbios_chassis, serial), buf, len );
++    if (!ret) return wcsdup( L"0" );
++    return ret;
++}
++
+ static enum fill_status fill_systemenclosure( struct table *table, const struct expr *cond )
+ {
+     struct record_systemenclosure *rec;
+@@ -4608,6 +4617,7 @@ static enum fill_status fill_systemenclosure( struct table *table, const struct
+     rec->lockpresent  = get_systemenclosure_lockpresent( buf, len );
+     rec->manufacturer = get_systemenclosure_manufacturer( buf, len );
+     rec->name         = L"System Enclosure";
++    rec->serial_number = get_systemenclosure_serialnumber( buf, len );
+     rec->tag          = L"System Enclosure 0";
+     if (!match_row( table, row, cond, &status )) free_row_values( table, row );
+     else row++;
+@@ -5076,6 +5086,7 @@ builtin_namespaces[WBEMPROX_NAMESPACE_LAST] =
+ {
+     {L"cimv2", cimv2_builtin_classes, ARRAY_SIZE(cimv2_builtin_classes)},
+     {L"Microsoft\\Windows\\Storage", win_storage_builtin_classes, ARRAY_SIZE(win_storage_builtin_classes)},
++    {L"SecurityCenter2", NULL, 0},  /* Ember: 11.18 — 백신 정보를 묻는 게임·런처가 연결에 실패하지 않게(빈 이름공간) */
+     {L"StandardCimv2", NULL, 0},
+     {L"wmi", wmi_builtin_classes, ARRAY_SIZE(wmi_builtin_classes)},
+ };
+diff --git a/dlls/wbemprox/wbemprox_private.h b/dlls/wbemprox/wbemprox_private.h
+index b8d2cb5..279e5f6 100644
+--- a/dlls/wbemprox/wbemprox_private.h
++++ b/dlls/wbemprox/wbemprox_private.h
+@@ -23,6 +23,7 @@ enum wbm_namespace
+ {
+     WBEMPROX_NAMESPACE_CIMV2,
+     WBEMPROX_NAMESPACE_MS_WINDOWS_STORAGE,
++    WBEMPROX_NAMESPACE_SECURITYCENTER2,  /* Ember: 11.18 */
+     WBEMPROX_NAMESPACE_STANDARDCIMV2,
+     WBEMPROX_NAMESPACE_WMI,
+     WBEMPROX_NAMESPACE_LAST,

@@ -1,0 +1,113 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 26/34] dlls-wintypes: Ember changes
+
+Base: wine-11.18.tar.xz
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/wintypes/main.c b/dlls/wintypes/main.c
+index d8aa8b6..ec6a7bf 100644
+--- a/dlls/wintypes/main.c
++++ b/dlls/wintypes/main.c
+@@ -150,7 +150,11 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsTypePresent(
+     if (!type_name)
+         return E_INVALIDARG;
+ 
+-    return E_NOTIMPL;
++    /* Ember: 모르는 형식·멤버는 "없음"으로 답한다(실제 Windows 와 같다). E_NOTIMPL 을 돌려주면 C++/WinRT 가 예외로 던져
++     * 게임이 시작하자마자 비상 종료(c0000409)했다 — 2026-09-25 스텔라 블레이드 체험판(Windows.Graphics.Capture 확인). */
++    if (!value) return E_POINTER;
++    *value = FALSE;
++    return S_OK;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE api_information_statics_IsMethodPresent(
+@@ -177,7 +181,11 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsMethodPresentWithArit
+     if (!type_name)
+         return E_INVALIDARG;
+ 
+-    return E_NOTIMPL;
++    /* Ember: 모르는 형식·멤버는 "없음"으로 답한다(실제 Windows 와 같다). E_NOTIMPL 을 돌려주면 C++/WinRT 가 예외로 던져
++     * 게임이 시작하자마자 비상 종료(c0000409)했다 — 2026-09-25 스텔라 블레이드 체험판(Windows.Graphics.Capture 확인). */
++    if (!value) return E_POINTER;
++    *value = FALSE;
++    return S_OK;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE api_information_statics_IsEventPresent(
+@@ -189,7 +197,11 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsEventPresent(
+     if (!type_name)
+         return E_INVALIDARG;
+ 
+-    return E_NOTIMPL;
++    /* Ember: 모르는 형식·멤버는 "없음"으로 답한다(실제 Windows 와 같다). E_NOTIMPL 을 돌려주면 C++/WinRT 가 예외로 던져
++     * 게임이 시작하자마자 비상 종료(c0000409)했다 — 2026-09-25 스텔라 블레이드 체험판(Windows.Graphics.Capture 확인). */
++    if (!value) return E_POINTER;
++    *value = FALSE;
++    return S_OK;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE api_information_statics_IsPropertyPresent(
+@@ -201,7 +213,11 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsPropertyPresent(
+     if (!type_name)
+         return E_INVALIDARG;
+ 
+-    return E_NOTIMPL;
++    /* Ember: 모르는 형식·멤버는 "없음"으로 답한다(실제 Windows 와 같다). E_NOTIMPL 을 돌려주면 C++/WinRT 가 예외로 던져
++     * 게임이 시작하자마자 비상 종료(c0000409)했다 — 2026-09-25 스텔라 블레이드 체험판(Windows.Graphics.Capture 확인). */
++    if (!value) return E_POINTER;
++    *value = FALSE;
++    return S_OK;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE api_information_statics_IsReadOnlyPropertyPresent(
+@@ -214,7 +230,11 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsReadOnlyPropertyPrese
+     if (!type_name)
+         return E_INVALIDARG;
+ 
+-    return E_NOTIMPL;
++    /* Ember: 모르는 형식·멤버는 "없음"으로 답한다(실제 Windows 와 같다). E_NOTIMPL 을 돌려주면 C++/WinRT 가 예외로 던져
++     * 게임이 시작하자마자 비상 종료(c0000409)했다 — 2026-09-25 스텔라 블레이드 체험판(Windows.Graphics.Capture 확인). */
++    if (!value) return E_POINTER;
++    *value = FALSE;
++    return S_OK;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE api_information_statics_IsWriteablePropertyPresent(
+@@ -226,7 +246,11 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsWriteablePropertyPres
+     if (!type_name)
+         return E_INVALIDARG;
+ 
+-    return E_NOTIMPL;
++    /* Ember: 모르는 형식·멤버는 "없음"으로 답한다(실제 Windows 와 같다). E_NOTIMPL 을 돌려주면 C++/WinRT 가 예외로 던져
++     * 게임이 시작하자마자 비상 종료(c0000409)했다 — 2026-09-25 스텔라 블레이드 체험판(Windows.Graphics.Capture 확인). */
++    if (!value) return E_POINTER;
++    *value = FALSE;
++    return S_OK;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE api_information_statics_IsEnumNamedValuePresent(
+@@ -238,7 +262,11 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsEnumNamedValuePresent
+     if (!enum_type_name)
+         return E_INVALIDARG;
+ 
+-    return E_NOTIMPL;
++    /* Ember: 모르는 형식·멤버는 "없음"으로 답한다(실제 Windows 와 같다). E_NOTIMPL 을 돌려주면 C++/WinRT 가 예외로 던져
++     * 게임이 시작하자마자 비상 종료(c0000409)했다 — 2026-09-25 스텔라 블레이드 체험판(Windows.Graphics.Capture 확인). */
++    if (!value) return E_POINTER;
++    *value = FALSE;
++    return S_OK;
+ }
+ 
+ static HRESULT STDMETHODCALLTYPE api_information_statics_IsApiContractPresentByMajor(
+@@ -264,7 +292,10 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsApiContractPresentByM
+     if (!contract_name)
+         return E_INVALIDARG;
+ 
+-    return E_NOTIMPL;
++    if (!value) return E_POINTER;
++    /* Ember: 부 버전은 보지 않고 주 버전 기준으로 답한다(E_NOTIMPL 은 C++/WinRT 예외 → 비상 종료). */
++    *value = is_api_contract_present( contract_name, major_version );
++    return S_OK;
+ }
+ 
+ static const struct IApiInformationStaticsVtbl api_information_statics_vtbl =

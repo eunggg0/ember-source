@@ -1,0 +1,49 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 37/74] dlls-mfplat: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/mfplat/sample.c b/dlls/mfplat/sample.c
+index 4d75924..0232a67 100644
+--- a/dlls/mfplat/sample.c
++++ b/dlls/mfplat/sample.c
+@@ -1310,6 +1310,38 @@ static HRESULT sample_allocator_get_surface_service(struct sample_allocator *all
+         }
+     }
+ 
++    if (service->d3d11_device)
++    {
++        UINT format_support = 0;
++        HRESULT format_hr;
++
++        format_hr = allocator->frame_desc.dxgi_format == DXGI_FORMAT_UNKNOWN ? E_INVALIDARG :
++                ID3D11Device_CheckFormatSupport(service->d3d11_device,
++                        allocator->frame_desc.dxgi_format, &format_support);
++        /* CheckFormatSupport also documents E_FAIL for a nonexistent format. */
++        if (FAILED(format_hr) && format_hr != E_INVALIDARG &&
++                format_hr != E_FAIL && format_hr != DXGI_ERROR_UNSUPPORTED)
++        {
++            /* A lost device or resource failure is not evidence that the
++             * negotiated video format is unsupported. Preserve the original
++             * failure instead of silently changing the allocator's buffers. */
++            WARN("Failed to query DXGI video format %#x, hr %#lx.\n",
++                    allocator->frame_desc.dxgi_format, format_hr);
++            ID3D11Device_Release(service->d3d11_device);
++            IMFDXGIDeviceManager_CloseDeviceHandle(allocator->dxgi_device_manager,
++                    service->hdevice);
++            hr = format_hr;
++        }
++        else if (FAILED(format_hr) ||
++                !(format_support & D3D11_FORMAT_SUPPORT_TEXTURE2D))
++        {
++            WARN("DXGI format %#x is unavailable, using a system-memory video buffer.\n",
++                    allocator->frame_desc.dxgi_format);
++            ID3D11Device_Release(service->d3d11_device);
++            service->d3d11_device = NULL;
++        }
++    }
++
+     if (FAILED(hr))
+         memset(service, 0, sizeof(*service));
+ 

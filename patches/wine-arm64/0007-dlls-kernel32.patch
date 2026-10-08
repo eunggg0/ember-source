@@ -1,0 +1,40 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 7/34] dlls-kernel32: Ember changes
+
+Base: wine-11.18.tar.xz
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/kernel32/process.c b/dlls/kernel32/process.c
+index 9bbb18d..a616428 100644
+--- a/dlls/kernel32/process.c
++++ b/dlls/kernel32/process.c
+@@ -36,10 +36,11 @@
+ #include "ddk/wdm.h"
+ #include "wine/asm.h"
+ #include "wine/debug.h"
++#include "wine/usdaddr.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(process);
+ 
+-static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
++static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)(ULONG_PTR)WINE_USD_ADDR;
+ 
+ typedef struct
+ {
+diff --git a/dlls/kernel32/sync.c b/dlls/kernel32/sync.c
+index 5b2a848..614f2e4 100644
+--- a/dlls/kernel32/sync.c
++++ b/dlls/kernel32/sync.c
+@@ -39,10 +39,11 @@
+ #include "kernel_private.h"
+ 
+ #include "wine/debug.h"
++#include "wine/usdaddr.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(sync);
+ 
+-static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
++static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)(ULONG_PTR)WINE_USD_ADDR;
+ 
+ 
+ static void get_create_object_attributes( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *nameW,

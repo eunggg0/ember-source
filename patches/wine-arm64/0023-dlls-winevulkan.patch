@@ -1,0 +1,21 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 23/34] dlls-winevulkan: Ember changes
+
+Base: wine-11.18.tar.xz
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/winevulkan/vulkan_loader.h b/dlls/winevulkan/vulkan_loader.h
+index 9b05806..b558ae0 100644
+--- a/dlls/winevulkan/vulkan_loader.h
++++ b/dlls/winevulkan/vulkan_loader.h
+@@ -46,6 +46,10 @@ struct vk_command_pool
+ 
+ static inline struct vk_command_pool *command_pool_from_handle(VkCommandPool handle)
+ {
++#if defined(WINE_UNIX_LIB) && defined(WINE_WOW64_REBASE)
++    /* fex32b: 32비트 쪽 명령 풀은 64비트 핸들 칸에 든 게스트 주소다 — 게스트 창으로(64비트 프로세스는 그대로) */
++    if (handle && handle < 0x100000000ull) return (struct vk_command_pool *)wine_wow64_g2h( (unsigned int)handle );
++#endif
+     return (struct vk_command_pool *)(uintptr_t)handle;
+ }
+ 

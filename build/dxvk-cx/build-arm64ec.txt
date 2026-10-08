@@ -1,0 +1,16 @@
+# Ember: FEX(ARM64EC) 용 DXVK — x64 게임이 FEX 로 도는 프로세스에 네이티브로 올라간다(번역 없음)
+[binaries]
+c = 'arm64ec-w64-mingw32-gcc'
+cpp = 'arm64ec-w64-mingw32-g++'
+ar = 'arm64ec-w64-mingw32-ar'
+strip = 'arm64ec-w64-mingw32-strip'
+windres = 'arm64ec-w64-mingw32-windres'
+
+[properties]
+needs_exe_wrapper = true
+
+[host_machine]
+system = 'windows'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'

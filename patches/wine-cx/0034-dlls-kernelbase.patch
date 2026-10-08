@@ -1,0 +1,459 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 34/74] dlls-kernelbase: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/kernelbase/console.c b/dlls/kernelbase/console.c
+index 2b7f7ba..026ec1b 100644
+--- a/dlls/kernelbase/console.c
++++ b/dlls/kernelbase/console.c
+@@ -2408,3 +2408,41 @@ void init_console( void )
+         }
+     }
+ }
++
++
++/* Ember: ReadConsoleInputExA/W(Wine 11.18 에서 들어온 API). CX 에는 스텁이라 부르면 튕겼다.
++ * 콘솔 드라이버를 바꾸지 않고 기존 Peek/Read 로: NOREMOVE → Peek, NOWAIT 이고 쌓인 입력이 없으면 0개로 즉시 돌아온다. */
++#define EMBER_CONSOLE_READ_NOREMOVE 0x0001
++#define EMBER_CONSOLE_READ_NOWAIT   0x0002
++
++BOOL WINAPI ReadConsoleInputExW( HANDLE handle, INPUT_RECORD *buffer, DWORD length, DWORD *count, WORD flags )
++{
++    if (flags & EMBER_CONSOLE_READ_NOREMOVE) return PeekConsoleInputW( handle, buffer, length, count );
++    if (flags & EMBER_CONSOLE_READ_NOWAIT)
++    {
++        DWORD pending = 0;
++        if (!GetNumberOfConsoleInputEvents( handle, &pending )) return FALSE;
++        if (!pending)
++        {
++            if (count) *count = 0;
++            return TRUE;
++        }
++    }
++    return ReadConsoleInputW( handle, buffer, length, count );
++}
++
++BOOL WINAPI ReadConsoleInputExA( HANDLE handle, INPUT_RECORD *buffer, DWORD length, DWORD *count, WORD flags )
++{
++    if (flags & EMBER_CONSOLE_READ_NOREMOVE) return PeekConsoleInputA( handle, buffer, length, count );
++    if (flags & EMBER_CONSOLE_READ_NOWAIT)
++    {
++        DWORD pending = 0;
++        if (!GetNumberOfConsoleInputEvents( handle, &pending )) return FALSE;
++        if (!pending)
++        {
++            if (count) *count = 0;
++            return TRUE;
++        }
++    }
++    return ReadConsoleInputA( handle, buffer, length, count );
++}
+diff --git a/dlls/kernelbase/debug.c b/dlls/kernelbase/debug.c
+index 3396deb..7e1f97a 100644
+--- a/dlls/kernelbase/debug.c
++++ b/dlls/kernelbase/debug.c
+@@ -458,6 +458,46 @@ LPTOP_LEVEL_EXCEPTION_FILTER WINAPI DECLSPEC_HOTPATCH SetUnhandledExceptionFilte
+ }
+ 
+ 
++/* Ember: 예외가 난 모듈 이름(" in d3d11.dll"). 튕김 원인 줄에 붙인다. */
++static void ember_crash_module( const EXCEPTION_POINTERS *ptr, char *out, int size )
++{
++    void *base = NULL;
++    char path[MAX_PATH], *name;
++
++    out[0] = 0;
++    if (!RtlPcToFileHeader( ptr->ExceptionRecord->ExceptionAddress, &base ) || !base) return;
++    if (!GetModuleFileNameA( base, path, sizeof(path) )) return;
++    name = strrchr( path, '\\' );
++    snprintf( out, size, " in %s", name ? name + 1 : path );
++}
++
++/* Ember: 디버거(AeDebug: winedbg 미니덤프)를 띄우지 않을 실행 파일인가. EMBER_NODEBUG_EXE="a.exe;b.exe"(이름만, 대소문자 무시).
++ * 런처가 스스로 다시 띄우는 도우미(스팀 steamwebhelper.exe)가 대상이다. 덤프를 쓰는 동안(로제타 2.8초·FEX 3.8초) 죽은 프로세스가
++ * 남아 스팀 창이 멈춰 있다가 그만큼 늦게 다시 떴고, FEX 에서는 게임 실행 단계(ShowInterstitials)가 스팀 창을 기다리며 같이 늦었다
++ * (2026-10-02 startup 측정). 덤프는 쓰이지 않는 알려진 튕김이라 바로 끝내는 쪽이 낫다. */
++static BOOL ember_nodebug_exe(void)
++{
++    WCHAR list[512], *p, *tok, *next;
++    const UNICODE_STRING *img = &NtCurrentTeb()->Peb->ProcessParameters->ImagePathName;
++    const WCHAR *name;
++    DWORD n, i, len;
++
++    n = GetEnvironmentVariableW( L"EMBER_NODEBUG_EXE", list, ARRAY_SIZE(list) );
++    if (!n || n >= ARRAY_SIZE(list) || !img->Buffer) return FALSE;
++    len = img->Length / sizeof(WCHAR);
++    for (i = len; i > 0; i--) if (img->Buffer[i - 1] == '\\' || img->Buffer[i - 1] == '/') break;
++    name = img->Buffer + i;
++    len -= i;
++    for (p = list; p && *p; p = next)
++    {
++        tok = p;
++        next = wcschr( p, ';' );
++        if (next) *next++ = 0;
++        if (wcslen( tok ) == len && !wcsnicmp( tok, name, len )) return TRUE;
++    }
++    return FALSE;
++}
++
+ /*******************************************************************
+  *         format_exception_msg
+  */
+@@ -544,7 +584,11 @@ static BOOL start_debugger( EXCEPTION_POINTERS *epointers, HANDLE event )
+     char buffer[256];
+ 
+     format_exception_msg( epointers, buffer, sizeof(buffer) );
+-    MESSAGE( "wine: %s (thread %04lx), starting debugger...\n", buffer, GetCurrentThreadId() );
++    {
++        char mod[MAX_PATH + 8];
++        ember_crash_module( epointers, mod, sizeof(mod) );
++        MESSAGE( "wine: %s%s (thread %04lx), starting debugger...\n", buffer, mod, GetCurrentThreadId() );
++    }
+ 
+     InitializeObjectAttributes( &attr, &nameW, 0, 0, NULL );
+     if (!NtOpenKey( &dbg_key, KEY_READ, &attr ))
+@@ -790,6 +834,14 @@ LONG WINAPI UnhandledExceptionFilter( EXCEPTION_POINTERS *epointers )
+         if (top_filter && !nested)
+         {
+             LONG ret = top_filter( epointers );
++            if (ret == EXCEPTION_EXECUTE_HANDLER)
++            {
++                /* Ember: 게임 자체 크래시 처리기가 받아 끝내는 경우도 표시 */
++                char buffer[256], mod[MAX_PATH + 8];
++                format_exception_msg( epointers, buffer, sizeof(buffer) );
++                ember_crash_module( epointers, mod, sizeof(mod) );
++                MESSAGE( "wine: %s%s (thread %04lx), handled by application crash filter\n", buffer, mod, GetCurrentThreadId() );
++            }
+             if (ret != EXCEPTION_CONTINUE_SEARCH) return ret;
+         }
+ 
+@@ -800,6 +852,23 @@ LONG WINAPI UnhandledExceptionFilter( EXCEPTION_POINTERS *epointers )
+             TerminateProcess( GetCurrentProcess(), 1 );
+         }
+ 
++        if (GetErrorMode() & SEM_NOGPFAULTERRORBOX)
++        {
++            /* Ember: 디버거 없이 끝나는 튕김도 한 줄 남긴다(안 남기면 조용한 종료로 보인다) */
++            char buffer[256], mod[MAX_PATH + 8];
++            format_exception_msg( epointers, buffer, sizeof(buffer) );
++            ember_crash_module( epointers, mod, sizeof(mod) );
++            MESSAGE( "wine: %s%s (thread %04lx), no debugger (SEM_NOGPFAULTERRORBOX)\n", buffer, mod, GetCurrentThreadId() );
++        }
++        if (!(GetErrorMode() & SEM_NOGPFAULTERRORBOX) && ember_nodebug_exe())
++        {
++            /* Ember: 다시 띄워질 도우미는 덤프 없이 바로 끝낸다(ember_nodebug_exe). 튕김 줄은 그대로 남긴다. */
++            char buffer[256], mod[MAX_PATH + 8];
++            format_exception_msg( epointers, buffer, sizeof(buffer) );
++            ember_crash_module( epointers, mod, sizeof(mod) );
++            MESSAGE( "wine: %s%s (thread %04lx), no debugger (EMBER_NODEBUG_EXE)\n", buffer, mod, GetCurrentThreadId() );
++            return nested ? EXCEPTION_CONTINUE_SEARCH : EXCEPTION_EXECUTE_HANDLER;
++        }
+         if ((GetErrorMode() & SEM_NOGPFAULTERRORBOX) ||
+             !start_debugger_atomic( epointers ) || !NtCurrentTeb()->Peb->BeingDebugged)
+             return nested ? EXCEPTION_CONTINUE_SEARCH : EXCEPTION_EXECUTE_HANDLER;
+diff --git a/dlls/kernelbase/kernelbase.spec b/dlls/kernelbase/kernelbase.spec
+index f172906..857a98c 100644
+--- a/dlls/kernelbase/kernelbase.spec
++++ b/dlls/kernelbase/kernelbase.spec
+@@ -1281,8 +1281,8 @@
+ @ stdcall ReOpenFile(ptr long long long)
+ @ stdcall ReadConsoleA(long ptr long ptr ptr)
+ @ stdcall ReadConsoleInputA(long ptr long ptr)
+-@ stub ReadConsoleInputExA
+-@ stub ReadConsoleInputExW
++@ stdcall ReadConsoleInputExA(long ptr long ptr long)
++@ stdcall ReadConsoleInputExW(long ptr long ptr long)
+ @ stdcall ReadConsoleInputW(long ptr long ptr)
+ @ stdcall ReadConsoleOutputA(long ptr long long ptr)
+ @ stdcall ReadConsoleOutputAttribute(long ptr long long ptr)
+@@ -1546,7 +1546,7 @@
+ @ stdcall SetThreadpoolThreadMaximum(ptr long) ntdll.TpSetPoolMaxThreads
+ @ stdcall SetThreadpoolThreadMinimum(ptr long) ntdll.TpSetPoolMinThreads
+ @ stdcall SetThreadpoolTimer(ptr ptr long long) ntdll.TpSetTimer
+-# @ stub SetThreadpoolTimerEx
++@ stdcall SetThreadpoolTimerEx(ptr ptr long long) ntdll.TpSetTimerEx
+ @ stdcall SetThreadpoolWait(ptr long ptr) ntdll.TpSetWait
+ # @ stub SetThreadpoolWaitEx
+ @ stdcall SetTimeZoneInformation(ptr)
+diff --git a/dlls/kernelbase/loader.c b/dlls/kernelbase/loader.c
+index f6347c1..8e6a625 100644
+--- a/dlls/kernelbase/loader.c
++++ b/dlls/kernelbase/loader.c
+@@ -168,7 +168,7 @@ static HMODULE load_library( const UNICODE_STRING *libname, DWORD flags )
+     }
+     else
+     {
+-        status = LdrLoadDll( load_path, flags, libname, &module );
++        status = LdrLoadDll( load_path, &flags, libname, &module );
+         if (!set_ntstatus( status ))
+         {
+             module = 0;
+diff --git a/dlls/kernelbase/locale.c b/dlls/kernelbase/locale.c
+index 651f45b..d3e3e18 100644
+--- a/dlls/kernelbase/locale.c
++++ b/dlls/kernelbase/locale.c
+@@ -1659,6 +1659,20 @@ static int get_calendar_info( const NLS_LOCALE_DATA *locale, CALID id, CALTYPE t
+             const short *info = (const short *)locale_strings + array[0];
+             val = info[1] - 1;
+         }
++        /* Ember: 단기(CAL_KOREA) 연호는 CLDR 에 없어 빈 문자열이 나온다. 윈도우는 "단기".
++         * ko-KR 의 선택 역법이 5 라서 델파이 RTL 이 연호를 읽는데, 빈 이름이면 연호 배열이 비어
++         * [-1] 을 짚고 죽는다(런타임 오류 217 — GOG 갤럭시 등 Inno Setup 64비트 설치기, 실측 2026-09-25). */
++        if (id == CAL_KOREA)
++        {
++            DWORD pos = 0;
++            const DWORD *array = (const DWORD *)(locale_strings + cal->serastring + 1);
++            if (val < locale_strings[cal->serastring]) pos = array[val];
++            if (!pos || !locale_strings[pos])
++            {
++                static const WCHAR dangiW[] = { 0xb2e8, 0xae30, 0 };
++                return locale_return_data( dangiW, ARRAY_SIZE(dangiW), type, buffer, len );
++            }
++        }
+         return locale_return_strarray( cal->serastring, val, type, buffer, len );
+ 
+     case CAL_SSHORTDATE:
+diff --git a/dlls/kernelbase/memory.c b/dlls/kernelbase/memory.c
+index c0a3d65..7fd6876 100644
+--- a/dlls/kernelbase/memory.c
++++ b/dlls/kernelbase/memory.c
+@@ -1438,6 +1438,22 @@ BOOL WINAPI DECLSPEC_HOTPATCH GlobalMemoryStatusEx( MEMORYSTATUSEX *status )
+     status->ullAvailPageFile = status->ullTotalPageFile - perf_info.TotalCommittedPages;
+     status->ullTotalVirtual  = (ULONG_PTR)basic_info.HighestUserAddress - (ULONG_PTR)basic_info.LowestUserAddress + 1;
+     status->ullAvailVirtual  = status->ullTotalVirtual - (ULONGLONG)vmc.WorkingSetSize /* approximate */;
++#ifndef _WIN64
++    /* Ember: 32비트(WoW64)는 작업 집합에 64비트 쪽(GL 드라이버·Rosetta 등)까지 들어가 총량 2GB 를 넘고, 빼면 음수가 되어
++     * 16EB 로 보였다(2026-09-26 실측). 32비트 주소 공간의 빈 영역을 실제로 더한다(결과는 아래에서 1초 캐시). */
++    {
++        MEMORY_BASIC_INFORMATION mbi;
++        char *p = basic_info.LowestUserAddress, *end = basic_info.HighestUserAddress;
++        ULONGLONG free_bytes = 0;
++        while (p < end && VirtualQuery( p, &mbi, sizeof(mbi) ))
++        {
++            if (mbi.State == MEM_FREE) free_bytes += mbi.RegionSize;
++            if ((char *)mbi.BaseAddress + mbi.RegionSize <= p) break;
++            p = (char *)mbi.BaseAddress + mbi.RegionSize;
++        }
++        status->ullAvailVirtual = min( free_bytes, status->ullTotalVirtual );
++    }
++#endif
+     status->ullAvailExtendedVirtual = 0;
+ 
+     status->ullTotalPhys     *= basic_info.PageSize;
+diff --git a/dlls/kernelbase/process.c b/dlls/kernelbase/process.c
+index 867964e..ee4df31 100644
+--- a/dlls/kernelbase/process.c
++++ b/dlls/kernelbase/process.c
+@@ -500,6 +500,49 @@ done:
+     return ret;
+ }
+ 
++/* Ember: 스팀 CEF 브라우저 프로세스(steamwebhelper.exe, --type 없는 것)에 EMBER_CEF_ARGS 를 덧붙인다.
++ * 스팀은 -cef-in-process-gpu 를 전달하지 않는다. viz 합성기가 별도 gpu 프로세스에서 돌면 브라우저
++ * 프로세스 소유의 창에 다른 프로세스가 GDI 로 그리게 되는데, Wine 의 창 표면은 프로세스마다 따로라
++ * 화면이 검게 남는다. --in-process-gpu 로 합성기를 창 주인 프로세스 안에 두면 그려진다. */
++/* EMBER_CEF_EXE: 대상 실행파일 이름 목록(';' 로 나눔, 대소문자 무시). 없으면 steamwebhelper.exe.
++ * 배틀넷처럼 브라우저 프로세스가 런처 자신(Battle.net.exe)인 CEF 앱에도 같은 인자를 주려고 쓴다. */
++static BOOL ember_cef_target( const WCHAR *base )
++{
++    WCHAR list[256], *p, *next;
++    DWORD n = GetEnvironmentVariableW( L"EMBER_CEF_EXE", list, ARRAY_SIZE(list) );
++
++    if (!n || n >= ARRAY_SIZE(list)) return !wcsicmp( base, L"steamwebhelper.exe" );
++    for (p = list; p && *p; p = next)
++    {
++        if ((next = wcschr( p, ';' ))) *next++ = 0;
++        if (*p && !wcsicmp( base, p )) return TRUE;
++    }
++    return FALSE;
++}
++
++static WCHAR *ember_append_cef_args( const WCHAR *app_name, WCHAR *cmdline, const WCHAR *orig )
++{
++    WCHAR extra[512], *out;
++    const WCHAR *base;
++    DWORD len, extra_len, cmd_len;
++
++    if (!app_name || !cmdline) return cmdline;
++    for (base = app_name; *app_name; app_name++) if (*app_name == '\\' || *app_name == '/') base = app_name + 1;
++    if (!ember_cef_target( base )) return cmdline;
++    if (wcsstr( cmdline, L"--type=" )) return cmdline;
++    if (!(extra_len = GetEnvironmentVariableW( L"EMBER_CEF_ARGS", extra, ARRAY_SIZE(extra) )) ||
++        extra_len >= ARRAY_SIZE(extra)) return cmdline;
++    cmd_len = lstrlenW( cmdline );
++    len = cmd_len + 1 + extra_len + 1;
++    if (!(out = RtlAllocateHeap( GetProcessHeap(), 0, len * sizeof(WCHAR) ))) return cmdline;
++    memcpy( out, cmdline, cmd_len * sizeof(WCHAR) );
++    out[cmd_len] = ' ';
++    memcpy( out + cmd_len + 1, extra, (extra_len + 1) * sizeof(WCHAR) );
++    if (cmdline != orig) RtlFreeHeap( GetProcessHeap(), 0, cmdline );
++    TRACE( "ember cef args: %s\n", debugstr_w(out) );
++    return out;
++}
++
+ /**********************************************************************
+  *           CreateProcessInternalW   (kernelbase.@)
+  */
+@@ -567,6 +610,8 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR
+         }
+     }
+ 
++    tidy_cmdline = ember_append_cef_args( app_name, tidy_cmdline, cmd_line );
++
+     /* Warn if unsupported features are used */
+ 
+     if (flags & (IDLE_PRIORITY_CLASS | HIGH_PRIORITY_CLASS | REALTIME_PRIORITY_CLASS |
+diff --git a/dlls/kernelbase/string.c b/dlls/kernelbase/string.c
+index f83ae35..9e04fa1 100644
+--- a/dlls/kernelbase/string.c
++++ b/dlls/kernelbase/string.c
+@@ -1127,24 +1127,17 @@ LPWSTR WINAPI CharNextW(const WCHAR *x)
+ 
+ LPSTR WINAPI CharPrevA(const char *start, const char *ptr)
+ {
+-    while (*start && (start < ptr))
+-    {
+-        LPCSTR next = CharNextA(start);
+-        if (next >= ptr) break;
+-        start = next;
+-    }
+-    return (LPSTR)start;
++    /* Ember: Wine 11.18 — 윈도우처럼 뒤로 1~2바이트(start 를 건드리지 않는다, CP949 포함 윈도우 검증) */
++    return CharPrevExA(CP_ACP, start, ptr, 0);
+ }
+ 
+ LPSTR WINAPI CharPrevExA(WORD codepage, const char *start, const char *ptr, DWORD flags)
+ {
+-    while (*start && (start < ptr))
+-    {
+-        LPCSTR next = CharNextExA(codepage, start, flags);
+-        if (next >= ptr) break;
+-        start = next;
+-    }
+-    return (LPSTR)start;
++    /* Ember: Wine 11.18 — 윈도우처럼 뒤로 1~2바이트(start 를 건드리지 않는다, CP949 포함 윈도우 검증) */
++    /* Assume that ptr is not the second byte of a DBCS pair and search backwards */
++    if (ptr <= start) return (char *)ptr;
++    if (ptr >= start + 2 && IsDBCSLeadByteEx(codepage, ptr[-2])) return (char *)(ptr - 2);
++    return (char *)(ptr - 1);
+ }
+ 
+ LPWSTR WINAPI CharPrevW(const WCHAR *start, const WCHAR *x)
+diff --git a/dlls/kernelbase/thread.c b/dlls/kernelbase/thread.c
+index 610ae93..dff8922 100644
+--- a/dlls/kernelbase/thread.c
++++ b/dlls/kernelbase/thread.c
+@@ -1152,12 +1152,15 @@ BOOL WINAPI DECLSPEC_HOTPATCH ConvertFiberToThread(void)
+ {
+     struct fiber_data *fiber = NtCurrentTeb()->Tib.FiberData;
+ 
+-    if (fiber)
++    if (!NtCurrentTeb()->HasFiberData)  /* Ember: 업스트림 11.18 과 같게 */
+     {
+-        relocate_thread_actctx_stack( &NtCurrentTeb()->ActivationContextStack );
+-        NtCurrentTeb()->Tib.FiberData = NULL;
+-        HeapFree( GetProcessHeap(), 0, fiber );
++        SetLastError( ERROR_ALREADY_THREAD );
++        return FALSE;
+     }
++    relocate_thread_actctx_stack( &NtCurrentTeb()->ActivationContextStack );
++    NtCurrentTeb()->Tib.FiberData = NULL;
++    NtCurrentTeb()->HasFiberData = FALSE;
++    HeapFree( GetProcessHeap(), 0, fiber );
+     return TRUE;
+ }
+ 
+@@ -1178,7 +1181,7 @@ LPVOID WINAPI DECLSPEC_HOTPATCH ConvertThreadToFiberEx( LPVOID param, DWORD flag
+ {
+     struct fiber_data *fiber;
+ 
+-    if (NtCurrentTeb()->Tib.FiberData)
++    if (NtCurrentTeb()->HasFiberData)  /* Ember: 업스트림처럼 플래그로(FiberData 는 처음부터 0 이 아닐 수 있다) */
+     {
+         /* CrossOver hack for bug 20987 */
+         static int is_halo_mcc = -1;
+@@ -1218,6 +1221,7 @@ LPVOID WINAPI DECLSPEC_HOTPATCH ConvertThreadToFiberEx( LPVOID param, DWORD flag
+     fiber->fls_slots        = NtCurrentTeb()->FlsSlots;
+     relocate_thread_actctx_stack( &fiber->actctx.stack_space );
+     NtCurrentTeb()->Tib.FiberData = fiber;
++    NtCurrentTeb()->HasFiberData = TRUE;
+     return fiber;
+ }
+ 
+@@ -1248,7 +1252,7 @@ void WINAPI DECLSPEC_HOTPATCH DeleteFiber( LPVOID fiber_ptr )
+  */
+ BOOL WINAPI DECLSPEC_HOTPATCH IsThreadAFiber(void)
+ {
+-    return NtCurrentTeb()->Tib.FiberData != NULL;
++    return NtCurrentTeb()->HasFiberData;
+ }
+ 
+ 
+diff --git a/dlls/kernelbase/volume.c b/dlls/kernelbase/volume.c
+index 4fca96d..6c47ef8 100644
+--- a/dlls/kernelbase/volume.c
++++ b/dlls/kernelbase/volume.c
+@@ -138,6 +138,39 @@ static DWORD get_mountmgr_drive_type( LPCWSTR root )
+ }
+ 
+ 
++/* Ember: is this NT path (with trailing backslash) a mounted folder? ntdll reports a unix mount point
++ * (e.g. Z:\Volumes\ExternalDisk) as a directory reparse point with IO_REPARSE_TAG_MOUNT_POINT, and
++ * GetVolumePathNameW returns it as the volume path, so the volume APIs must accept it like Windows does. */
++static BOOL is_mounted_folder( UNICODE_STRING *nt_name )
++{
++    FILE_ATTRIBUTE_TAG_INFORMATION tag;
++    FILE_BASIC_INFORMATION basic;
++    OBJECT_ATTRIBUTES attr;
++    IO_STATUS_BLOCK io;
++    HANDLE file;
++    NTSTATUS status;
++    BOOL ret = FALSE;
++
++    if (nt_name->Length < 2 * sizeof(WCHAR) || nt_name->Buffer[nt_name->Length / sizeof(WCHAR) - 1] != '\\')
++        return FALSE;
++    nt_name->Length -= sizeof(WCHAR);
++    InitializeObjectAttributes( &attr, nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
++    if (!NtQueryAttributesFile( &attr, &basic )
++            && (basic.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
++            && (basic.FileAttributes & FILE_ATTRIBUTE_DIRECTORY)
++            && !NtOpenFile( &file, SYNCHRONIZE | FILE_READ_ATTRIBUTES, &attr, &io,
++                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
++                            FILE_OPEN_REPARSE_POINT | FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT ))
++    {
++        status = NtQueryInformationFile( file, &io, &tag, sizeof(tag), FileAttributeTagInformation );
++        NtClose( file );
++        ret = !status && tag.ReparseTag == IO_REPARSE_TAG_MOUNT_POINT;
++    }
++    nt_name->Length += sizeof(WCHAR);
++    return ret;
++}
++
++
+ /***********************************************************************
+  *           GetVolumeInformationW   (kernelbase.@)
+  */
+@@ -161,6 +194,21 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetVolumeInformationW( LPCWSTR root, LPWSTR label,
+     }
+     /* there must be exactly one backslash in the name, at the end */
+     for (i = 4; i < nt_name.Length / sizeof(WCHAR); i++) if (nt_name.Buffer[i] == '\\') break;
++    if (i != nt_name.Length / sizeof(WCHAR) - 1 && is_mounted_folder( &nt_name ))
++    {
++        /* Ember: mounted folder (unix mount point such as Z:\Volumes\Disk\) — query the volume
++         * mounted there, as Windows does for volumes mounted in a folder. */
++        InitializeObjectAttributes( &attr, &nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
++        nt_name.Length -= sizeof(WCHAR);
++        status = NtOpenFile( &handle, SYNCHRONIZE, &attr, &io, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
++                             FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT );
++        nt_name.Length += sizeof(WCHAR);
++        if (!set_ntstatus( status )) goto done;
++        ret = GetVolumeInformationByHandleW( handle, label, label_len, serial, filename_len, flags,
++                                             fsname, fsname_len );
++        NtClose( handle );
++        goto done;
++    }
+     if (i != nt_name.Length / sizeof(WCHAR) - 1)
+     {
+         /* check if root contains an explicit subdir */

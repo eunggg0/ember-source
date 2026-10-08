@@ -1,0 +1,190 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 28/34] dlls-wow64win: Ember changes
+
+Base: wine-11.18.tar.xz
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/wow64win/gdi.c b/dlls/wow64win/gdi.c
+index 68bd746..ad079d8 100644
+--- a/dlls/wow64win/gdi.c
++++ b/dlls/wow64win/gdi.c
+@@ -413,7 +413,7 @@ NTSTATUS WINAPI wow64_NtGdiDdDDIAcquireKeyedMutex( UINT *args )
+     if (!desc32) return STATUS_INVALID_PARAMETER;
+     desc.hKeyedMutex = desc32->hKeyedMutex;
+     desc.Key = desc32->Key;
+-    desc.pTimeout = UlongToHandle( desc32->pTimeout );
++    desc.pTimeout = ULongToPtr( desc32->pTimeout );
+     desc.FenceValue = desc32->FenceValue;
+     status = NtGdiDdDDIAcquireKeyedMutex( &desc );
+     desc32->FenceValue = desc.FenceValue;
+@@ -438,9 +438,9 @@ NTSTATUS WINAPI wow64_NtGdiDdDDIAcquireKeyedMutex2( UINT *args )
+     if (!desc32) return STATUS_INVALID_PARAMETER;
+     desc.hKeyedMutex = desc32->hKeyedMutex;
+     desc.Key = desc32->Key;
+-    desc.pTimeout = UlongToHandle( desc32->pTimeout );
++    desc.pTimeout = ULongToPtr( desc32->pTimeout );
+     desc.FenceValue = desc32->FenceValue;
+-    desc.pPrivateRuntimeData = UlongToHandle( desc32->pPrivateRuntimeData );
++    desc.pPrivateRuntimeData = ULongToPtr( desc32->pPrivateRuntimeData );
+     desc.PrivateRuntimeDataSize = desc32->PrivateRuntimeDataSize;
+     status = NtGdiDdDDIAcquireKeyedMutex2( &desc );
+     desc32->FenceValue = desc.FenceValue;
+@@ -1502,7 +1502,7 @@ NTSTATUS WINAPI wow64_NtGdiDdDDIReleaseKeyedMutex2( UINT *args )
+     desc.hKeyedMutex = desc32->hKeyedMutex;
+     desc.Key = desc32->Key;
+     desc.FenceValue = desc32->FenceValue;
+-    desc.pPrivateRuntimeData = UlongToHandle( desc32->pPrivateRuntimeData );
++    desc.pPrivateRuntimeData = ULongToPtr( desc32->pPrivateRuntimeData );
+     desc.PrivateRuntimeDataSize = desc32->PrivateRuntimeDataSize;
+     status = NtGdiDdDDIReleaseKeyedMutex2( &desc );
+ 
+diff --git a/dlls/wow64win/user.c b/dlls/wow64win/user.c
+index 92c1877..7a4a4e2 100644
+--- a/dlls/wow64win/user.c
++++ b/dlls/wow64win/user.c
+@@ -1753,6 +1753,20 @@ NTSTATUS WINAPI wow64_NtUserCallHwndParam( UINT *args )
+             return NtUserCallHwndParam( hwnd, (UINT_PTR)&params, code );
+         }
+ 
++    /* fex32: 포인터 인자(구조 배치 32/64 같음) → 게스트 창 */
++    case NtUserCallHwndParam_ClientToScreen:
++    case NtUserCallHwndParam_ScreenToClient:
++    case NtUserCallHwndParam_GetChildRect:
++    case NtUserCallHwndParam_GetWindowInfo:
++    case NtUserCallHwndParam_GetWindowThread:
++    case NtUserCallHwndParam_SetDialogInfo:
++    case NtUserCallHwndParam_SetMDIClientInfo:
++    case NtUserCallHwndParam_ExposeWindowSurface:
++    case NtUserCallHwndParam_SetRawWindowPos:
++    case NtUserCallHwndParam_GetPrivateData:
++    case NtUserCallHwndParam_SetPrivateData:
++        return NtUserCallHwndParam( hwnd, (UINT_PTR)ULongToPtr( param ), code );
++
+     default:
+         return NtUserCallHwndParam( hwnd, param, code );
+     }
+@@ -1792,6 +1806,15 @@ NTSTATUS WINAPI wow64_NtUserCallOneParam( UINT *args )
+     ULONG_PTR arg = get_ulong( &args );
+     ULONG code = get_ulong( &args );
+ 
++    switch (code)
++    {
++    /* fex32: 포인터 인자 → 게스트 창 */
++    case NtUserCallOneParam_GetPrimaryMonitorRect:
++    case NtUserCallOneParam_D3DKMTOpenAdapterFromGdiDisplayName:
++    case NtUserCallOneParam_GetAsyncKeyboardState:
++        arg = (ULONG_PTR)ULongToPtr( arg );
++        break;
++    }
+     return NtUserCallOneParam( arg, code );
+ }
+ 
+@@ -1825,6 +1848,15 @@ NTSTATUS WINAPI wow64_NtUserCallTwoParam( UINT *args )
+             return TRUE;
+         }
+ 
++    /* fex32: 포인터 인자 → 게스트 창 (구조 배치가 32/64 같은 것들) */
++    case NtUserCallTwoParam_GetMonitorInfo:
++    case NtUserCallTwoParam_SetIMECompositionRect:
++        return NtUserCallTwoParam( arg1, (ULONG_PTR)ULongToPtr( arg2 ), code );
++    case NtUserCallTwoParam_MonitorFromRect:
++    case NtUserCallTwoParam_GetVirtualScreenRect:
++        return NtUserCallTwoParam( (ULONG_PTR)ULongToPtr( arg1 ), arg2, code );
++    case NtUserCallTwoParam_AdjustWindowRect:
++        return NtUserCallTwoParam( (ULONG_PTR)ULongToPtr( arg1 ), (ULONG_PTR)ULongToPtr( arg2 ), code );
+     default:
+         return NtUserCallTwoParam( arg1, arg2, code );
+     }
+@@ -3526,6 +3558,47 @@ NTSTATUS WINAPI wow64_NtUserMessageBeep( UINT *args )
+     return NtUserMessageBeep( type );
+ }
+ 
++
++/* fex32: 메시지의 lparam/wparam 이 포인터면 게스트 창 주소로 푼다 (win32u message.c 의 표와 같다) */
++#define FEX32_SET(msg) (1u << ((msg) & 31))
++static const unsigned int fex32_pointer_flags[] =
++{
++    FEX32_SET(WM_CREATE) | FEX32_SET(WM_SETTEXT) | FEX32_SET(WM_GETTEXT) | FEX32_SET(WM_WININICHANGE) | FEX32_SET(WM_DEVMODECHANGE),
++    FEX32_SET(WM_GETMINMAXINFO) | FEX32_SET(WM_DRAWITEM) | FEX32_SET(WM_MEASUREITEM) | FEX32_SET(WM_DELETEITEM) | FEX32_SET(WM_COMPAREITEM),
++    FEX32_SET(WM_WINDOWPOSCHANGING) | FEX32_SET(WM_WINDOWPOSCHANGED) | FEX32_SET(WM_COPYDATA) | FEX32_SET(WM_HELP),
++    FEX32_SET(WM_STYLECHANGING) | FEX32_SET(WM_STYLECHANGED),
++    FEX32_SET(WM_NCCREATE) | FEX32_SET(WM_NCCALCSIZE) | FEX32_SET(WM_GETDLGCODE),
++    FEX32_SET(EM_GETSEL) | FEX32_SET(EM_GETRECT) | FEX32_SET(EM_SETRECT) | FEX32_SET(EM_SETRECTNP),
++    FEX32_SET(EM_REPLACESEL) | FEX32_SET(EM_GETLINE) | FEX32_SET(EM_SETTABSTOPS),
++    FEX32_SET(SBM_GETRANGE) | FEX32_SET(SBM_SETSCROLLINFO) | FEX32_SET(SBM_GETSCROLLINFO) | FEX32_SET(SBM_GETSCROLLBARINFO),
++    0, 0,
++    FEX32_SET(CB_GETEDITSEL) | FEX32_SET(CB_ADDSTRING) | FEX32_SET(CB_DIR) | FEX32_SET(CB_GETLBTEXT) | FEX32_SET(CB_INSERTSTRING) |
++    FEX32_SET(CB_FINDSTRING) | FEX32_SET(CB_SELECTSTRING) | FEX32_SET(CB_GETDROPPEDCONTROLRECT) | FEX32_SET(CB_FINDSTRINGEXACT),
++    FEX32_SET(CB_GETCOMBOBOXINFO),
++    FEX32_SET(LB_ADDSTRING) | FEX32_SET(LB_INSERTSTRING) | FEX32_SET(LB_GETTEXT) | FEX32_SET(LB_SELECTSTRING) | FEX32_SET(LB_DIR) |
++    FEX32_SET(LB_FINDSTRING) | FEX32_SET(LB_GETSELITEMS) | FEX32_SET(LB_SETTABSTOPS) | FEX32_SET(LB_ADDFILE) | FEX32_SET(LB_GETITEMRECT),
++    FEX32_SET(LB_FINDSTRINGEXACT),
++    0, 0,
++    FEX32_SET(WM_NEXTMENU) | FEX32_SET(WM_SIZING) | FEX32_SET(WM_MOVING) | FEX32_SET(WM_DEVICECHANGE),
++    FEX32_SET(WM_MDICREATE) | FEX32_SET(WM_MDIGETACTIVE) | FEX32_SET(WM_DROPOBJECT) | FEX32_SET(WM_QUERYDROPOBJECT) |
++    FEX32_SET(WM_DRAGLOOP) | FEX32_SET(WM_DRAGSELECT) | FEX32_SET(WM_DRAGMOVE),
++    0, 0, 0, 0, 0, 0,
++    FEX32_SET(WM_ASKCBFORMATNAME) | FEX32_SET(WM_PAINTCLIPBOARD)
++};
++#undef FEX32_SET
++
++static BOOL fex32_lparam_is_pointer( UINT msg, ULONG wparam )
++{
++    if (msg >= 8 * sizeof(fex32_pointer_flags)) return FALSE;
++    if (msg == WM_DEVICECHANGE && !(wparam & 0x8000)) return FALSE;
++    return (fex32_pointer_flags[msg / 32] & (1u << (msg & 31))) != 0;
++}
++
++static BOOL fex32_wparam_is_pointer( UINT msg )
++{
++    return msg == EM_GETSEL || msg == CB_GETEDITSEL || msg == SBM_GETRANGE;
++}
++
+ static LRESULT message_call_32to64( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam,
+                                     void *result_info, DWORD type, BOOL ansi )
+ {
+@@ -3768,12 +3841,27 @@ NTSTATUS WINAPI wow64_NtUserMessageCall( UINT *args )
+ {
+     HWND hwnd = get_handle( &args );
+     UINT msg = get_ulong( &args );
+-    ULONG wparam = get_ulong( &args );
+-    ULONG lparam = get_ulong( &args );
++    ULONG wparam32 = get_ulong( &args );
++    ULONG lparam32 = get_ulong( &args );
++    /* fex32: 포인터 인자는 게스트 창으로 */
++    WPARAM wparam = wparam32;
++    LPARAM lparam = lparam32;
+     void *result_info = get_ptr( &args );
+     UINT type = get_ulong ( &args );
+     BOOL ansi = get_ulong( &args );
+ 
++    switch (type)
++    {
++    case NtUserScrollBarWndProc: case NtUserPopupMenuWndProc: case NtUserDesktopWindowProc: case NtUserDefWindowProc:
++    case NtUserCallWindowProc: case NtUserSendMessage: case NtUserSendMessageTimeout: case NtUserSendNotifyMessage:
++    case NtUserSendMessageCallback: case NtUserClipboardWindowProc: case NtUserGetDispatchParams:
++        if (fex32_wparam_is_pointer( msg )) wparam = (WPARAM)ULongToPtr( wparam32 );
++        if (fex32_lparam_is_pointer( msg, wparam32 )) lparam = (LPARAM)ULongToPtr( lparam32 );
++        break;
++    default:
++        break;
++    }
++
+     switch (type)
+     {
+     case NtUserGetDispatchParams:
+diff --git a/dlls/wow64win/wow64win_private.h b/dlls/wow64win/wow64win_private.h
+index 956e386..7743c3d 100644
+--- a/dlls/wow64win/wow64win_private.h
++++ b/dlls/wow64win/wow64win_private.h
+@@ -24,6 +24,10 @@
+ #include "../win32u/win32syscalls.h"
+ #include "ntuser.h"
+ 
++/* fex32: 32비트 포인터를 게스트 창(4GB 위)으로 푼다 */
++#define WINE_WOW64_REBASE
++#include "wine/wow64base.h"
++
+ #define SYSCALL_ENTRY(id,name,_args) extern NTSTATUS WINAPI wow64_ ## name( UINT *args );
+ ALL_SYSCALLS32
+ #undef SYSCALL_ENTRY

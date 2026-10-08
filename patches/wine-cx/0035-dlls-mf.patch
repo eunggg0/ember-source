@@ -1,0 +1,3723 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 35/74] dlls-mf: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/mf/Makefile.in b/dlls/mf/Makefile.in
+index d9f0123..9e85615 100644
+--- a/dlls/mf/Makefile.in
++++ b/dlls/mf/Makefile.in
+@@ -1,6 +1,6 @@
+ MODULE    = mf.dll
+ IMPORTLIB = mf
+-IMPORTS   = advapi32 mfplat ole32 uuid mfuuid strmiids
++IMPORTS   = advapi32 mfplat ole32 uuid mfuuid strmiids kernelbase
+ DELAYIMPORTS = evr urlmon user32
+ 
+ EXTRADLLFLAGS = -Wb,--prefer-native
+diff --git a/dlls/mf/clock.c b/dlls/mf/clock.c
+index 997994f..a0735e9 100644
+--- a/dlls/mf/clock.c
++++ b/dlls/mf/clock.c
+@@ -72,9 +72,8 @@ struct clock_timer
+ {
+     IUnknown IUnknown_iface;
+     LONG refcount;
++    LONGLONG time;
+     IMFAsyncResult *result;
+-    IMFAsyncCallback *callback;
+-    MFWORKITEM_KEY key;
+     struct list entry;
+ };
+ 
+@@ -85,7 +84,6 @@ struct presentation_clock
+     IMFTimer IMFTimer_iface;
+     IMFShutdown IMFShutdown_iface;
+     IMFAsyncCallback sink_callback;
+-    IMFAsyncCallback timer_callback;
+     LONG refcount;
+     IMFPresentationTimeSource *time_source;
+     IMFClockStateSink *time_source_sink;
+@@ -97,6 +95,7 @@ struct presentation_clock
+     LONGLONG frequency;
+     CRITICAL_SECTION cs;
+     BOOL is_shut_down;
++    DWORD key;
+ };
+ 
+ static struct presentation_clock *impl_from_IMFPresentationClock(IMFPresentationClock *iface)
+@@ -124,11 +123,6 @@ static struct presentation_clock *impl_from_sink_callback_IMFAsyncCallback(IMFAs
+     return CONTAINING_RECORD(iface, struct presentation_clock, sink_callback);
+ }
+ 
+-static struct presentation_clock *impl_from_timer_callback_IMFAsyncCallback(IMFAsyncCallback *iface)
+-{
+-    return CONTAINING_RECORD(iface, struct presentation_clock, timer_callback);
+-}
+-
+ static struct clock_timer *impl_clock_timer_from_IUnknown(IUnknown *iface)
+ {
+     return CONTAINING_RECORD(iface, struct clock_timer, IUnknown_iface);
+@@ -479,7 +473,9 @@ static HRESULT WINAPI present_clock_AddClockStateSink(IMFPresentationClock *ifac
+         };
+         struct clock_state_change_param param;
+ 
+-        if (!clock->is_shut_down && clock->state != MFCLOCK_STATE_INVALID)
++        if (!clock->is_shut_down && clock->state != MFCLOCK_STATE_INVALID
++                /* Don't notify a sink that is also the time source */
++                && clock->time_source_sink != sink->state_sink)
+         {
+             param.u.offset = clock->start_offset;
+             clock_notify_async_sink(clock, MFGetSystemTime(), param, notifications[clock->state], sink->state_sink);
+@@ -555,6 +551,39 @@ static HRESULT clock_call_state_change(MFTIME system_time, struct clock_state_ch
+     return hr;
+ }
+ 
++static void CALLBACK presentation_clock_timer_callback(IUnknown *context)
++{
++    struct presentation_clock *clock = impl_from_IMFPresentationClock((IMFPresentationClock*)context);
++    IMFPresentationTimeSource *time_source;
++    struct clock_timer *timer, *next;
++    LONGLONG time, systime;
++
++    EnterCriticalSection(&clock->cs);
++    if ((time_source = clock->time_source))
++        IMFPresentationTimeSource_AddRef(time_source);
++    LeaveCriticalSection(&clock->cs);
++
++    /* We don't hold the critical section during a call to GetCorrelatedTime as it can result in a deadlock. */
++    if (time_source &&
++            SUCCEEDED(IMFPresentationTimeSource_GetCorrelatedTime(time_source, 0, &time, &systime)))
++    {
++        EnterCriticalSection(&clock->cs);
++        LIST_FOR_EACH_ENTRY_SAFE(timer, next, &clock->timers, struct clock_timer, entry)
++        {
++            if (timer->time > time + 50000)
++                break;
++
++            list_remove(&timer->entry);
++            MFInvokeCallback(timer->result);
++            IUnknown_Release(&timer->IUnknown_iface);
++        }
++        LeaveCriticalSection(&clock->cs);
++    }
++
++    if (time_source)
++        IMFPresentationTimeSource_Release(time_source);
++}
++
+ static HRESULT clock_change_state(struct presentation_clock *clock, enum clock_command command,
+         struct clock_state_change_param param)
+ {
+@@ -574,7 +603,6 @@ static HRESULT clock_change_state(struct presentation_clock *clock, enum clock_c
+     enum clock_notification notification;
+     struct clock_sink *sink;
+     MFCLOCK_STATE old_state;
+-    IMFAsyncResult *result;
+     MFTIME system_time;
+     HRESULT hr;
+ 
+@@ -609,38 +637,26 @@ static HRESULT clock_change_state(struct presentation_clock *clock, enum clock_c
+        transitioning from running state. */
+     if ((clock->state == MFCLOCK_STATE_RUNNING) ^ (old_state == MFCLOCK_STATE_RUNNING))
+     {
+-        struct clock_timer *timer, *timer2;
+-
+         if (clock->state == MFCLOCK_STATE_RUNNING)
+         {
+-            LIST_FOR_EACH_ENTRY_SAFE(timer, timer2, &clock->timers, struct clock_timer, entry)
+-            {
+-                list_remove(&timer->entry);
+-                hr = MFCreateAsyncResult(&timer->IUnknown_iface, &clock->timer_callback, NULL, &result);
+-                IUnknown_Release(&timer->IUnknown_iface);
+-                if (SUCCEEDED(hr))
+-                {
+-                    MFPutWorkItemEx(MFASYNC_CALLBACK_QUEUE_TIMER, result);
+-                    IMFAsyncResult_Release(result);
+-                }
+-            }
++            if (FAILED(hr = MFAddPeriodicCallback(presentation_clock_timer_callback, (IUnknown*)&clock->IMFPresentationClock_iface, &clock->key)))
++                ERR("Failed to start periodic callback %#lx\n", hr);
+         }
+         else
+         {
+-            LIST_FOR_EACH_ENTRY(timer, &clock->timers, struct clock_timer, entry)
++            if (clock->key)
+             {
+-                if (timer->key)
+-                {
+-                    MFCancelWorkItem(timer->key);
+-                    timer->key = 0;
+-                }
++                MFRemovePeriodicCallback(clock->key);
++                clock->key = 0;
+             }
+         }
+     }
+ 
+     LIST_FOR_EACH_ENTRY(sink, &clock->sinks, struct clock_sink, entry)
+     {
+-        clock_notify_async_sink(clock, system_time, param, notification, sink->state_sink);
++        /* Don't notify a sink that is also the time source */
++        if (clock->time_source_sink != sink->state_sink)
++            clock_notify_async_sink(clock, system_time, param, notification, sink->state_sink);
+     }
+ 
+     return S_OK;
+@@ -797,39 +813,24 @@ static ULONG WINAPI present_clock_timer_Release(IMFTimer *iface)
+ }
+ 
+ static HRESULT present_clock_schedule_timer(struct presentation_clock *clock, DWORD flags, LONGLONG time,
+-        struct clock_timer *timer)
++        IMFAsyncCallback *callback, IUnknown *state, struct clock_timer *timer)
+ {
+-    IMFAsyncResult *result;
+     MFTIME systime, clocktime;
+-    LONGLONG frequency;
+     HRESULT hr;
+ 
+-    if (!(flags & MFTIMER_RELATIVE))
++    timer->time = time;
++
++    if (flags & MFTIMER_RELATIVE)
+     {
+         if (FAILED(hr = IMFPresentationTimeSource_GetCorrelatedTime(clock->time_source, 0, &clocktime, &systime)))
+         {
+             WARN("Failed to get clock time, hr %#lx.\n", hr);
+             return hr;
+         }
+-        if (time > clocktime)
+-            time -= clocktime;
+-        else
+-            time = 0;
++        timer->time += clocktime;
+     }
+ 
+-    frequency = clock->frequency / 1000;
+-    time /= frequency;
+-
+-    /* Scheduled item is using clock instance callback, with timer instance as an object. Clock callback will
+-       call user callback and cleanup timer list. */
+-
+-    if (FAILED(hr = MFCreateAsyncResult(&timer->IUnknown_iface, &clock->timer_callback, NULL, &result)))
+-        return hr;
+-
+-    hr = MFScheduleWorkItemEx(result, -time, &timer->key);
+-    IMFAsyncResult_Release(result);
+-
+-    return hr;
++    return MFCreateAsyncResult(NULL, callback, state, &timer->result);
+ }
+ 
+ static HRESULT WINAPI clock_timer_QueryInterface(IUnknown *iface, REFIID riid, void **obj)
+@@ -859,7 +860,6 @@ static ULONG WINAPI clock_timer_Release(IUnknown *iface)
+     if (!refcount)
+     {
+         IMFAsyncResult_Release(timer->result);
+-        IMFAsyncCallback_Release(timer->callback);
+         free(timer);
+     }
+ 
+@@ -877,7 +877,7 @@ static HRESULT WINAPI present_clock_timer_SetTimer(IMFTimer *iface, DWORD flags,
+         IMFAsyncCallback *callback, IUnknown *state, IUnknown **cancel_key)
+ {
+     struct presentation_clock *clock = impl_from_IMFTimer(iface);
+-    struct clock_timer *clock_timer;
++    struct clock_timer *clock_timer, *cur;
+     HRESULT hr;
+ 
+     TRACE("%p, %#lx, %s, %p, %p, %p.\n", iface, flags, debugstr_time(time), callback, state, cancel_key);
+@@ -885,7 +885,7 @@ static HRESULT WINAPI present_clock_timer_SetTimer(IMFTimer *iface, DWORD flags,
+     if (!(clock_timer = calloc(1, sizeof(*clock_timer))))
+         return E_OUTOFMEMORY;
+ 
+-    if (FAILED(hr = MFCreateAsyncResult(NULL, NULL, state, &clock_timer->result)))
++    if (FAILED(hr = present_clock_schedule_timer(clock, flags, time, callback, state, clock_timer)))
+     {
+         free(clock_timer);
+         return hr;
+@@ -893,19 +893,21 @@ static HRESULT WINAPI present_clock_timer_SetTimer(IMFTimer *iface, DWORD flags,
+ 
+     clock_timer->IUnknown_iface.lpVtbl = &clock_timer_vtbl;
+     clock_timer->refcount = 1;
+-    clock_timer->callback = callback;
+-    IMFAsyncCallback_AddRef(clock_timer->callback);
+ 
+     EnterCriticalSection(&clock->cs);
+ 
+-    if (clock->state == MFCLOCK_STATE_RUNNING)
+-        hr = present_clock_schedule_timer(clock, flags, time, clock_timer);
+-    else if (clock->state == MFCLOCK_STATE_STOPPED)
++    if (clock->state == MFCLOCK_STATE_STOPPED)
+         hr = MF_S_CLOCK_STOPPED;
+ 
+     if (SUCCEEDED(hr))
+     {
+-        list_add_tail(&clock->timers, &clock_timer->entry);
++        LIST_FOR_EACH_ENTRY_REV(cur, &clock->timers, struct clock_timer, entry)
++        {
++            if (cur->time <= time)
++                break;
++        }
++        list_add_after(&cur->entry, &clock_timer->entry);
++
+         if (cancel_key)
+         {
+             *cancel_key = &clock_timer->IUnknown_iface;
+@@ -935,11 +937,6 @@ static HRESULT WINAPI present_clock_timer_CancelTimer(IMFTimer *iface, IUnknown
+         if (&timer->IUnknown_iface == cancel_key)
+         {
+             list_remove(&timer->entry);
+-            if (timer->key)
+-            {
+-                MFCancelWorkItem(timer->key);
+-                timer->key = 0;
+-            }
+             IUnknown_Release(&timer->IUnknown_iface);
+             break;
+         }
+@@ -985,6 +982,11 @@ static HRESULT WINAPI present_clock_shutdown_Shutdown(IMFShutdown *iface)
+ 
+     EnterCriticalSection(&clock->cs);
+     clock->is_shut_down = TRUE;
++    if (clock->key)
++    {
++        MFRemovePeriodicCallback(clock->key);
++        clock->key = 0;
++    }
+     LeaveCriticalSection(&clock->cs);
+ 
+     return S_OK;
+@@ -1048,7 +1050,9 @@ static ULONG WINAPI present_clock_sink_callback_Release(IMFAsyncCallback *iface)
+ 
+ static HRESULT WINAPI present_clock_callback_GetParameters(IMFAsyncCallback *iface, DWORD *flags, DWORD *queue)
+ {
+-    return E_NOTIMPL;
++    *flags = 0;
++    *queue = MFASYNC_CALLBACK_QUEUE_MULTITHREADED;
++    return S_OK;
+ }
+ 
+ static HRESULT WINAPI present_clock_sink_callback_Invoke(IMFAsyncCallback *iface, IMFAsyncResult *result)
+@@ -1078,57 +1082,6 @@ static const IMFAsyncCallbackVtbl presentclocksinkcallbackvtbl =
+     present_clock_sink_callback_Invoke,
+ };
+ 
+-static ULONG WINAPI present_clock_timer_callback_AddRef(IMFAsyncCallback *iface)
+-{
+-    struct presentation_clock *clock = impl_from_timer_callback_IMFAsyncCallback(iface);
+-    return IMFPresentationClock_AddRef(&clock->IMFPresentationClock_iface);
+-}
+-
+-static ULONG WINAPI present_clock_timer_callback_Release(IMFAsyncCallback *iface)
+-{
+-    struct presentation_clock *clock = impl_from_timer_callback_IMFAsyncCallback(iface);
+-    return IMFPresentationClock_Release(&clock->IMFPresentationClock_iface);
+-}
+-
+-static HRESULT WINAPI present_clock_timer_callback_Invoke(IMFAsyncCallback *iface, IMFAsyncResult *result)
+-{
+-    struct presentation_clock *clock = impl_from_timer_callback_IMFAsyncCallback(iface);
+-    struct clock_timer *timer;
+-    IUnknown *object;
+-    HRESULT hr;
+-
+-    if (FAILED(hr = IMFAsyncResult_GetObject(result, &object)))
+-        return hr;
+-
+-    EnterCriticalSection(&clock->cs);
+-    LIST_FOR_EACH_ENTRY(timer, &clock->timers, struct clock_timer, entry)
+-    {
+-        if (&timer->IUnknown_iface == object)
+-        {
+-            list_remove(&timer->entry);
+-            IUnknown_Release(&timer->IUnknown_iface);
+-            break;
+-        }
+-    }
+-    LeaveCriticalSection(&clock->cs);
+-
+-    timer = impl_clock_timer_from_IUnknown(object);
+-    IMFAsyncCallback_Invoke(timer->callback, timer->result);
+-
+-    IUnknown_Release(object);
+-
+-    return S_OK;
+-}
+-
+-static const IMFAsyncCallbackVtbl presentclocktimercallbackvtbl =
+-{
+-    present_clock_callback_QueryInterface,
+-    present_clock_timer_callback_AddRef,
+-    present_clock_timer_callback_Release,
+-    present_clock_callback_GetParameters,
+-    present_clock_timer_callback_Invoke,
+-};
+-
+ /***********************************************************************
+  *      MFCreatePresentationClock (mf.@)
+  */
+@@ -1146,7 +1099,6 @@ HRESULT WINAPI MFCreatePresentationClock(IMFPresentationClock **clock)
+     object->IMFTimer_iface.lpVtbl = &presentclocktimervtbl;
+     object->IMFShutdown_iface.lpVtbl = &presentclockshutdownvtbl;
+     object->sink_callback.lpVtbl = &presentclocksinkcallbackvtbl;
+-    object->timer_callback.lpVtbl = &presentclocktimercallbackvtbl;
+     object->refcount = 1;
+     list_init(&object->sinks);
+     list_init(&object->timers);
+diff --git a/dlls/mf/evr.c b/dlls/mf/evr.c
+index eb366ea..bca5fa3 100644
+--- a/dlls/mf/evr.c
++++ b/dlls/mf/evr.c
+@@ -1976,7 +1976,6 @@ static HRESULT WINAPI video_renderer_clock_sink_OnClockStop(IMFClockStateSink *i
+         for (i = 0; i < renderer->stream_count; ++i)
+         {
+             struct video_stream *stream = renderer->streams[i];
+-            IMFMediaEventQueue_QueueEventParamVar(stream->event_queue, MEStreamSinkStopped, &GUID_NULL, S_OK, NULL);
+ 
+             EnterCriticalSection(&stream->cs);
+             stream->flags &= ~(EVR_STREAM_PREROLLED | EVR_STREAM_SAMPLE_NEEDED);
+@@ -1985,6 +1984,12 @@ static HRESULT WINAPI video_renderer_clock_sink_OnClockStop(IMFClockStateSink *i
+         renderer->state = EVR_STATE_STOPPED;
+     }
+ 
++    for (i = 0; i < renderer->stream_count; ++i)
++    {
++        struct video_stream *stream = renderer->streams[i];
++        IMFMediaEventQueue_QueueEventParamVar(stream->event_queue, MEStreamSinkStopped, &GUID_NULL, S_OK, NULL);
++    }
++
+     LeaveCriticalSection(&renderer->cs);
+ 
+     return S_OK;
+@@ -2001,13 +2006,10 @@ static HRESULT WINAPI video_renderer_clock_sink_OnClockPause(IMFClockStateSink *
+ 
+     IMFVideoPresenter_OnClockPause(renderer->presenter, systime);
+ 
+-    if (renderer->state == EVR_STATE_RUNNING)
++    for (i = 0; i < renderer->stream_count; ++i)
+     {
+-        for (i = 0; i < renderer->stream_count; ++i)
+-        {
+-            struct video_stream *stream = renderer->streams[i];
+-            IMFMediaEventQueue_QueueEventParamVar(stream->event_queue, MEStreamSinkPaused, &GUID_NULL, S_OK, NULL);
+-        }
++        struct video_stream *stream = renderer->streams[i];
++        IMFMediaEventQueue_QueueEventParamVar(stream->event_queue, MEStreamSinkPaused, &GUID_NULL, S_OK, NULL);
+     }
+ 
+     renderer->state = EVR_STATE_PAUSED;
+diff --git a/dlls/mf/main.c b/dlls/mf/main.c
+index 537db31..3aa81f4 100644
+--- a/dlls/mf/main.c
++++ b/dlls/mf/main.c
+@@ -36,6 +36,189 @@ WINE_DEFAULT_DEBUG_CHANNEL(mfplat);
+ 
+ extern const GUID CLSID_FileSchemePlugin;
+ 
++struct guid_def
++{
++    const GUID *guid;
++    const char *name;
++};
++
++static int __cdecl debug_compare_guid(const void *a, const void *b)
++{
++    const GUID *guid = a;
++    const struct guid_def *guid_def = b;
++    return memcmp(guid, guid_def->guid, sizeof(*guid));
++}
++
++/* copied from mfplat module */
++const char *debugstr_mf_guid(const GUID *guid)
++{
++    static const struct guid_def guid_defs[] =
++    {
++#define X(g) { &(g), #g }
++        X(MFAudioFormat_ADTS),
++        X(MFAudioFormat_PCM),
++        X(MFAudioFormat_PCM_HDCP),
++        X(MFAudioFormat_Float),
++        X(MFAudioFormat_DTS),
++        X(MFAudioFormat_DRM),
++        X(MFAudioFormat_MSP1),
++        X(MFAudioFormat_Vorbis),
++        X(MFAudioFormat_AAC),
++        X(MFVideoFormat_RGB24),
++        X(MFVideoFormat_ARGB32),
++        X(MFVideoFormat_RGB32),
++        X(MFVideoFormat_RGB565),
++        X(MFVideoFormat_RGB555),
++        X(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_AUDCAP_GUID),
++        X(MFT_CATEGORY_MULTIPLEXER),
++        X(MFVideoFormat_A2R10G10B10),
++        X(MFT_CATEGORY_VIDEO_EFFECT),
++        X(MFMediaType_Script),
++        X(MFMediaType_Image),
++        X(MFMediaType_HTML),
++        X(MFMediaType_Binary),
++        X(MFVideoFormat_MPEG2),
++        X(MFMediaType_FileTransfer),
++        X(MFVideoFormat_RGB8),
++        X(MFAudioFormat_Dolby_AC3),
++        X(MFVideoFormat_L8),
++        X(MFAudioFormat_LPCM),
++        X(MFVideoFormat_420O),
++        X(MFVideoFormat_AI44),
++        X(MFVideoFormat_AV1),
++        X(MFVideoFormat_AYUV),
++        X(MFVideoFormat_H263),
++        X(MFVideoFormat_H264),
++        X(MFVideoFormat_H265),
++        X(MFVideoFormat_HEVC),
++        X(MFVideoFormat_HEVC_ES),
++        X(MFT_CATEGORY_AUDIO_EFFECT),
++        X(MFVideoFormat_I420),
++        X(MFVideoFormat_IYUV),
++        X(MFT_CATEGORY_VIDEO_DECODER),
++        X(MFVideoFormat_M4S2),
++        X(MFVideoFormat_MJPG),
++        X(MFVideoFormat_MP43),
++        X(MFVideoFormat_MP4S),
++        X(MFVideoFormat_MP4V),
++        X(MFVideoFormat_MPG1),
++        X(MFVideoFormat_MSS1),
++        X(MFVideoFormat_MSS2),
++        X(MFVideoFormat_NV11),
++        X(MFVideoFormat_NV12),
++        X(MFVideoFormat_ORAW),
++        X(MFAudioFormat_Opus),
++        X(MFAudioFormat_MPEG),
++        X(MFVideoFormat_D16),
++        X(MFVideoFormat_P010),
++        X(MFVideoFormat_P016),
++        X(MFVideoFormat_P210),
++        X(MFVideoFormat_P216),
++        X(MFVideoFormat_L16),
++        X(MFAudioFormat_MP3),
++        X(MFVideoFormat_UYVY),
++        X(MFVideoFormat_VP10),
++        X(MFVideoFormat_VP80),
++        X(MFVideoFormat_VP90),
++        X(MFVideoFormat_WMV1),
++        X(MFVideoFormat_WMV2),
++        X(MFVideoFormat_WMV3),
++        X(MFVideoFormat_WVC1),
++        X(MFT_CATEGORY_OTHER),
++        X(MFVideoFormat_Y210),
++        X(MFVideoFormat_Y216),
++        X(MFVideoFormat_Y410),
++        X(MFVideoFormat_Y416),
++        X(MFVideoFormat_Y41P),
++        X(MFVideoFormat_Y41T),
++        X(MFVideoFormat_Y42T),
++        X(MFVideoFormat_YUY2),
++        X(MFVideoFormat_YV12),
++        X(MFVideoFormat_YVU9),
++        X(MFVideoFormat_YVYU),
++        X(MFAudioFormat_WMAudioV8),
++        X(MFAudioFormat_ALAC),
++        X(MFAudioFormat_AMR_NB),
++        X(MFMediaType_Audio),
++        X(MFAudioFormat_WMAudioV9),
++        X(MFAudioFormat_AMR_WB),
++        X(MFAudioFormat_WMAudio_Lossless),
++        X(MFAudioFormat_AMR_WP),
++        X(MFAudioFormat_WMASPDIF),
++        X(MFVideoFormat_DV25),
++        X(MFVideoFormat_DV50),
++        X(MFVideoFormat_DVC),
++        X(MFVideoFormat_DVH1),
++        X(MFVideoFormat_DVHD),
++        X(MFVideoFormat_DVSD),
++        X(MFVideoFormat_DVSL),
++        X(MFVideoFormat_A16B16G16R16F),
++        X(MFVideoFormat_v210),
++        X(MFVideoFormat_v216),
++        X(MFVideoFormat_v410),
++        X(MFMediaType_Video),
++        X(MFAudioFormat_AAC_HDCP),
++        X(MFT_CATEGORY_DEMULTIPLEXER),
++        X(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID),
++        X(MFT_CATEGORY_VIDEO_ENCODER),
++        X(MFAudioFormat_Dolby_AC3_HDCP),
++        X(MFMediaType_Subtitle),
++        X(MFMediaType_Stream),
++        X(MFAudioFormat_Dolby_AC3_SPDIF),
++        X(MFAudioFormat_Float_SpatialObjects),
++        X(MFMediaType_SAMI),
++        X(MFAudioFormat_ADTS_HDCP),
++        X(MFAudioFormat_FLAC),
++        X(MFAudioFormat_Dolby_DDPlus),
++        X(MFMediaType_MultiplexedFrames),
++        X(MFT_CATEGORY_AUDIO_DECODER),
++        X(MFAudioFormat_Base_HDCP),
++        X(MFT_CATEGORY_AUDIO_ENCODER),
++        X(MFVideoFormat_Base_HDCP),
++        X(MFVideoFormat_H264_HDCP),
++        X(MFVideoFormat_HEVC_HDCP),
++        X(MFMediaType_Default),
++        X(MFMediaType_Protected),
++        X(MFVideoFormat_H264_ES),
++        X(MFMediaType_Perception),
++        X(MFT_CATEGORY_VIDEO_PROCESSOR),
++#undef X
++    };
++    struct guid_def *ret = NULL;
++
++    if (guid)
++        ret = bsearch(guid, guid_defs, ARRAY_SIZE(guid_defs), sizeof(*guid_defs), debug_compare_guid);
++
++    return ret ? wine_dbg_sprintf("%s", ret->name) : wine_dbgstr_guid(guid);
++}
++
++const char *debugstr_media_type(IMFMediaType *media_type)
++{
++    UINT channels, sps;
++    GUID subtype = {0};
++    UINT64 frame_size;
++
++    if (!media_type)
++        return "{null}";
++
++    IMFMediaType_GetGUID(media_type, &MF_MT_SUBTYPE, &subtype);
++
++    if (SUCCEEDED(IMFMediaType_GetUINT64(media_type, &MF_MT_FRAME_SIZE, &frame_size)) && frame_size)
++    {
++        return wine_dbg_sprintf("{%p %s %ux%u}", media_type, debugstr_mf_guid(&subtype), (UINT)(frame_size >> 32), (UINT32)frame_size);
++    }
++    else if (SUCCEEDED(IMFMediaType_GetUINT32(media_type, &MF_MT_AUDIO_NUM_CHANNELS, &channels)) && channels)
++    {
++        if (SUCCEEDED(IMFMediaType_GetUINT32(media_type, &MF_MT_AUDIO_SAMPLES_PER_SECOND, &sps)))
++            return wine_dbg_sprintf("{%p %s %u-ch %u}", media_type, debugstr_mf_guid(&subtype), channels, sps);
++        return wine_dbg_sprintf("{%p %s %u-ch}", media_type, debugstr_mf_guid(&subtype), channels);
++    }
++    else
++    {
++        return wine_dbg_sprintf("{%p %s ?}", media_type, debugstr_mf_guid(&subtype));
++    }
++}
++
+ struct activate_object
+ {
+     IMFActivate IMFActivate_iface;
+@@ -772,6 +955,18 @@ HRESULT WINAPI MFEnumDeviceSources(IMFAttributes *attributes, IMFActivate ***sou
+     return E_INVALIDARG;
+ }
+ 
++/***********************************************************************
++ *      MFCreateDeviceSource (mf.@)
++ */
++HRESULT WINAPI MFCreateDeviceSource(IMFAttributes *attributes, IMFMediaSource **source)
++{
++    FIXME("%p %p: stub!\n", attributes, source);
++
++    if (!attributes || !source) return E_INVALIDARG;
++    *source = NULL;
++    return E_NOTIMPL;
++}
++
+ struct simple_type_handler
+ {
+     IMFMediaTypeHandler IMFMediaTypeHandler_iface;
+diff --git a/dlls/mf/mf_private.h b/dlls/mf/mf_private.h
+index 1f2ef17..ad8d730 100644
+--- a/dlls/mf/mf_private.h
++++ b/dlls/mf/mf_private.h
+@@ -113,17 +113,21 @@ static inline const char *debugstr_propvar(const PROPVARIANT *v)
+     }
+ }
+ 
++extern const char *debugstr_media_type(IMFMediaType *media_type);
++
+ extern HRESULT file_scheme_handler_construct(REFIID riid, void **obj);
+ extern HRESULT urlmon_scheme_handler_construct(REFIID riid, void **obj);
+ 
+ extern BOOL mf_is_sample_copier_transform(IMFTransform *transform);
+ extern BOOL mf_is_sar_sink(IMFMediaSink *sink);
+ extern HRESULT create_topology(TOPOID id, IMFTopology **topology);
++extern MF_TOPOLOGY_TYPE topology_node_get_type(IMFTopologyNode *node);
+ extern HRESULT topology_node_get_object(IMFTopologyNode *node, REFIID riid, void **obj);
+ extern HRESULT topology_node_get_type_handler(IMFTopologyNode *node, DWORD stream, BOOL output, IMFMediaTypeHandler **handler);
+ extern HRESULT topology_node_init_media_type(IMFTopologyNode *node, DWORD stream, BOOL output, IMFMediaType **type);
+ extern BOOL topology_node_is_d3d_aware(IMFTopologyNode *node);
+ extern HRESULT topology_node_set_device_manager(IMFTopologyNode *node, IUnknown *device_manager);
++extern IMFAttributes *topology_node_transform_async_get_attributes(IMFTopologyNode *node);
+ extern HRESULT stream_sink_get_device_manager(IMFStreamSink *stream_sink, IUnknown **device_manager);
+ 
+ extern HRESULT enum_audio_capture_sources(IMFAttributes *attributes, IMFActivate ***sources, UINT32 *ret_count);
+diff --git a/dlls/mf/samplegrabber.c b/dlls/mf/samplegrabber.c
+index a8c797f..5f2c28d 100644
+--- a/dlls/mf/samplegrabber.c
++++ b/dlls/mf/samplegrabber.c
+@@ -89,8 +89,8 @@ struct sample_grabber
+     float rate;
+     enum sink_state state;
+     CRITICAL_SECTION cs;
+-    UINT32 sample_count;
+-    IMFSample *samples[MAX_SAMPLE_QUEUE_LENGTH];
++    UINT32 samples_queued;
++    UINT32 pending_sample_deliveries;
+ };
+ 
+ static IMFSampleGrabberSinkCallback *sample_grabber_get_callback(const struct sample_grabber *sink)
+@@ -187,13 +187,14 @@ static ULONG WINAPI sample_grabber_stream_AddRef(IMFStreamSink *iface)
+     return IMFMediaSink_AddRef(&grabber->IMFMediaSink_iface);
+ }
+ 
+-static void stream_release_pending_item(struct scheduled_item *item)
++static void stream_release_pending_item(struct sample_grabber *grabber, struct scheduled_item *item)
+ {
+     list_remove(&item->entry);
+     switch (item->type)
+     {
+         case ITEM_TYPE_SAMPLE:
+             IMFSample_Release(item->u.sample);
++            grabber->samples_queued--;
+             break;
+         case ITEM_TYPE_MARKER:
+             PropVariantClear(&item->u.marker.context);
+@@ -398,13 +399,13 @@ static HRESULT stream_queue_sample(struct sample_grabber *grabber, IMFSample *sa
+     item->u.sample = sample;
+     IMFSample_AddRef(item->u.sample);
+     list_init(&item->entry);
+-    if (list_empty(&grabber->items))
++    if (!grabber->samples_queued++)
+         hr = stream_schedule_sample(grabber, item);
+ 
+     if (SUCCEEDED(hr))
+         list_add_tail(&grabber->items, &item->entry);
+     else
+-        stream_release_pending_item(item);
++        stream_release_pending_item(grabber, item);
+ 
+     return hr;
+ }
+@@ -412,12 +413,13 @@ static HRESULT stream_queue_sample(struct sample_grabber *grabber, IMFSample *sa
+ static void sample_grabber_stream_request_sample(struct sample_grabber *grabber)
+ {
+     IMFStreamSink_QueueEvent(&grabber->IMFStreamSink_iface, MEStreamSinkRequestSample, &GUID_NULL, S_OK, NULL);
++    grabber->pending_sample_deliveries++;
+ }
+ 
+ static HRESULT WINAPI sample_grabber_stream_ProcessSample(IMFStreamSink *iface, IMFSample *sample)
+ {
+     struct sample_grabber *grabber = impl_from_IMFStreamSink(iface);
+-    BOOL sample_delivered;
++    BOOL sample_delivered = FALSE;
+     LONGLONG sampletime;
+     HRESULT hr = S_OK;
+ 
+@@ -430,8 +432,11 @@ static HRESULT WINAPI sample_grabber_stream_ProcessSample(IMFStreamSink *iface,
+ 
+     if (grabber->is_shut_down)
+         hr = MF_E_STREAMSINK_REMOVED;
+-    else if (grabber->state == SINK_STATE_RUNNING || (grabber->state == SINK_STATE_PAUSED && grabber->ignore_clock))
++    else if (grabber->state != SINK_STATE_STOPPED)
+     {
++        if (grabber->pending_sample_deliveries)
++            grabber->pending_sample_deliveries--;
++
+         hr = IMFSample_GetSampleTime(sample, &sampletime);
+ 
+         if (SUCCEEDED(hr))
+@@ -448,14 +453,6 @@ static HRESULT WINAPI sample_grabber_stream_ProcessSample(IMFStreamSink *iface,
+                 hr = stream_queue_sample(grabber, sample);
+         }
+     }
+-    else if (grabber->state == SINK_STATE_PAUSED)
+-    {
+-        if (grabber->sample_count < MAX_SAMPLE_QUEUE_LENGTH)
+-        {
+-            IMFSample_AddRef(sample);
+-            grabber->samples[grabber->sample_count++] = sample;
+-        }
+-    }
+ 
+     LeaveCriticalSection(&grabber->cs);
+ 
+@@ -492,7 +489,7 @@ static HRESULT stream_place_marker(struct sample_grabber *grabber, MFSTREAMSINK_
+     if (SUCCEEDED(hr))
+         list_add_tail(&grabber->items, &item->entry);
+     else
+-        stream_release_pending_item(item);
++        stream_release_pending_item(grabber, item);
+ 
+     return hr;
+ }
+@@ -520,7 +517,6 @@ static HRESULT WINAPI sample_grabber_stream_PlaceMarker(IMFStreamSink *iface, MF
+ static HRESULT WINAPI sample_grabber_stream_Flush(IMFStreamSink *iface)
+ {
+     struct sample_grabber *grabber = impl_from_IMFStreamSink(iface);
+-    struct scheduled_item *item, *next_item;
+     HRESULT hr = S_OK;
+ 
+     TRACE("%p.\n", iface);
+@@ -529,17 +525,6 @@ static HRESULT WINAPI sample_grabber_stream_Flush(IMFStreamSink *iface)
+ 
+     if (grabber->is_shut_down)
+         hr = MF_E_STREAMSINK_REMOVED;
+-    else
+-    {
+-        LIST_FOR_EACH_ENTRY_SAFE(item, next_item, &grabber->items, struct scheduled_item, entry)
+-        {
+-            /* Samples are discarded, markers are processed immediately. */
+-            if (item->type == ITEM_TYPE_MARKER)
+-                sample_grabber_stream_report_marker(grabber, &item->u.marker.context, E_ABORT);
+-
+-            stream_release_pending_item(item);
+-        }
+-    }
+ 
+     LeaveCriticalSection(&grabber->cs);
+ 
+@@ -744,7 +729,9 @@ static ULONG WINAPI sample_grabber_stream_timer_callback_Release(IMFAsyncCallbac
+ static HRESULT WINAPI sample_grabber_stream_timer_callback_GetParameters(IMFAsyncCallback *iface, DWORD *flags,
+         DWORD *queue)
+ {
+-    return E_NOTIMPL;
++    *flags = 0;
++    *queue = MFASYNC_CALLBACK_QUEUE_MULTITHREADED;
++    return S_OK;
+ }
+ 
+ static HRESULT WINAPI sample_grabber_stream_timer_callback_Invoke(IMFAsyncCallback *iface, IMFAsyncResult *result)
+@@ -761,7 +748,7 @@ static HRESULT WINAPI sample_grabber_stream_timer_callback_Invoke(IMFAsyncCallba
+         if (item->type == ITEM_TYPE_MARKER)
+         {
+             sample_grabber_stream_report_marker(grabber, &item->u.marker.context, S_OK);
+-            stream_release_pending_item(item);
++            stream_release_pending_item(grabber, item);
+         }
+         else if (item->type == ITEM_TYPE_SAMPLE)
+         {
+@@ -769,8 +756,10 @@ static HRESULT WINAPI sample_grabber_stream_timer_callback_Invoke(IMFAsyncCallba
+             {
+                 if (FAILED(hr = sample_grabber_report_sample(grabber, item->u.sample, &sample_delivered)))
+                     WARN("Failed to report a sample, hr %#lx.\n", hr);
+-                stream_release_pending_item(item);
++                stream_release_pending_item(grabber, item);
+                 sample_reported = TRUE;
++                if (sample_delivered)
++                    sample_grabber_stream_request_sample(grabber);
+             }
+             else
+             {
+@@ -780,8 +769,6 @@ static HRESULT WINAPI sample_grabber_stream_timer_callback_Invoke(IMFAsyncCallba
+             }
+         }
+     }
+-    if (sample_delivered)
+-        sample_grabber_stream_request_sample(grabber);
+ 
+     LeaveCriticalSection(&grabber->cs);
+ 
+@@ -852,21 +839,7 @@ static void sample_grabber_release_pending_items(struct sample_grabber *grabber)
+ 
+     LIST_FOR_EACH_ENTRY_SAFE(item, next_item, &grabber->items, struct scheduled_item, entry)
+     {
+-        stream_release_pending_item(item);
+-    }
+-}
+-
+-static void release_samples(struct sample_grabber *grabber)
+-{
+-    unsigned int i;
+-
+-    for (i = 0; i < MAX_SAMPLE_QUEUE_LENGTH; ++i)
+-    {
+-        if (grabber->samples[i])
+-        {
+-            IMFSample_Release(grabber->samples[i]);
+-            grabber->samples[i] = NULL;
+-        }
++        stream_release_pending_item(grabber, item);
+     }
+ }
+ 
+@@ -902,7 +875,6 @@ static ULONG WINAPI sample_grabber_sink_Release(IMFMediaSink *iface)
+         if (grabber->sample_attributes)
+             IMFAttributes_Release(grabber->sample_attributes);
+         sample_grabber_release_pending_items(grabber);
+-        release_samples(grabber);
+         DeleteCriticalSection(&grabber->cs);
+         free(grabber);
+     }
+@@ -1175,6 +1147,7 @@ static HRESULT sample_grabber_set_state(struct sample_grabber *grabber, enum sin
+         [SINK_STATE_RUNNING] = MEStreamSinkStarted,
+     };
+     BOOL do_callback = FALSE;
++    byte required_requests;
+     HRESULT hr = S_OK;
+     unsigned int i;
+ 
+@@ -1189,27 +1162,22 @@ static HRESULT sample_grabber_set_state(struct sample_grabber *grabber, enum sin
+             if (state == SINK_STATE_STOPPED)
+             {
+                 sample_grabber_cancel_timer(grabber);
+-                release_samples(grabber);
+-                grabber->sample_count = MAX_SAMPLE_QUEUE_LENGTH;
++                sample_grabber_release_pending_items(grabber);
++                grabber->pending_sample_deliveries = 0;
+             }
+-
+-            if (state == SINK_STATE_RUNNING && grabber->state != SINK_STATE_RUNNING)
++            else if (state == SINK_STATE_RUNNING &&
++                 (grabber->state != SINK_STATE_RUNNING || offset != PRESENTATION_CURRENT_POSITION))
+             {
+-                /* Every transition to running state sends a bunch requests to build up initial queue. */
+-                for (i = 0; i < grabber->sample_count; ++i)
++                if (offset != PRESENTATION_CURRENT_POSITION)
+                 {
+-                    if (grabber->state == SINK_STATE_PAUSED && offset == PRESENTATION_CURRENT_POSITION)
+-                    {
+-                        assert(grabber->samples[i]);
+-                        stream_queue_sample(grabber, grabber->samples[i]);
+-                    }
+-                    else
+-                    {
+-                        sample_grabber_stream_request_sample(grabber);
+-                    }
++                    sample_grabber_cancel_timer(grabber);
++                    sample_grabber_release_pending_items(grabber);
+                 }
+-                release_samples(grabber);
+-                grabber->sample_count = 0;
++
++                required_requests = MAX_SAMPLE_QUEUE_LENGTH - grabber->pending_sample_deliveries;
++
++                for (i = 0; i < required_requests; i++)
++                    sample_grabber_stream_request_sample(grabber);
+             }
+ 
+             do_callback = state != grabber->state || state != SINK_STATE_PAUSED;
+@@ -1517,7 +1485,6 @@ static HRESULT sample_grabber_create_object(IMFAttributes *attributes, void *use
+     object->IMFStreamSink_iface.lpVtbl = &sample_grabber_stream_vtbl;
+     object->IMFMediaTypeHandler_iface.lpVtbl = &sample_grabber_stream_type_handler_vtbl;
+     object->timer_callback.lpVtbl = &sample_grabber_stream_timer_callback_vtbl;
+-    object->sample_count = MAX_SAMPLE_QUEUE_LENGTH;
+     object->refcount = 1;
+     object->rate = 1.0f;
+     if (FAILED(IMFSampleGrabberSinkCallback_QueryInterface(context->callback, &IID_IMFSampleGrabberSinkCallback2,
+diff --git a/dlls/mf/sar.c b/dlls/mf/sar.c
+index 19e4eed..69bece3 100644
+--- a/dlls/mf/sar.c
++++ b/dlls/mf/sar.c
+@@ -30,18 +30,14 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(mfplat);
+ 
+-enum stream_state
+-{
+-    STREAM_STATE_STOPPED = 0,
+-    STREAM_STATE_RUNNING,
+-    STREAM_STATE_PAUSED,
+-};
+-
+ enum audio_renderer_flags
+ {
+     SAR_SHUT_DOWN = 0x1,
+     SAR_PREROLLED = 0x2,
+     SAR_SAMPLE_REQUESTED = 0x4,
++    SAR_SEEKING = 0x8,
++    SAR_REPORT_SEEK_TIME = 0x10,
++    SAR_ADDING_SILENCE = 0x20,
+ };
+ 
+ enum queued_object_type
+@@ -81,6 +77,7 @@ struct audio_renderer
+     IMFSimpleAudioVolume IMFSimpleAudioVolume_iface;
+     IMFAudioStreamVolume IMFAudioStreamVolume_iface;
+     IMFAudioPolicy IMFAudioPolicy_iface;
++    IMFPresentationTimeSource IMFPresentationTimeSource_iface;
+     IMFAsyncCallback render_callback;
+     LONG refcount;
+     IMFMediaEventQueue *event_queue;
+@@ -93,6 +90,7 @@ struct audio_renderer
+     IAudioRenderClient *audio_render_client;
+     IAudioStreamVolume *stream_volume;
+     ISimpleAudioVolume *audio_volume;
++    IAudioClock *audio_clock;
+     struct
+     {
+         unsigned int flags;
+@@ -104,9 +102,16 @@ struct audio_renderer
+     unsigned int queued_frames;
+     unsigned int max_frames;
+     struct list queue;
+-    enum stream_state state;
+     unsigned int flags;
+     CRITICAL_SECTION cs;
++
++    MFCLOCK_STATE clock_state;
++    DWORD sample_rate;
++    LONGLONG pts;
++    LONGLONG seek_pts;
++    UINT64 position;
++    UINT64 audio_clock_frequency;
++    float rate;
+ };
+ 
+ static void release_pending_object(struct queued_object *object)
+@@ -175,6 +180,11 @@ static struct audio_renderer *impl_from_IMFMediaTypeHandler(IMFMediaTypeHandler
+     return CONTAINING_RECORD(iface, struct audio_renderer, IMFMediaTypeHandler_iface);
+ }
+ 
++static struct audio_renderer *impl_from_IMFPresentationTimeSource(IMFPresentationTimeSource *iface)
++{
++    return CONTAINING_RECORD(iface, struct audio_renderer, IMFPresentationTimeSource_iface);
++}
++
+ static struct audio_renderer *impl_from_render_callback_IMFAsyncCallback(IMFAsyncCallback *iface)
+ {
+     return CONTAINING_RECORD(iface, struct audio_renderer, render_callback);
+@@ -207,6 +217,10 @@ static HRESULT WINAPI audio_renderer_sink_QueryInterface(IMFMediaSink *iface, RE
+     {
+         *obj = &renderer->IMFGetService_iface;
+     }
++    else if (IsEqualIID(riid, &IID_IMFPresentationTimeSource))
++    {
++        *obj = &renderer->IMFPresentationTimeSource_iface;
++    }
+     else
+     {
+         WARN("Unsupported %s.\n", debugstr_guid(riid));
+@@ -244,6 +258,8 @@ static void audio_renderer_release_audio_client(struct audio_renderer *renderer)
+         IAudioClient_Reset(renderer->audio_client);
+         IAudioClient_Release(renderer->audio_client);
+     }
++    renderer->position = 0;
++    renderer->pts = 0;
+     renderer->audio_client = NULL;
+     if (renderer->audio_render_client)
+         IAudioRenderClient_Release(renderer->audio_render_client);
+@@ -254,6 +270,9 @@ static void audio_renderer_release_audio_client(struct audio_renderer *renderer)
+     if (renderer->audio_volume)
+         ISimpleAudioVolume_Release(renderer->audio_volume);
+     renderer->audio_volume = NULL;
++    if (renderer->audio_clock)
++        IAudioClock_Release(renderer->audio_clock);
++    renderer->audio_clock = NULL;
+     renderer->flags &= ~SAR_PREROLLED;
+ }
+ 
+@@ -405,6 +424,7 @@ static void audio_renderer_set_presentation_clock(struct audio_renderer *rendere
+ static HRESULT WINAPI audio_renderer_sink_SetPresentationClock(IMFMediaSink *iface, IMFPresentationClock *clock)
+ {
+     struct audio_renderer *renderer = impl_from_IMFMediaSink(iface);
++    IMFPresentationTimeSource *time_source = NULL;
+     HRESULT hr = S_OK;
+ 
+     TRACE("%p, %p.\n", iface, clock);
+@@ -413,8 +433,12 @@ static HRESULT WINAPI audio_renderer_sink_SetPresentationClock(IMFMediaSink *ifa
+ 
+     if (renderer->flags & SAR_SHUT_DOWN)
+         hr = MF_E_SHUTDOWN;
+-    else
++    else if (!clock || SUCCEEDED(hr = IMFPresentationClock_GetTimeSource(clock, &time_source)))
++    {
++        if (time_source)
++            IMFPresentationTimeSource_Release(time_source);
+         audio_renderer_set_presentation_clock(renderer, clock);
++    }
+ 
+     LeaveCriticalSection(&renderer->cs);
+ 
+@@ -493,7 +517,7 @@ static void audio_renderer_preroll(struct audio_renderer *renderer)
+ {
+     unsigned int i;
+ 
+-    if (renderer->flags & SAR_PREROLLED)
++    if (renderer->flags & SAR_PREROLLED || renderer->rate == 0.0f)
+         return;
+ 
+     for (i = 0; i < 2; ++i)
+@@ -636,17 +660,24 @@ static HRESULT WINAPI audio_renderer_clock_sink_OnClockStart(IMFClockStateSink *
+     EnterCriticalSection(&renderer->cs);
+     if (renderer->audio_client)
+     {
+-        if (renderer->state != STREAM_STATE_RUNNING)
++        if (offset != PRESENTATION_CURRENT_POSITION)
++        {
++            renderer->seek_pts = offset;
++            renderer->flags |= (SAR_SEEKING | SAR_REPORT_SEEK_TIME);
++        }
++        if (renderer->clock_state != MFCLOCK_STATE_RUNNING)
+         {
+-            if (FAILED(hr = IAudioClient_Start(renderer->audio_client)))
++            if (renderer->rate != 0.0f && FAILED(hr = IAudioClient_Start(renderer->audio_client)))
+                 WARN("Failed to start audio client, hr %#lx.\n", hr);
+-            renderer->state = STREAM_STATE_RUNNING;
++            renderer->clock_state = MFCLOCK_STATE_RUNNING;
+         }
+     }
+     else
+         hr = MF_E_NOT_INITIALIZED;
+ 
+     IMFMediaEventQueue_QueueEventParamVar(renderer->stream_event_queue, MEStreamSinkStarted, &GUID_NULL, hr, NULL);
++    if (renderer->rate == 0.0f)
++        IMFMediaEventQueue_QueueEventParamVar(renderer->stream_event_queue, MEStreamSinkScrubSampleComplete, &GUID_NULL, hr, NULL);
+     if (SUCCEEDED(hr))
+         audio_renderer_preroll(renderer);
+     LeaveCriticalSection(&renderer->cs);
+@@ -664,16 +695,21 @@ static HRESULT WINAPI audio_renderer_clock_sink_OnClockStop(IMFClockStateSink *i
+     EnterCriticalSection(&renderer->cs);
+     if (renderer->audio_client)
+     {
+-        if (renderer->state != STREAM_STATE_STOPPED)
++        if (renderer->clock_state != MFCLOCK_STATE_STOPPED)
+         {
+             if (SUCCEEDED(hr = IAudioClient_Stop(renderer->audio_client)))
+             {
+-                if (FAILED(hr = IAudioClient_Reset(renderer->audio_client)))
++                if (SUCCEEDED(hr = IAudioClient_Reset(renderer->audio_client)))
++                {
++                    renderer->position = 0;
++                    renderer->pts = 0;
++                }
++                else
+                     WARN("Failed to reset audio client, hr %#lx.\n", hr);
+             }
+             else
+                 WARN("Failed to stop audio client, hr %#lx.\n", hr);
+-            renderer->state = STREAM_STATE_STOPPED;
++            renderer->clock_state = MFCLOCK_STATE_STOPPED;
+             renderer->flags &= ~SAR_PREROLLED;
+         }
+     }
+@@ -694,13 +730,15 @@ static HRESULT WINAPI audio_renderer_clock_sink_OnClockPause(IMFClockStateSink *
+     TRACE("%p, %s.\n", iface, debugstr_time(systime));
+ 
+     EnterCriticalSection(&renderer->cs);
+-    if (renderer->state == STREAM_STATE_RUNNING)
++    if (renderer->clock_state == MFCLOCK_STATE_RUNNING)
+     {
+         if (renderer->audio_client)
+         {
+             if (FAILED(hr = IAudioClient_Stop(renderer->audio_client)))
+                 WARN("Failed to stop audio client, hr %#lx.\n", hr);
+-            renderer->state = STREAM_STATE_PAUSED;
++            else
++                hr = S_OK;
++            renderer->clock_state = MFCLOCK_STATE_PAUSED;
+         }
+         else
+             hr = MF_E_NOT_INITIALIZED;
+@@ -725,17 +763,19 @@ static HRESULT WINAPI audio_renderer_clock_sink_OnClockRestart(IMFClockStateSink
+     EnterCriticalSection(&renderer->cs);
+     if (renderer->audio_client)
+     {
+-        if ((preroll = (renderer->state != STREAM_STATE_RUNNING)))
++        if ((preroll = (renderer->clock_state != MFCLOCK_STATE_RUNNING)))
+         {
+-            if (FAILED(hr = IAudioClient_Start(renderer->audio_client)))
++            if (renderer->rate != 0.0f && FAILED(hr = IAudioClient_Start(renderer->audio_client)))
+                 WARN("Failed to start audio client, hr %#lx.\n", hr);
+-            renderer->state = STREAM_STATE_RUNNING;
++            renderer->clock_state = MFCLOCK_STATE_RUNNING;
+         }
+     }
+     else
+         hr = MF_E_NOT_INITIALIZED;
+ 
+     IMFMediaEventQueue_QueueEventParamVar(renderer->stream_event_queue, MEStreamSinkStarted, &GUID_NULL, hr, NULL);
++    if (renderer->rate == 0.0f)
++        IMFMediaEventQueue_QueueEventParamVar(renderer->stream_event_queue, MEStreamSinkScrubSampleComplete, &GUID_NULL, hr, NULL);
+     if (preroll)
+         audio_renderer_preroll(renderer);
+ 
+@@ -746,9 +786,29 @@ static HRESULT WINAPI audio_renderer_clock_sink_OnClockRestart(IMFClockStateSink
+ 
+ static HRESULT WINAPI audio_renderer_clock_sink_OnClockSetRate(IMFClockStateSink *iface, MFTIME systime, float rate)
+ {
+-    FIXME("%p, %s, %f.\n", iface, debugstr_time(systime), rate);
++    struct audio_renderer *renderer = impl_from_IMFClockStateSink(iface);
++    HRESULT hr = S_OK;
+ 
+-    return E_NOTIMPL;
++    TRACE("%p, %s, %f.\n", iface, debugstr_time(systime), rate);
++
++    EnterCriticalSection(&renderer->cs);
++
++    if (rate == 0.0 || rate == 1.0)
++    {
++        renderer->rate = rate;
++    }
++    else
++    {
++        WARN("%f is an unsupported rate.\n", rate);
++        hr = MF_E_UNSUPPORTED_RATE;
++    }
++
++    if (hr == S_OK)
++        IMFMediaEventQueue_QueueEventParamVar(renderer->stream_event_queue, MEStreamSinkRateChanged, &GUID_NULL, hr, NULL);
++
++    LeaveCriticalSection(&renderer->cs);
++
++    return hr;
+ }
+ 
+ static const IMFClockStateSinkVtbl audio_renderer_clock_sink_vtbl =
+@@ -1145,6 +1205,137 @@ static const IMFAudioPolicyVtbl audio_renderer_policy_vtbl =
+     audio_renderer_policy_GetIconPath,
+ };
+ 
++static HRESULT WINAPI audio_renderer_time_source_QueryInterface(IMFPresentationTimeSource *iface, REFIID riid, void **obj)
++{
++    struct audio_renderer *renderer = impl_from_IMFPresentationTimeSource(iface);
++    return IMFMediaSink_QueryInterface(&renderer->IMFMediaSink_iface, riid, obj);
++}
++
++static ULONG WINAPI audio_renderer_time_source_AddRef(IMFPresentationTimeSource *iface)
++{
++    struct audio_renderer *renderer = impl_from_IMFPresentationTimeSource(iface);
++    return IMFMediaSink_AddRef(&renderer->IMFMediaSink_iface);
++}
++
++static ULONG WINAPI audio_renderer_time_source_Release(IMFPresentationTimeSource *iface)
++{
++    struct audio_renderer *renderer = impl_from_IMFPresentationTimeSource(iface);
++    return IMFMediaSink_Release(&renderer->IMFMediaSink_iface);
++}
++
++static HRESULT WINAPI audio_renderer_time_source_GetClockCharacteristics(IMFPresentationTimeSource *iface, DWORD *flags)
++{
++    TRACE("%p, %p.\n", iface, flags);
++
++    *flags = MFCLOCK_CHARACTERISTICS_FLAG_FREQUENCY_10MHZ;
++
++    return S_OK;
++}
++
++static HRESULT audio_renderer_get_correlated_time(struct audio_renderer *renderer, LONGLONG *clock_time,
++        MFTIME *system_time)
++{
++    UINT64 position, counter;
++    LONGLONG time;
++    HRESULT hr;
++
++    if (FAILED(hr = IAudioClock_GetPosition(renderer->audio_clock, &position, &counter)))
++        return hr;
++
++    time = renderer->pts + (INT64)(position - renderer->position) * MFCLOCK_FREQUENCY_HNS / (INT64)renderer->audio_clock_frequency;
++    if (renderer->flags & SAR_REPORT_SEEK_TIME)
++    {
++        if (time < renderer->seek_pts)
++            time = renderer->seek_pts;
++        else
++            renderer->flags &= ~SAR_REPORT_SEEK_TIME;
++    }
++
++    if (clock_time)
++        *clock_time = time;
++    if (system_time)
++        *system_time = counter;
++
++    return S_OK;
++}
++
++static HRESULT WINAPI audio_renderer_time_source_GetCorrelatedTime(IMFPresentationTimeSource *iface, DWORD reserved, LONGLONG *clock_time,
++        MFTIME *system_time)
++{
++    struct audio_renderer *renderer = impl_from_IMFPresentationTimeSource(iface);
++    HRESULT hr;
++
++    TRACE("%p, %#lx, %p, %p.\n", iface, reserved, clock_time, system_time);
++
++    EnterCriticalSection(&renderer->cs);
++    if (!renderer->audio_clock)
++        hr = MF_E_NOT_INITIALIZED;
++    else
++        hr = audio_renderer_get_correlated_time(renderer, clock_time, system_time);
++    LeaveCriticalSection(&renderer->cs);
++
++    return hr;
++}
++
++static HRESULT WINAPI audio_renderer_time_source_GetContinuityKey(IMFPresentationTimeSource *iface, DWORD *key)
++{
++    TRACE("%p, %p.\n", iface, key);
++
++    *key = 0;
++
++    return S_OK;
++}
++
++static HRESULT WINAPI audio_renderer_time_source_GetState(IMFPresentationTimeSource *iface, DWORD reserved, MFCLOCK_STATE *state)
++{
++    struct audio_renderer *renderer = impl_from_IMFPresentationTimeSource(iface);
++    TRACE("%p, %#lx, %p.\n", iface, reserved, state);
++
++    *state = renderer->clock_state;
++
++    return S_OK;
++}
++
++static HRESULT WINAPI audio_renderer_time_source_GetProperties(IMFPresentationTimeSource *iface, MFCLOCK_PROPERTIES *props)
++{
++    TRACE("%p, %p.\n", iface, props);
++
++    if (!props)
++        return E_POINTER;
++
++    memset(props, 0, sizeof(*props));
++    props->qwClockFrequency = MFCLOCK_FREQUENCY_HNS;
++    props->dwClockTolerance = MFCLOCK_TOLERANCE_UNKNOWN;
++    props->dwClockJitter = 1;
++
++    return S_OK;
++}
++
++static HRESULT WINAPI audio_renderer_time_source_GetUnderlyingClock(IMFPresentationTimeSource *iface, IMFClock **ppClock)
++{
++    TRACE("%p, %p.\n", iface, ppClock);
++
++    if (!ppClock)
++        return E_POINTER;
++
++    *ppClock = NULL;
++
++    return MF_E_NO_CLOCK;
++}
++
++static const IMFPresentationTimeSourceVtbl audio_renderer_time_source_vtbl =
++{
++    audio_renderer_time_source_QueryInterface,
++    audio_renderer_time_source_AddRef,
++    audio_renderer_time_source_Release,
++    audio_renderer_time_source_GetClockCharacteristics,
++    audio_renderer_time_source_GetCorrelatedTime,
++    audio_renderer_time_source_GetContinuityKey,
++    audio_renderer_time_source_GetState,
++    audio_renderer_time_source_GetProperties,
++    audio_renderer_time_source_GetUnderlyingClock,
++};
++
+ static HRESULT sar_create_mmdevice(IMFAttributes *attributes, struct audio_renderer *renderer)
+ {
+     WCHAR *endpoint;
+@@ -1337,15 +1528,32 @@ static HRESULT WINAPI audio_renderer_stream_GetMediaTypeHandler(IMFStreamSink *i
+ 
+ static HRESULT stream_queue_sample(struct audio_renderer *renderer, IMFSample *sample)
+ {
++    DWORD sample_len, sample_frames, buffer_count;
+     struct queued_object *object;
+-    DWORD sample_len, sample_frames;
++    LONGLONG start_time;
+     HRESULT hr;
+ 
++    if (FAILED(hr = IMFSample_GetBufferCount(sample, &buffer_count)))
++        return hr;
++
++    if (!buffer_count)
++        return E_INVALIDARG;
++
+     if (FAILED(hr = IMFSample_GetTotalLength(sample, &sample_len)))
+         return hr;
+ 
++    if (FAILED(hr = IMFSample_GetSampleTime(sample, &start_time)))
++        return MF_E_INVALID_TIMESTAMP;
++
+     sample_frames = sample_len / renderer->frame_size;
+ 
++    /* Discard samples that are prior to our seeking location */
++    if (renderer->flags & SAR_SEEKING && start_time +
++            (LONGLONG)sample_frames * MFCLOCK_FREQUENCY_HNS / renderer->sample_rate < renderer->seek_pts)
++        return S_OK;
++
++    renderer->flags &= ~SAR_SEEKING;
++
+     if (!(object = calloc(1, sizeof(*object))))
+         return E_OUTOFMEMORY;
+ 
+@@ -1375,11 +1583,11 @@ static HRESULT WINAPI audio_renderer_stream_ProcessSample(IMFStreamSink *iface,
+         hr = MF_E_STREAMSINK_REMOVED;
+     else
+     {
+-        if (renderer->state == STREAM_STATE_RUNNING)
++        if (renderer->clock_state == MFCLOCK_STATE_RUNNING)
+             hr = stream_queue_sample(renderer, sample);
+         renderer->flags &= ~SAR_SAMPLE_REQUESTED;
+ 
+-        if (renderer->queued_frames < renderer->max_frames && renderer->state == STREAM_STATE_RUNNING)
++        if (renderer->queued_frames < renderer->max_frames && renderer->clock_state == MFCLOCK_STATE_RUNNING)
+         {
+             IMFMediaEventQueue_QueueEventParamVar(renderer->stream_event_queue, MEStreamSinkRequestSample,
+                     &GUID_NULL, S_OK, NULL);
+@@ -1458,7 +1666,12 @@ static HRESULT WINAPI audio_renderer_stream_Flush(IMFStreamSink *iface)
+         }
+     }
+     renderer->queued_frames = 0;
+-    if (FAILED(hr = IAudioClient_Reset(renderer->audio_client)))
++    if (SUCCEEDED(hr = IAudioClient_Reset(renderer->audio_client)))
++    {
++        renderer->position = 0;
++        renderer->pts = 0;
++    }
++    else
+         WARN("Failed to reset audio client, hr %#lx.\n", hr);
+     LeaveCriticalSection(&renderer->cs);
+ 
+@@ -1603,6 +1816,7 @@ static HRESULT audio_renderer_create_audio_client(struct audio_renderer *rendere
+     }
+ 
+     renderer->frame_size = wfx->wBitsPerSample * wfx->nChannels / 8;
++    renderer->sample_rate = wfx->nSamplesPerSec;
+ 
+     flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+     if (renderer->stream_config.flags & MF_AUDIO_RENDERER_ATTRIBUTE_FLAGS_CROSSPROCESS)
+@@ -1638,6 +1852,19 @@ static HRESULT audio_renderer_create_audio_client(struct audio_renderer *rendere
+         return hr;
+     }
+ 
++    if (FAILED(hr = IAudioClient_GetService(renderer->audio_client, &IID_IAudioClock,
++            (void **)&renderer->audio_clock)))
++    {
++        WARN("Failed to get audio clock, hr %#lx.\n", hr);
++        return hr;
++    }
++
++    if (FAILED(hr = IAudioClock_GetFrequency(renderer->audio_clock, &renderer->audio_clock_frequency)))
++    {
++        WARN("Failed to get audio clock frequency, hr %#lx.\n", hr);
++        return hr;
++    }
++
+     if (FAILED(hr = IAudioClient_SetEventHandle(renderer->audio_client, renderer->buffer_ready_event)))
+     {
+         WARN("Failed to set event handle, hr %#lx.\n", hr);
+@@ -1819,20 +2046,43 @@ static HRESULT WINAPI audio_renderer_render_callback_GetParameters(IMFAsyncCallb
+     return E_NOTIMPL;
+ }
+ 
++/* Fills the rest of the audio client buffer with silence */
++static void audio_renderer_render_silence(struct audio_renderer *renderer)
++{
++    unsigned int max_frames, pad_frames;
++    BYTE *dst;
++
++    if (SUCCEEDED(IAudioClient_GetBufferSize(renderer->audio_client, &max_frames)))
++    {
++        if (SUCCEEDED(IAudioClient_GetCurrentPadding(renderer->audio_client, &pad_frames)))
++        {
++            max_frames -= pad_frames;
++            if (max_frames &&
++                    SUCCEEDED(IAudioRenderClient_GetBuffer(renderer->audio_render_client, max_frames, &dst)))
++                IAudioRenderClient_ReleaseBuffer(renderer->audio_render_client, max_frames, AUDCLNT_BUFFERFLAGS_SILENT);
++        }
++    }
++}
++
+ static void audio_renderer_render(struct audio_renderer *renderer, IMFAsyncResult *result)
+ {
+     unsigned int src_frames, dst_frames, max_frames, pad_frames;
+     struct queued_object *obj, *obj2;
+     BOOL keep_sample = FALSE;
+     IMFMediaBuffer *buffer;
++    UINT64 position;
+     BYTE *dst, *src;
+     DWORD src_len;
++    LONGLONG pts;
+     HRESULT hr;
+ 
+     LIST_FOR_EACH_ENTRY_SAFE(obj, obj2, &renderer->queue, struct queued_object, entry)
+     {
+         if (obj->type == OBJECT_TYPE_MARKER)
+         {
++            if (obj->u.marker.type == MFSTREAMSINK_MARKER_ENDOFSEGMENT)
++                renderer->flags |= SAR_ADDING_SILENCE;
++
+             IMFMediaEventQueue_QueueEventParamVar(renderer->stream_event_queue, MEStreamSinkMarker,
+                 &GUID_NULL, S_OK, &obj->u.marker.context);
+         }
+@@ -1849,16 +2099,29 @@ static void audio_renderer_render(struct audio_renderer *renderer, IMFAsyncResul
+                             if (SUCCEEDED(IAudioClient_GetCurrentPadding(renderer->audio_client, &pad_frames)))
+                             {
+                                 max_frames -= pad_frames;
++
++                                IMFSample_GetSampleTime(obj->u.sample.sample, &pts);
++                                IAudioClock_GetPosition(renderer->audio_clock, &position, NULL);
++                                position += pad_frames * renderer->audio_clock_frequency / renderer->sample_rate;
++
+                                 src_frames -= obj->u.sample.frame_offset;
+                                 dst_frames = min(src_frames, max_frames);
++                                hr = S_OK;
+ 
+-                                if (SUCCEEDED(hr = IAudioRenderClient_GetBuffer(renderer->audio_render_client, dst_frames, &dst)))
++                                if (dst_frames && SUCCEEDED(hr = IAudioRenderClient_GetBuffer(renderer->audio_render_client, dst_frames, &dst)))
+                                 {
++                                    renderer->flags &= ~SAR_ADDING_SILENCE;
+                                     memcpy(dst, src + obj->u.sample.frame_offset * renderer->frame_size,
+                                             dst_frames * renderer->frame_size);
+ 
+                                     IAudioRenderClient_ReleaseBuffer(renderer->audio_render_client, dst_frames, 0);
+ 
++                                    if (obj->u.sample.frame_offset == 0)
++                                    {
++                                        renderer->pts = pts;
++                                        renderer->position = position;
++                                    }
++
+                                     obj->u.sample.frame_offset += dst_frames;
+                                     renderer->queued_frames -= dst_frames;
+                                 }
+@@ -1880,10 +2143,16 @@ static void audio_renderer_render(struct audio_renderer *renderer, IMFAsyncResul
+         release_pending_object(obj);
+     }
+ 
+-    if (list_empty(&renderer->queue) && !(renderer->flags & SAR_SAMPLE_REQUESTED))
++    if (list_empty(&renderer->queue))
+     {
+-        IMFMediaEventQueue_QueueEventParamVar(renderer->stream_event_queue, MEStreamSinkRequestSample, &GUID_NULL, S_OK, NULL);
+-        renderer->flags |= SAR_SAMPLE_REQUESTED;
++        if (!(renderer->flags & SAR_SAMPLE_REQUESTED))
++        {
++            IMFMediaEventQueue_QueueEventParamVar(renderer->stream_event_queue, MEStreamSinkRequestSample, &GUID_NULL, S_OK, NULL);
++            renderer->flags |= SAR_SAMPLE_REQUESTED;
++        }
++
++        if (renderer->flags & SAR_ADDING_SILENCE)
++            audio_renderer_render_silence(renderer);
+     }
+ 
+     if (FAILED(hr = MFPutWaitingWorkItem(renderer->buffer_ready_event, 0, result, &renderer->buffer_ready_key)))
+@@ -1931,7 +2200,9 @@ static HRESULT sar_create_object(IMFAttributes *attributes, void *user_context,
+     renderer->IMFSimpleAudioVolume_iface.lpVtbl = &audio_renderer_simple_volume_vtbl;
+     renderer->IMFAudioStreamVolume_iface.lpVtbl = &audio_renderer_stream_volume_vtbl;
+     renderer->IMFAudioPolicy_iface.lpVtbl = &audio_renderer_policy_vtbl;
++    renderer->IMFPresentationTimeSource_iface.lpVtbl = &audio_renderer_time_source_vtbl;
+     renderer->render_callback.lpVtbl = &audio_renderer_render_callback_vtbl;
++    renderer->rate = 1.0f;
+     renderer->refcount = 1;
+     InitializeCriticalSection(&renderer->cs);
+     renderer->buffer_ready_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+diff --git a/dlls/mf/scheme_handler.c b/dlls/mf/scheme_handler.c
+index 7e92748..d049060 100644
+--- a/dlls/mf/scheme_handler.c
++++ b/dlls/mf/scheme_handler.c
+@@ -23,6 +23,8 @@
+ #include "windef.h"
+ #include "winbase.h"
+ 
++#include "shlwapi.h"
++
+ #include "evr.h"
+ #include "mfidl.h"
+ #include "mf_private.h"
+@@ -454,8 +456,13 @@ static const IMFAsyncCallbackVtbl scheme_handler_callback_vtbl =
+ 
+ static HRESULT file_stream_create(const WCHAR *url, DWORD flags, IMFByteStream **out)
+ {
+-    if (!wcsnicmp(url, L"file://", 7))
+-        url += 7;
++    WCHAR path[MAX_PATH];
++    DWORD len;
++
++    len = ARRAY_SIZE(path);
++    if (SUCCEEDED(PathCreateFromUrlW(url, path, &len, 0)))
++        url = path;
++
+     return MFCreateFile(flags & MF_RESOLUTION_WRITE ? MF_ACCESSMODE_READWRITE : MF_ACCESSMODE_READ,
+             MF_OPENMODE_FAIL_IF_NOT_EXIST, MF_FILEFLAGS_NONE, url, out);
+ }
+diff --git a/dlls/mf/session.c b/dlls/mf/session.c
+index 8d2ca07..c8014f1 100644
+--- a/dlls/mf/session.c
++++ b/dlls/mf/session.c
+@@ -112,9 +112,6 @@ enum command_state
+     /* STARTED -> PAUSED transition */
+     COMMAND_STATE_PAUSING_SINKS,      /* -> COMMAND_STATE_PAUSING_SOURCES */
+     COMMAND_STATE_PAUSING_SOURCES,    /* -> SESSION_STATE_PAUSED */
+-    /* STARTED -> STOPPED transition when presentation ends */
+-    COMMAND_STATE_ENDING_STREAMS,     /* -> COMMAND_STATE_ENDING_SINKS */
+-    COMMAND_STATE_ENDING_SINKS,       /* -> SESSION_STATE_STOPPED */
+     /* STARTED | PAUSED -> STOPPED transition */
+     COMMAND_STATE_STOPPING_SINKS,     /* -> COMMAND_STATE_STOPPING_SOURCES */
+     COMMAND_STATE_STOPPING_SOURCES,   /* -> SESSION_STATE_STOPPED */
+@@ -174,7 +171,11 @@ struct transform_stream
+ {
+     struct list samples;
+     unsigned int requests;
++    BOOL raw_audio;
++    unsigned int block_alignment;
++    unsigned int bytes_per_second;
+     unsigned int min_buffer_size;
++    BOOL samples_independent;
+     BOOL draining;
+ };
+ 
+@@ -182,6 +183,7 @@ enum topo_node_flags
+ {
+     TOPO_NODE_END_OF_STREAM = 0x1,
+     TOPO_NODE_SCRUB_SAMPLE_COMPLETE = 0x2,
++    TOPO_NODE_MARKIN_HERE = 0x4,
+ };
+ 
+ struct topo_node
+@@ -225,6 +227,9 @@ struct topo_node
+             struct transform_stream *outputs;
+             DWORD *output_map;
+             unsigned int output_count;
++
++            BOOL async;
++            IMFMediaEventGenerator *event_source;
+         } transform;
+     } u;
+ };
+@@ -237,6 +242,8 @@ enum presentation_flags
+     SESSION_FLAG_SOURCE_SHUTDOWN = 0x10,
+     SESSION_FLAG_PENDING_RATE_CHANGE = 0x20,
+     SESSION_FLAG_RESTARTING = 0x40,
++    SESSION_FLAG_PRESENTATION_ENDING = 0x80,
++    SESSION_FLAG_SINKS_SUBSCRIBED = 0x100,
+ };
+ 
+ struct media_session
+@@ -277,6 +284,7 @@ struct media_session
+         BOOL thin_committed;
+     } presentation;
+     struct list topologies;
++    struct list removed_topologies;
+     struct list commands;
+     enum session_state state;
+     enum command_state command_state;
+@@ -484,6 +492,7 @@ static HRESULT session_submit_command(struct media_session *session, struct sess
+     EnterCriticalSection(&session->cs);
+     if (SUCCEEDED(hr = session_is_shut_down(session)))
+     {
++        session->presentation.flags &= ~SESSION_FLAG_PRESENTATION_ENDING;
+         if (list_empty(&session->commands) && session->command_state == COMMAND_STATE_COMPLETE)
+         {
+             hr = MFPutWorkItem(MFASYNC_CALLBACK_QUEUE_STANDARD, &session->commands_callback, &op->IUnknown_iface);
+@@ -522,8 +531,7 @@ static void session_clear_queued_topologies(struct media_session *session)
+     LIST_FOR_EACH_ENTRY_SAFE(ptr, next, &session->topologies, struct queued_topology, entry)
+     {
+         list_remove(&ptr->entry);
+-        IMFTopology_Release(ptr->topology);
+-        free(ptr);
++        list_add_tail(&session->removed_topologies, &ptr->entry);
+     }
+ }
+ 
+@@ -562,7 +570,6 @@ static void session_set_topo_status(struct media_session *session, HRESULT statu
+ 
+ static HRESULT session_bind_output_nodes(IMFTopology *topology)
+ {
+-    MF_TOPOLOGY_TYPE node_type;
+     IMFStreamSink *stream_sink;
+     IMFMediaSink *media_sink;
+     WORD node_count = 0, i;
+@@ -579,7 +586,7 @@ static HRESULT session_bind_output_nodes(IMFTopology *topology)
+         if (FAILED(hr = IMFTopology_GetNode(topology, i, &node)))
+             break;
+ 
+-        if (FAILED(hr = IMFTopologyNode_GetNodeType(node, &node_type)) || node_type != MF_TOPOLOGY_OUTPUT_NODE)
++        if (topology_node_get_type(node) != MF_TOPOLOGY_OUTPUT_NODE)
+         {
+             IMFTopologyNode_Release(node);
+             continue;
+@@ -627,7 +634,6 @@ static HRESULT session_bind_output_nodes(IMFTopology *topology)
+ 
+ static HRESULT session_init_media_types(IMFTopology *topology)
+ {
+-    MF_TOPOLOGY_TYPE node_type;
+     WORD node_count, i, j;
+     IMFTopologyNode *node;
+     IMFMediaType *type;
+@@ -643,8 +649,7 @@ static HRESULT session_init_media_types(IMFTopology *topology)
+             break;
+ 
+         if (FAILED(hr = IMFTopologyNode_GetInputCount(node, &input_count))
+-                || FAILED(hr = IMFTopologyNode_GetNodeType(node, &node_type))
+-                || node_type != MF_TOPOLOGY_OUTPUT_NODE)
++                || topology_node_get_type(node) != MF_TOPOLOGY_OUTPUT_NODE)
+         {
+             IMFTopologyNode_Release(node);
+             continue;
+@@ -798,6 +803,8 @@ static void release_topo_node(struct topo_node *node)
+             free(node->u.transform.outputs);
+             free(node->u.transform.input_map);
+             free(node->u.transform.output_map);
++            if (node->u.transform.event_source)
++                IMFMediaEventGenerator_Release(node->u.transform.event_source);
+             break;
+         case MF_TOPOLOGY_OUTPUT_NODE:
+             if (node->u.sink.allocator)
+@@ -819,57 +826,75 @@ static void release_topo_node(struct topo_node *node)
+     free(node);
+ }
+ 
+-static void session_shutdown_current_topology(struct media_session *session)
++static void topology_shutdown(IMFTopology *topology)
+ {
+-    unsigned int shutdown, force_shutdown;
+-    MF_TOPOLOGY_TYPE node_type;
+     IMFStreamSink *stream_sink;
+-    IMFTopology *topology;
++    IMFAttributes *attributes;
+     IMFTopologyNode *node;
+     IMFActivate *activate;
+     IMFMediaSink *sink;
+     WORD idx = 0;
+     HRESULT hr;
+ 
+-    topology = session->presentation.current_topology;
+-    force_shutdown = session->state == SESSION_STATE_SHUT_DOWN;
+-
+-    /* FIXME: should handle async MFTs, but these are not supported by the rest of the pipeline currently. */
+-
+     while (SUCCEEDED(IMFTopology_GetNode(topology, idx++, &node)))
+     {
+-        if (SUCCEEDED(IMFTopologyNode_GetNodeType(node, &node_type)) &&
+-                node_type == MF_TOPOLOGY_OUTPUT_NODE)
++        MF_TOPOLOGY_TYPE node_type = topology_node_get_type(node);
++
++        if (node_type == MF_TOPOLOGY_OUTPUT_NODE)
+         {
+-            shutdown = 1;
+-            IMFTopologyNode_GetUINT32(node, &MF_TOPONODE_NOSHUTDOWN_ON_REMOVE, &shutdown);
++            /* MF_TOPONODE_NOSHUTDOWN_ON_REMOVE is ignored, at least for sinks. */
+ 
+-            if (force_shutdown || shutdown)
++            if (SUCCEEDED(IMFTopologyNode_GetUnknown(node, &_MF_TOPONODE_IMFActivate, &IID_IMFActivate,
++                    (void **)&activate)))
++            {
++                if (FAILED(hr = IMFActivate_ShutdownObject(activate)))
++                    WARN("Failed to shut down activation object for the sink, hr %#lx.\n", hr);
++                IMFActivate_Release(activate);
++            }
++            if (SUCCEEDED(topology_node_get_object(node, &IID_IMFStreamSink, (void **)&stream_sink)))
+             {
+-                if (SUCCEEDED(IMFTopologyNode_GetUnknown(node, &_MF_TOPONODE_IMFActivate, &IID_IMFActivate,
+-                        (void **)&activate)))
++                if (SUCCEEDED(IMFStreamSink_GetMediaSink(stream_sink, &sink)))
+                 {
+-                    if (FAILED(hr = IMFActivate_ShutdownObject(activate)))
+-                        WARN("Failed to shut down activation object for the sink, hr %#lx.\n", hr);
+-                    IMFActivate_Release(activate);
++                    IMFMediaSink_Shutdown(sink);
++                    IMFMediaSink_Release(sink);
+                 }
+-                else if (SUCCEEDED(topology_node_get_object(node, &IID_IMFStreamSink, (void **)&stream_sink)))
+-                {
+-                    if (SUCCEEDED(IMFStreamSink_GetMediaSink(stream_sink, &sink)))
+-                    {
+-                        IMFMediaSink_Shutdown(sink);
+-                        IMFMediaSink_Release(sink);
+-                    }
+ 
+-                    IMFStreamSink_Release(stream_sink);
+-                }
++                IMFStreamSink_Release(stream_sink);
++            }
++        }
++        else if (node_type == MF_TOPOLOGY_TRANSFORM_NODE
++                && (attributes = topology_node_transform_async_get_attributes(node)))
++        {
++            IMFShutdown *shutdown;
++            if (SUCCEEDED(hr = topology_node_get_object(node, &IID_IMFShutdown, (void **)&shutdown)))
++            {
++                IMFShutdown_Shutdown(shutdown);
++                IMFShutdown_Release(shutdown);
++            }
++            else
++            {
++                WARN("Failed to get shutdown interface, hr %#lx.\n", hr);
+             }
++            IMFAttributes_Release(attributes);
+         }
+ 
+         IMFTopologyNode_Release(node);
+     }
+ }
+ 
++static void session_clear_removed_topologies(struct media_session *session)
++{
++    struct queued_topology *ptr, *next;
++
++    LIST_FOR_EACH_ENTRY_SAFE(ptr, next, &session->removed_topologies, struct queued_topology, entry)
++    {
++        list_remove(&ptr->entry);
++        topology_shutdown(ptr->topology);
++        IMFTopology_Release(ptr->topology);
++        free(ptr);
++    }
++}
++
+ static void session_clear_command_list(struct media_session *session)
+ {
+     struct session_op *op, *op2;
+@@ -891,8 +916,6 @@ static void session_clear_presentation(struct media_session *session)
+     struct media_sink *sink, *sink2;
+     struct topo_node *node, *node2;
+ 
+-    session_shutdown_current_topology(session);
+-
+     IMFTopology_Clear(session->presentation.current_topology);
+     session->presentation.topo_status = MF_TOPOSTATUS_INVALID;
+     session->presentation.flags = 0;
+@@ -1016,19 +1039,59 @@ static HRESULT session_subscribe_sources(struct media_session *session)
+     return hr;
+ }
+ 
+-static void session_flush_transforms(struct media_session *session)
++static void session_subscribe_sinks(struct media_session *session)
+ {
+     struct topo_node *node;
+-    UINT i;
++    HRESULT hr;
++
++    if (session->presentation.flags & SESSION_FLAG_SINKS_SUBSCRIBED)
++        return;
+ 
+     LIST_FOR_EACH_ENTRY(node, &session->presentation.nodes, struct topo_node, entry)
+     {
+-        if (node->type == MF_TOPOLOGY_TRANSFORM_NODE)
++        if (node->type != MF_TOPOLOGY_OUTPUT_NODE)
++            continue;
++
++        if (FAILED(hr = IMFStreamSink_BeginGetEvent(node->object.sink_stream, &session->events_callback,
++                        node->object.object)))
++        {
++            WARN("Failed to subscribe to stream sink events, hr %#lx.\n", hr);
++        }
++    }
++
++    session->presentation.flags |= SESSION_FLAG_SINKS_SUBSCRIBED;
++}
++
++static void session_flush_transform_node(struct topo_node *node)
++{
++    struct transform_stream *stream;
++    UINT i;
++
++    if (node->type == MF_TOPOLOGY_TRANSFORM_NODE)
++    {
++        for (i = 0; i < node->u.transform.input_count; ++i)
+         {
+-            IMFTransform_ProcessMessage(node->object.transform, MFT_MESSAGE_COMMAND_FLUSH, 0);
+-            for (i = 0; i < node->u.transform.output_count; i++)
+-                node->u.transform.outputs[i].requests = 0; /* these requests might have been flushed */
++            stream = &node->u.transform.inputs[i];
++            transform_stream_drop_events(stream);
++            stream->draining = FALSE; /* we're about to flush, so draining can halt */
+         }
++        IMFTransform_ProcessMessage(node->object.transform, MFT_MESSAGE_COMMAND_FLUSH, 0);
++        for (i = 0; i < node->u.transform.output_count; i++)
++        {
++            stream = &node->u.transform.outputs[i];
++            transform_stream_drop_events(stream);
++            stream->requests = 0; /* these requests might have been flushed */
++        }
++    }
++}
++
++static void session_flush_transforms(struct media_session *session)
++{
++    struct topo_node *node;
++
++    LIST_FOR_EACH_ENTRY(node, &session->presentation.nodes, struct topo_node, entry)
++    {
++        session_flush_transform_node(node);
+     }
+ }
+ 
+@@ -1044,7 +1107,7 @@ static void session_flush_sinks(struct media_session *session)
+         {
+             if (node->u.sink.requests)
+             {
+-                node->u.sink.requests--;
++                node->u.sink.requests--; /* session_request_sample will increment this back */
+                 session_request_sample(session, node->object.sink_stream);
+             }
+             IMFStreamSink_Flush(node->object.sink_stream);
+@@ -1055,19 +1118,13 @@ static void session_flush_sinks(struct media_session *session)
+ static void session_flush_nodes(struct media_session *session)
+ {
+     struct topo_node *node;
+-    UINT i;
+ 
+     LIST_FOR_EACH_ENTRY(node, &session->presentation.nodes, struct topo_node, entry)
+     {
+         if (node->type == MF_TOPOLOGY_OUTPUT_NODE)
+             IMFStreamSink_Flush(node->object.sink_stream);
+-        else if (node->type == MF_TOPOLOGY_TRANSFORM_NODE)
+-        {
+-            for (i = 0; i < node->u.transform.output_count; ++i)
+-                node->u.transform.outputs[i].requests = 0;
+-
+-            IMFTransform_ProcessMessage(node->object.transform, MFT_MESSAGE_COMMAND_FLUSH, 0);
+-        }
++        else
++            session_flush_transform_node(node);
+     }
+ }
+ 
+@@ -1283,6 +1340,7 @@ static void session_set_stopped(struct media_session *session, MediaEventType ev
+ {
+     IMFMediaEvent *event;
+ 
++    session->presentation.flags &= ~SESSION_FLAG_PRESENTATION_ENDING;
+     session->state = SESSION_STATE_STOPPED;
+ 
+     if (SUCCEEDED(MFCreateMediaEvent(event_type, &GUID_NULL, status, NULL, &event)))
+@@ -1498,18 +1556,6 @@ static void session_set_presentation_clock(struct media_session *session)
+         if (FAILED(hr))
+             WARN("Failed to set time source, hr %#lx.\n", hr);
+ 
+-        LIST_FOR_EACH_ENTRY(node, &session->presentation.nodes, struct topo_node, entry)
+-        {
+-            if (node->type != MF_TOPOLOGY_OUTPUT_NODE)
+-                continue;
+-
+-            if (FAILED(hr = IMFStreamSink_BeginGetEvent(node->object.sink_stream, &session->events_callback,
+-                    node->object.object)))
+-            {
+-                WARN("Failed to subscribe to stream sink events, hr %#lx.\n", hr);
+-            }
+-        }
+-
+         /* Set clock for all topology nodes. */
+         LIST_FOR_EACH_ENTRY(source, &session->presentation.sources, struct media_source, entry)
+         {
+@@ -1724,12 +1770,13 @@ static DWORD transform_node_get_stream_id(struct topo_node *node, BOOL output, u
+ static HRESULT session_set_transform_stream_info(struct topo_node *node)
+ {
+     DWORD *input_map = NULL, *output_map = NULL;
++    GUID major = { 0 }, subtype = { 0 };
+     DWORD i, input_count, output_count;
+     struct transform_stream *streams;
++    UINT32 bytes_per_second, value;
+     unsigned int block_alignment;
++    IMFAttributes *attributes;
+     IMFMediaType *media_type;
+-    UINT32 bytes_per_second;
+-    GUID major = { 0 };
+     HRESULT hr;
+ 
+     hr = IMFTransform_GetStreamCount(node->object.transform, &input_count, &output_count);
+@@ -1758,6 +1805,17 @@ static HRESULT session_set_transform_stream_info(struct topo_node *node)
+         node->u.transform.inputs = streams;
+         node->u.transform.input_count = input_count;
+ 
++        if ((attributes = topology_node_transform_async_get_attributes(node->node)))
++        {
++            IMFAttributes_SetUINT32(attributes, &MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
++            IMFAttributes_Release(attributes);
++
++            node->u.transform.async = TRUE;
++            if (FAILED(hr = IMFTransform_QueryInterface(node->object.transform, &IID_IMFMediaEventGenerator,
++                    (void **)&node->u.transform.event_source)))
++                WARN("Failed to get event source, hr %#lx.\n", hr);
++        }
++
+         streams = calloc(output_count, sizeof(*streams));
+         for (i = 0; i < output_count; ++i)
+         {
+@@ -1769,10 +1827,19 @@ static HRESULT session_set_transform_stream_info(struct topo_node *node)
+                 if (SUCCEEDED(IMFMediaType_GetMajorType(media_type, &major)) && IsEqualGUID(&major, &MFMediaType_Audio)
+                         && SUCCEEDED(IMFMediaType_GetUINT32(media_type, &MF_MT_AUDIO_BLOCK_ALIGNMENT, &block_alignment)))
+                 {
++                    streams[i].block_alignment = block_alignment;
+                     streams[i].min_buffer_size = block_alignment;
+                     if (SUCCEEDED(IMFMediaType_GetUINT32(media_type, &MF_MT_AUDIO_AVG_BYTES_PER_SECOND, &bytes_per_second)))
++                    {
++                        streams[i].bytes_per_second = bytes_per_second;
+                         streams[i].min_buffer_size = max(streams[i].min_buffer_size, bytes_per_second);
++                    }
++                    if (SUCCEEDED(IMFMediaType_GetGUID(media_type, &MF_MT_SUBTYPE, &subtype)) &&
++                            (IsEqualGUID(&subtype, &MFAudioFormat_Float) || IsEqualGUID(&subtype, &MFAudioFormat_PCM)))
++                        streams[i].raw_audio = TRUE;
+                 }
++                if (SUCCEEDED(IMFMediaType_GetUINT32(media_type, &MF_MT_ALL_SAMPLES_INDEPENDENT, &value)) && value)
++                    streams[i].samples_independent = TRUE;
+                 IMFMediaType_Release(media_type);
+             }
+         }
+@@ -1846,17 +1913,19 @@ static HRESULT session_append_node(struct media_session *session, IMFTopologyNod
+     IMFMediaType *media_type;
+     IMFStreamDescriptor *sd;
+     HRESULT hr = S_OK;
++    UINT32 value;
+ 
+     if (!(topo_node = calloc(1, sizeof(*topo_node))))
+         return E_OUTOFMEMORY;
+ 
+-    IMFTopologyNode_GetNodeType(node, &topo_node->type);
+     IMFTopologyNode_GetTopoNodeID(node, &topo_node->node_id);
+     topo_node->node = node;
+     IMFTopologyNode_AddRef(topo_node->node);
+     topo_node->session = session;
++    if (SUCCEEDED(IMFTopologyNode_GetUINT32(node, &MF_TOPONODE_MARKIN_HERE, &value)) && value)
++        topo_node->flags |= TOPO_NODE_MARKIN_HERE;
+ 
+-    switch (topo_node->type)
++    switch ((topo_node->type = topology_node_get_type(node)))
+     {
+         case MF_TOPOLOGY_OUTPUT_NODE:
+             topo_node->u.sink.notify_cb.lpVtbl = &node_sample_allocator_cb_vtbl;
+@@ -2090,9 +2159,9 @@ static void session_set_topology(struct media_session *session, DWORD flags, IMF
+                 hr = session_init_media_types(resolved_topology);
+ 
+             if (SUCCEEDED(hr))
+-            {
+                 topology = resolved_topology;
+-            }
++            else
++                topology = NULL;
+         }
+     }
+ 
+@@ -2198,8 +2267,8 @@ static ULONG WINAPI mfsession_Release(IMFMediaSession *iface)
+ 
+     if (!refcount)
+     {
+-        session_clear_queued_topologies(session);
+-        session_clear_presentation(session);
++        if (SUCCEEDED(session_is_shut_down(session)))
++            IMFMediaSession_Shutdown(iface);
+         session_clear_command_list(session);
+         if (session->presentation.current_topology)
+             IMFTopology_Release(session->presentation.current_topology);
+@@ -2298,7 +2367,6 @@ static HRESULT session_check_stream_descriptor(IMFPresentationDescriptor *pd, IM
+ 
+ static HRESULT session_check_topology(IMFTopology *topology)
+ {
+-    MF_TOPOLOGY_TYPE node_type;
+     IMFTopologyNode *node;
+     WORD node_count, i;
+     HRESULT hr;
+@@ -2315,13 +2383,7 @@ static HRESULT session_check_topology(IMFTopology *topology)
+         if (FAILED(hr = IMFTopology_GetNode(topology, i, &node)))
+             break;
+ 
+-        if (FAILED(hr = IMFTopologyNode_GetNodeType(node, &node_type)))
+-        {
+-            IMFTopologyNode_Release(node);
+-            break;
+-        }
+-
+-        switch (node_type)
++        switch (topology_node_get_type(node))
+         {
+             case MF_TOPOLOGY_SOURCESTREAM_NODE:
+             {
+@@ -2477,10 +2539,9 @@ static HRESULT WINAPI mfsession_Shutdown(IMFMediaSession *iface)
+         if (session->quality_manager)
+             IMFQualityManager_Shutdown(session->quality_manager);
+         MFShutdownObject((IUnknown *)session->clock);
+-        IMFPresentationClock_Release(session->clock);
+-        session->clock = NULL;
+         session_clear_presentation(session);
+         session_clear_queued_topologies(session);
++        session_clear_removed_topologies(session);
+         session_submit_simple_command(session, SESSION_CMD_SHUTDOWN);
+     }
+     LeaveCriticalSection(&session->cs);
+@@ -2944,8 +3005,6 @@ static void session_handle_source_shutdown(struct media_session *session)
+             session->state = SESSION_STATE_STOPPED;
+             session_command_complete_with_event(session, MESessionPaused, MF_E_SHUTDOWN, NULL);
+             break;
+-        case COMMAND_STATE_ENDING_STREAMS:
+-        case COMMAND_STATE_ENDING_SINKS:
+         case COMMAND_STATE_STOPPING_SINKS:
+         case COMMAND_STATE_STOPPING_SOURCES:
+             session_clear_presentation(session);
+@@ -3072,7 +3131,7 @@ static BOOL session_is_output_nodes_state(struct media_session *session, enum ob
+     return TRUE;
+ }
+ 
+-static enum object_state session_get_object_state_for_event(MediaEventType event)
++static enum object_state session_get_object_state_for_event(struct media_session *session, MediaEventType event)
+ {
+     switch (event)
+     {
+@@ -3086,9 +3145,15 @@ static enum object_state session_get_object_state_for_event(MediaEventType event
+         case MEStreamPaused:
+         case MEStreamSinkPaused:
+             return OBJ_STATE_PAUSED;
++        case MEStreamSinkStopped:
++            /* MEStreamSinkStopped may be sent when starting a new topology because of the sequence (which occurs in native):
++             * media sink SetPresentationClock() -> AddClockStateSink() -> callback Invoke() -> OnClockStop().
++             * Callback notification is suppressed for the first topology because the clock state is MFCLOCK_STATE_INVALID. */
++            if (session->command_state == COMMAND_STATE_PREROLLING_SINKS || session->command_state == COMMAND_STATE_STARTING_SINKS)
++                return OBJ_STATE_INVALID;
++            /* fall through */
+         case MESourceStopped:
+         case MEStreamStopped:
+-        case MEStreamSinkStopped:
+             return OBJ_STATE_STOPPED;
+         case MEStreamSinkPrerolled:
+             return OBJ_STATE_PREROLLED;
+@@ -3162,7 +3227,7 @@ static void session_set_source_object_state(struct media_session *session, IUnkn
+     DWORD i, count;
+     HRESULT hr;
+ 
+-    if ((state = session_get_object_state_for_event(event_type)) == OBJ_STATE_INVALID)
++    if ((state = session_get_object_state_for_event(session, event_type)) == OBJ_STATE_INVALID)
+         return;
+ 
+     switch (event_type)
+@@ -3208,13 +3273,20 @@ static void session_set_source_object_state(struct media_session *session, IUnkn
+                 LIST_FOR_EACH_ENTRY(node, &session->presentation.nodes, struct topo_node, entry)
+                 {
+                     if (node->type == MF_TOPOLOGY_TRANSFORM_NODE)
++                    {
++                        if (node->u.transform.async && FAILED(hr = IMFMediaEventGenerator_BeginGetEvent(node->u.transform.event_source,
++                                &session->events_callback, (IUnknown *)node->u.transform.event_source)))
++                            WARN("Failed to subscribe to transform events, hr %#lx.\n", hr);
+                         IMFTransform_ProcessMessage(node->object.transform, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
++                    }
+                 }
+             }
+ 
++            session_subscribe_sinks(session);
+             session_set_presentation_clock(session);
+ 
+-            if ((session->presentation.flags & SESSION_FLAG_NEEDS_PREROLL) && session_is_output_nodes_state(session, OBJ_STATE_STOPPED))
++            if (session->presentation.rate != 0.0f && (session->presentation.flags & SESSION_FLAG_NEEDS_PREROLL)
++                    && session_is_output_nodes_state(session, OBJ_STATE_STOPPED))
+             {
+                 MFTIME preroll_time = 0;
+ 
+@@ -3277,6 +3349,7 @@ static void session_set_source_object_state(struct media_session *session, IUnkn
+             if (!session_is_source_nodes_state(session, OBJ_STATE_STOPPED))
+                 break;
+ 
++            session->presentation.flags &= ~SESSION_FLAG_PRESENTATION_ENDING;
+             session->state = SESSION_STATE_STOPPED;
+             session->command_state = COMMAND_STATE_STARTING_SOURCES;
+             session->presentation.flags |= SESSION_FLAG_RESTARTING;
+@@ -3307,7 +3380,10 @@ static void session_set_source_object_state(struct media_session *session, IUnkn
+ 
+             session_flush_nodes(session);
+             session_set_caps(session, session->caps & ~MFSESSIONCAP_PAUSE);
+-            session_set_stopped(session, MESessionStopped, S_OK);
++            if (session->presentation.flags & SESSION_FLAG_PRESENTATION_ENDING)
++                session_set_stopped(session, MESessionEnded, S_OK);
++            else
++                session_set_stopped(session, MESessionStopped, S_OK);
+             break;
+         case COMMAND_STATE_CLOSING_SOURCES:
+             if (!session_is_source_nodes_state(session, OBJ_STATE_STOPPED))
+@@ -3323,8 +3399,6 @@ static void session_set_source_object_state(struct media_session *session, IUnkn
+         case COMMAND_STATE_STARTING_SINKS:
+         case COMMAND_STATE_PAUSING_SINKS:
+         case COMMAND_STATE_STOPPING_SINKS:
+-        case COMMAND_STATE_ENDING_STREAMS:
+-        case COMMAND_STATE_ENDING_SINKS:
+         case COMMAND_STATE_CLOSING_SINKS:
+         case COMMAND_STATE_FINALIZING_SINKS:
+             WARN("Ignoring source state change in command state %#x\n", session->command_state);
+@@ -3340,7 +3414,7 @@ static void session_set_sink_stream_state(struct media_session *session, IMFStre
+     HRESULT hr = S_OK;
+     BOOL changed;
+ 
+-    if ((state = session_get_object_state_for_event(event_type)) == OBJ_STATE_INVALID)
++    if ((state = session_get_object_state_for_event(session, event_type)) == OBJ_STATE_INVALID)
+         return;
+ 
+     if (!(changed = session_set_node_object_state(session, (IUnknown *)stream, MF_TOPOLOGY_OUTPUT_NODE, state)))
+@@ -3376,15 +3450,6 @@ static void session_set_sink_stream_state(struct media_session *session, IMFStre
+             if (FAILED(hr))
+                 session_set_paused(session, hr);
+ 
+-            break;
+-        case COMMAND_STATE_ENDING_SINKS:
+-            if (!session_is_output_nodes_state(session, OBJ_STATE_STOPPED))
+-                break;
+-
+-            LIST_FOR_EACH_ENTRY(source, &session->presentation.sources, struct media_source, entry)
+-                IMFMediaSource_Stop(source->source);
+-
+-            session_set_stopped(session, MESessionEnded, S_OK);
+             break;
+         case COMMAND_STATE_STOPPING_SINKS:
+             if (!session_is_output_nodes_state(session, OBJ_STATE_STOPPED))
+@@ -3417,7 +3482,6 @@ static void session_set_sink_stream_state(struct media_session *session, IMFStre
+         case COMMAND_STATE_RESTARTING_SOURCES:
+         case COMMAND_STATE_STARTING_SOURCES:
+         case COMMAND_STATE_PAUSING_SOURCES:
+-        case COMMAND_STATE_ENDING_STREAMS:
+         case COMMAND_STATE_STOPPING_SOURCES:
+         case COMMAND_STATE_CLOSING_SOURCES:
+         case COMMAND_STATE_FINALIZING_SINKS:
+@@ -3624,6 +3688,106 @@ static void release_output_samples(struct topo_node *node, MFT_OUTPUT_DATA_BUFFE
+     }
+ }
+ 
++static BOOL transform_node_markin_need_more_input(const struct media_session *session, struct topo_node *node, MFT_OUTPUT_DATA_BUFFER *buffers)
++{
++    BOOL need_more_input, drop_sample, have_duration, have_time;
++    LONGLONG time, duration;
++    HRESULT hr;
++    UINT i;
++
++    if (!(node->flags & TOPO_NODE_MARKIN_HERE) || session->presentation.start_position.vt != VT_I8)
++        return FALSE;
++
++    need_more_input = TRUE;
++
++    for (i = 0; i < node->u.transform.output_count; ++i)
++    {
++        struct transform_stream *stream = &node->u.transform.outputs[i];
++
++        drop_sample = have_duration = have_time = FALSE;
++
++        if (buffers[i].pEvents)
++            need_more_input = FALSE;
++
++        if (buffers[i].dwStatus & MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE)
++            continue;
++
++        if (!stream->samples_independent)
++        {
++            need_more_input = FALSE;
++            continue;
++        }
++
++        if (SUCCEEDED(hr = IMFSample_GetSampleTime(buffers[i].pSample, &time)))
++        {
++            have_time = TRUE;
++            if (SUCCEEDED(hr = IMFSample_GetSampleDuration(buffers[i].pSample, &duration)))
++                have_duration = TRUE;
++            else
++                WARN("Failed to get sample duration, hr %#lx\n", hr);
++
++            if (have_duration && time + duration <= session->presentation.start_position.hVal.QuadPart)
++                drop_sample = TRUE;
++        }
++        else
++        {
++            WARN("Failed to get sample time, hr %#lx\n", hr);
++        }
++
++        if (have_time && !drop_sample && time < session->presentation.start_position.hVal.QuadPart)
++        {
++            LONGLONG delta = session->presentation.start_position.hVal.QuadPart - time;
++            IMFSample_SetSampleTime(buffers[i].pSample, session->presentation.start_position.hVal.QuadPart);
++
++            if (have_duration)
++            {
++                duration -= delta;
++                IMFSample_SetSampleDuration(buffers[i].pSample, duration);
++            }
++
++            if (stream->raw_audio && stream->bytes_per_second && stream->block_alignment)
++            {
++                IMFMediaBuffer *buffer;
++                LONGLONG delta_bytes;
++                DWORD current_length;
++                BYTE *data;
++
++                delta_bytes = stream->bytes_per_second * delta / MFCLOCK_FREQUENCY_HNS / stream->block_alignment * stream->block_alignment;
++
++                if (FAILED(hr = IMFSample_GetTotalLength(buffers[i].pSample, &current_length)))
++                    WARN("Failed to get total length of sample, hr %#lx\n", hr);
++                else if (delta_bytes >= current_length)
++                {
++                    drop_sample = TRUE;
++                }
++                else if (SUCCEEDED(IMFSample_ConvertToContiguousBuffer(buffers[i].pSample, &buffer)))
++                {
++                    if (SUCCEEDED(IMFMediaBuffer_Lock(buffer, &data, NULL, NULL)))
++                    {
++                        memmove(data, data + delta_bytes, current_length - delta_bytes);
++                        IMFMediaBuffer_Unlock(buffer);
++                        IMFMediaBuffer_SetCurrentLength(buffer, current_length - delta_bytes);
++                    }
++                    IMFMediaBuffer_Release(buffer);
++                }
++            }
++        }
++
++        if (drop_sample)
++        {
++            IMFSample_Release(buffers[i].pSample);
++            buffers[i].pSample = NULL;
++            buffers[i].dwStatus |= MFT_OUTPUT_DATA_BUFFER_NO_SAMPLE;
++        }
++        else
++        {
++            need_more_input = FALSE;
++        }
++    }
++
++    return need_more_input;
++}
++
+ static HRESULT transform_node_pull_samples(const struct media_session *session, struct topo_node *node)
+ {
+     MFT_OUTPUT_DATA_BUFFER *buffers;
+@@ -3637,17 +3801,22 @@ static HRESULT transform_node_pull_samples(const struct media_session *session,
+         goto done;
+ 
+     status = 0;
+-    hr = IMFTransform_ProcessOutput(node->object.transform, 0, node->u.transform.output_count, buffers, &status);
+-    if (hr == MF_E_TRANSFORM_STREAM_CHANGE && SUCCEEDED(hr = transform_node_format_changed(node, buffers)))
++
++    do
+     {
+-        release_output_samples(node, buffers);
++        hr = IMFTransform_ProcessOutput(node->object.transform, 0, node->u.transform.output_count, buffers, &status);
++        if (hr == MF_E_TRANSFORM_STREAM_CHANGE && SUCCEEDED(hr = transform_node_format_changed(node, buffers)))
++        {
++            release_output_samples(node, buffers);
+ 
+-        memset(buffers, 0, node->u.transform.output_count * sizeof(*buffers));
+-        if (FAILED(hr = allocate_output_samples(session, node, buffers)))
+-            goto done;
++            memset(buffers, 0, node->u.transform.output_count * sizeof(*buffers));
++            if (FAILED(hr = allocate_output_samples(session, node, buffers)))
++                goto done;
+ 
+-        hr = IMFTransform_ProcessOutput(node->object.transform, 0, node->u.transform.output_count, buffers, &status);
++            hr = IMFTransform_ProcessOutput(node->object.transform, 0, node->u.transform.output_count, buffers, &status);
++        }
+     }
++    while (hr == S_OK && transform_node_markin_need_more_input(session, node, buffers));
+ 
+     /* Collect returned samples for all streams. */
+     for (i = 0; i < node->u.transform.output_count; ++i)
+@@ -3748,7 +3917,8 @@ static HRESULT transform_node_handle_format_change(struct media_session *session
+         IMFAttributes_Release(attributes);
+     }
+ 
+-    if (!support_dynamic_format_change)
++    /* all async MFTs must support dynamic format change, but async is checked here in case a bugged MFT doesn't set the flag */
++    if (!support_dynamic_format_change && !topo_node->u.transform.async)
+     {
+         if (SUCCEEDED(hr = IMFTransform_ProcessMessage(transform, MFT_MESSAGE_COMMAND_DRAIN, id)))
+         {
+@@ -3861,6 +4031,8 @@ static void transform_node_deliver_samples(struct media_session *session, struct
+ 
+             if (FAILED(hr = transform_stream_pop_event(stream, &event)))
+             {
++                if (topo_node->u.transform.async)
++                    break;
+                 /* try getting more samples by calling IMFTransform_ProcessOutput */
+                 if (FAILED(hr = transform_node_pull_samples(session, topo_node)))
+                     break;
+@@ -3882,7 +4054,7 @@ static void transform_node_deliver_samples(struct media_session *session, struct
+         }
+     }
+ 
+-    if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT && transform_node_has_requests(topo_node))
++    if (!topo_node->u.transform.async && hr == MF_E_TRANSFORM_NEED_MORE_INPUT && transform_node_has_requests(topo_node))
+     {
+         struct transform_stream *stream;
+ 
+@@ -3917,7 +4089,11 @@ static void session_deliver_sample_to_node(struct media_session *session, struct
+             {
+                 if (sample)
+                 {
+-                    if (FAILED(hr = IMFStreamSink_ProcessSample(topo_node->object.sink_stream, sample)))
++                    if (SUCCEEDED(hr = IMFStreamSink_ProcessSample(topo_node->object.sink_stream, sample)))
++                    {
++                        topo_node->u.sink.requests--;
++                    }
++                    else
+                     {
+                         WARN("Stream sink failed to process sample, hr %#lx.\n", hr);
+                         IMFMediaEventQueue_QueueEventParamVar(session->event_queue, MEError, &GUID_NULL, hr, NULL);
+@@ -3928,14 +4104,16 @@ static void session_deliver_sample_to_node(struct media_session *session, struct
+                 {
+                     WARN("Failed to place sink marker, hr %#lx.\n", hr);
+                 }
+-                topo_node->u.sink.requests--;
+             }
+             break;
+         case MF_TOPOLOGY_TRANSFORM_NODE:
+             if (FAILED(hr = transform_node_push_sample(session, topo_node, input, sample)))
+                 WARN("Failed to push or queue sample to transform, hr %#lx\n", hr);
+-            transform_node_pull_samples(session, topo_node);
+-            transform_node_deliver_samples(session, topo_node);
++            if (!topo_node->u.transform.async)
++            {
++                transform_node_pull_samples(session, topo_node);
++                transform_node_deliver_samples(session, topo_node);
++            }
+             break;
+         case MF_TOPOLOGY_TEE_NODE:
+             FIXME("Unhandled downstream node type %d.\n", topo_node->type);
+@@ -3988,7 +4166,7 @@ static HRESULT session_request_sample_from_node(struct media_session *session, s
+                     ERR("Failed to handle stream event, hr %#lx\n", hr);
+                 IMFMediaEvent_Release(event);
+             }
+-            else if (transform_node_has_requests(topo_node))
++            else if (transform_node_has_requests(topo_node) || topo_node->u.transform.async)
+             {
+                 /* there's already requests pending, just increase the counter */
+                 stream->requests++;
+@@ -4162,7 +4340,7 @@ static void session_raise_end_of_presentation(struct media_session *session)
+     {
+         if (session_nodes_is_mask_set(session, MF_TOPOLOGY_MAX, SOURCE_FLAG_END_OF_PRESENTATION))
+         {
+-            session->command_state = COMMAND_STATE_ENDING_STREAMS;
++            session->presentation.flags |= SESSION_FLAG_PRESENTATION_ENDING;
+             IMFMediaEventQueue_QueueEventParamVar(session->event_queue, MEEndOfPresentation, &GUID_NULL, S_OK, NULL);
+         }
+     }
+@@ -4215,7 +4393,7 @@ static void session_sink_stream_marker(struct media_session *session, IMFStreamS
+ 
+     node->flags |= TOPO_NODE_END_OF_STREAM;
+ 
+-    if (session->command_state == COMMAND_STATE_ENDING_STREAMS &&
++    if (session->presentation.flags & SESSION_FLAG_PRESENTATION_ENDING &&
+             session_nodes_is_mask_set(session, MF_TOPOLOGY_OUTPUT_NODE, TOPO_NODE_END_OF_STREAM))
+     {
+         session_set_topo_status(session, S_OK, MF_TOPOSTATUS_ENDED);
+@@ -4223,7 +4401,7 @@ static void session_sink_stream_marker(struct media_session *session, IMFStreamS
+ 
+         IMFPresentationClock_GetTime(session->clock, &session->presentation.clock_stop_time);
+         if (SUCCEEDED(hr = IMFPresentationClock_Stop(session->clock)))
+-            session->command_state = COMMAND_STATE_ENDING_SINKS;
++            session->command_state = COMMAND_STATE_STOPPING_SINKS;
+         else
+             session_set_stopped(session, MESessionEnded, hr);
+     }
+@@ -4251,6 +4429,20 @@ static void session_sink_stream_scrub_complete(struct media_session *session, IM
+     }
+ }
+ 
++static struct topo_node *session_get_async_transform_node(const struct media_session *session,
++        IMFMediaEventGenerator *event_source)
++{
++    struct topo_node *node;
++
++    LIST_FOR_EACH_ENTRY(node, &session->presentation.nodes, struct topo_node, entry)
++    {
++        if (node->type == MF_TOPOLOGY_TRANSFORM_NODE && node->u.transform.event_source == event_source)
++            return node;
++    }
++    FIXME("Failed to get transform.\n");
++    return NULL;
++}
++
+ static HRESULT WINAPI session_events_callback_Invoke(IMFAsyncCallback *iface, IMFAsyncResult *result)
+ {
+     struct media_session *session = impl_from_events_callback_IMFAsyncCallback(iface);
+@@ -4465,6 +4657,54 @@ static HRESULT WINAPI session_events_callback_Invoke(IMFAsyncCallback *iface, IM
+ 
+             break;
+ 
++        case METransformNeedInput:
++        {
++            struct topo_node *up_node, *topo_node = session_get_async_transform_node(session, event_source);
++            struct transform_stream *stream;
++            IMFMediaEvent *stream_event;
++            UINT32 input = 0;
++            BOOL is_sample;
++            DWORD output;
++
++            if (FAILED(hr = IMFMediaEvent_GetUINT32(event, &MF_EVENT_MFT_INPUT_STREAM_ID, &input)))
++                WARN("Failed to get input id, hr %#lx.\n", hr);
++
++            stream = &topo_node->u.transform.inputs[input];
++
++            for (is_sample = FALSE; !is_sample && SUCCEEDED(hr); )
++            {
++                if (SUCCEEDED(hr = transform_stream_pop_event(stream, &stream_event)))
++                {
++                    MediaEventType event_type;
++                    if (FAILED(hr = transform_stream_handle_event(session, stream, topo_node, input, stream_event)))
++                        ERR("Failed to handle stream event, hr %#lx\n", hr);
++                    is_sample = SUCCEEDED(hr = IMFMediaEvent_GetType(stream_event, &event_type)) && event_type == MEMediaSample;
++                    IMFMediaEvent_Release(stream_event);
++                }
++            }
++
++            if (is_sample)
++                break;
++
++            if (!(up_node = session_get_topo_node_input(session, topo_node, input, &output)))
++                WARN("Failed to get node %p/%u input\n", topo_node, input);
++            else if (FAILED(hr = session_request_sample_from_node(session, up_node, output)))
++                WARN("Failed to request sample from upstream node %p/%lu, hr %#lx\n", up_node, output, hr);
++            break;
++        }
++
++        case METransformHaveOutput:
++        {
++            struct topo_node *topo_node = session_get_async_transform_node(session, event_source);
++
++            if (topo_node)
++            {
++                transform_node_pull_samples(session, topo_node);
++                transform_node_deliver_samples(session, topo_node);
++            }
++            break;
++        }
++
+         case MEError:
+             /* Wine-specific extension */
+             EnterCriticalSection(&session->cs);
+@@ -4867,10 +5107,12 @@ HRESULT WINAPI MFCreateMediaSession(IMFAttributes *config, IMFMediaSession **ses
+     object->sink_finalizer_callback.lpVtbl = &session_sink_finalizer_callback_vtbl;
+     object->refcount = 1;
+     list_init(&object->topologies);
++    list_init(&object->removed_topologies);
+     list_init(&object->commands);
+     list_init(&object->presentation.sources);
+     list_init(&object->presentation.sinks);
+     list_init(&object->presentation.nodes);
++    object->presentation.rate = 1.0f;
+     InitializeCriticalSection(&object->cs);
+ 
+     if (FAILED(hr = MFCreateTopology(&object->presentation.current_topology)))
+diff --git a/dlls/mf/topology.c b/dlls/mf/topology.c
+index 572d4d4..48df8a6 100644
+--- a/dlls/mf/topology.c
++++ b/dlls/mf/topology.c
+@@ -1645,7 +1645,6 @@ static HRESULT WINAPI topology_node_GetInputPrefType(IMFTopologyNode *iface, DWO
+ static HRESULT WINAPI topology_node_CloneFrom(IMFTopologyNode *iface, IMFTopologyNode *src_node)
+ {
+     struct topology_node *node = impl_from_IMFTopologyNode(iface);
+-    MF_TOPOLOGY_TYPE node_type;
+     IMFMediaType *mediatype;
+     IUnknown *object;
+     DWORD count, i;
+@@ -1654,10 +1653,7 @@ static HRESULT WINAPI topology_node_CloneFrom(IMFTopologyNode *iface, IMFTopolog
+ 
+     TRACE("%p, %p.\n", iface, src_node);
+ 
+-    if (FAILED(hr = IMFTopologyNode_GetNodeType(src_node, &node_type)))
+-        return hr;
+-
+-    if (node->node_type != node_type)
++    if (node->node_type != topology_node_get_type(src_node))
+         return MF_E_INVALIDREQUEST;
+ 
+     if (FAILED(hr = IMFTopologyNode_GetTopoNodeID(src_node, &topoid)))
+@@ -1783,6 +1779,20 @@ static HRESULT create_topology_node(MF_TOPOLOGY_TYPE node_type, struct topology_
+     return S_OK;
+ }
+ 
++MF_TOPOLOGY_TYPE topology_node_get_type(IMFTopologyNode *node)
++{
++    MF_TOPOLOGY_TYPE type;
++    HRESULT hr;
++
++    if (FAILED(hr = IMFTopologyNode_GetNodeType(node, &type)))
++    {
++        ERR("Failed to get node type, hr %#lx.\n", hr);
++        return -1;
++    }
++
++    return type;
++}
++
+ HRESULT topology_node_get_object(IMFTopologyNode *node, REFIID riid, void **obj)
+ {
+     IUnknown *unk;
+@@ -2013,10 +2023,7 @@ HRESULT topology_node_get_type_handler(IMFTopologyNode *node, DWORD stream,
+     IMFTransform *transform;
+     HRESULT hr;
+ 
+-    if (FAILED(hr = IMFTopologyNode_GetNodeType(node, &node_type)))
+-        return hr;
+-
+-    switch (node_type)
++    switch ((node_type = topology_node_get_type(node)))
+     {
+         case MF_TOPOLOGY_OUTPUT_NODE:
+             if (output || stream)
+diff --git a/dlls/mf/topology_loader.c b/dlls/mf/topology_loader.c
+index 73f70e6..5d51550 100644
+--- a/dlls/mf/topology_loader.c
++++ b/dlls/mf/topology_loader.c
+@@ -35,6 +35,23 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(mfplat);
+ 
++enum connect_method
++{
++    CONNECT_DIRECT    = 1,
++    CONNECT_CONVERTER = 2,
++    CONNECT_DECODER   = 4,
++};
++
++static enum connect_method connect_method_from_mf(MF_CONNECT_METHOD mf_method)
++{
++    enum connect_method method = CONNECT_DIRECT;
++    if ((mf_method & MF_CONNECT_ALLOW_CONVERTER) == MF_CONNECT_ALLOW_CONVERTER)
++        method |= CONNECT_CONVERTER;
++    if ((mf_method & MF_CONNECT_ALLOW_DECODER) == MF_CONNECT_ALLOW_DECODER)
++        method |= CONNECT_DECODER;
++    return method;
++}
++
+ struct topology_loader
+ {
+     IMFTopoLoader IMFTopoLoader_iface;
+@@ -84,30 +101,38 @@ static ULONG WINAPI topology_loader_Release(IMFTopoLoader *iface)
+     return refcount;
+ }
+ 
+-struct topoloader_context
++static void topology_node_transform_unlock_async(IMFTopologyNode *node)
+ {
+-    IMFTopology *input_topology;
+-    IMFTopology *output_topology;
+-};
++    IMFAttributes *attributes;
++
++    if ((attributes = topology_node_transform_async_get_attributes(node)))
++    {
++        IMFAttributes_SetUINT32(attributes, &MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
++        IMFAttributes_Release(attributes);
++    }
++}
+ 
+-static HRESULT topology_loader_clone_node(struct topoloader_context *context, IMFTopologyNode *node, IMFTopologyNode **clone)
++static HRESULT topology_clone_node(IMFTopology *topology, IMFTopologyNode *node, IMFTopologyNode **clone)
+ {
+-    MF_TOPOLOGY_TYPE node_type;
+     HRESULT hr;
+     TOPOID id;
+ 
+     if (FAILED(hr = IMFTopologyNode_GetTopoNodeID(node, &id)))
+         return hr;
+-    if (SUCCEEDED(hr = IMFTopology_GetNodeByID(context->output_topology, id, clone)))
++    if (SUCCEEDED(hr = IMFTopology_GetNodeByID(topology, id, clone)))
+         return hr;
+-
+-    IMFTopologyNode_GetNodeType(node, &node_type);
+-    if (FAILED(hr = MFCreateTopologyNode(node_type, clone)))
++    if (FAILED(hr = MFCreateTopologyNode(topology_node_get_type(node), clone)))
+         return hr;
+ 
+     hr = IMFTopologyNode_CloneFrom(*clone, node);
+     if (SUCCEEDED(hr))
+-        hr = IMFTopology_AddNode(context->output_topology, *clone);
++    {
++        /* unlock transforms now to enable querying of types */
++        if (topology_node_get_type(*clone) == MF_TOPOLOGY_TRANSFORM_NODE)
++            topology_node_transform_unlock_async(*clone);
++
++        hr = IMFTopology_AddNode(topology, *clone);
++    }
+ 
+     if (FAILED(hr))
+     {
+@@ -124,46 +149,63 @@ struct transform_output_type
+     IMFActivate *activate;
+ };
+ 
+-struct connect_context
+-{
+-    struct topoloader_context *context;
+-    IMFTopologyNode *upstream_node;
+-    IMFTopologyNode *sink;
+-    IMFMediaTypeHandler *sink_handler;
+-    unsigned int output_index;
+-    unsigned int input_index;
+-    GUID converter_category;
+-    GUID decoder_category;
+-};
+-
+ struct topology_branch
+ {
+     struct
+     {
+         IMFTopologyNode *node;
+         DWORD stream;
++        IMFMediaTypeHandler *handler;
+     } up, down;
+-
+-    struct list entry;
+ };
+ 
++static const char *debugstr_topology_type(MF_TOPOLOGY_TYPE type)
++{
++    switch (type)
++    {
++        case MF_TOPOLOGY_OUTPUT_NODE: return "sink";
++        case MF_TOPOLOGY_SOURCESTREAM_NODE: return "source";
++        case MF_TOPOLOGY_TRANSFORM_NODE: return "transform";
++        case MF_TOPOLOGY_TEE_NODE: return "tee";
++        default: return "unknown";
++    }
++}
++
+ static const char *debugstr_topology_branch(struct topology_branch *branch)
+ {
+-    return wine_dbg_sprintf("%p:%lu to %p:%lu", branch->up.node, branch->up.stream, branch->down.node, branch->down.stream);
++    return wine_dbg_sprintf("%s %p:%lu to %s %p:%lu", debugstr_topology_type(topology_node_get_type(branch->up.node)),
++            branch->up.node, branch->up.stream, debugstr_topology_type(topology_node_get_type(branch->down.node)),
++            branch->down.node, branch->down.stream);
+ }
+ 
+ static HRESULT topology_branch_create(IMFTopologyNode *source, DWORD source_stream,
+             IMFTopologyNode *sink, DWORD sink_stream, struct topology_branch **out)
+ {
++    IMFMediaTypeHandler *source_handler, *sink_handler;
+     struct topology_branch *branch;
++    HRESULT hr;
++
++    if (FAILED(hr = topology_node_get_type_handler(source, source_stream, TRUE, &source_handler)))
++        return hr;
++    if (FAILED(hr = topology_node_get_type_handler(sink, sink_stream, FALSE, &sink_handler)))
++    {
++        IMFMediaTypeHandler_Release(source_handler);
++        return hr;
++    }
+ 
+     if (!(branch = calloc(1, sizeof(*branch))))
++    {
++        IMFMediaTypeHandler_Release(sink_handler);
++        IMFMediaTypeHandler_Release(source_handler);
+         return E_OUTOFMEMORY;
++    }
+ 
+     IMFTopologyNode_AddRef((branch->up.node = source));
+     branch->up.stream = source_stream;
++    branch->up.handler = source_handler;
+     IMFTopologyNode_AddRef((branch->down.node = sink));
+     branch->down.stream = sink_stream;
++    branch->down.handler = sink_handler;
+ 
+     *out = branch;
+     return S_OK;
+@@ -172,49 +214,93 @@ static HRESULT topology_branch_create(IMFTopologyNode *source, DWORD source_stre
+ static void topology_branch_destroy(struct topology_branch *branch)
+ {
+     IMFTopologyNode_Release(branch->up.node);
++    IMFMediaTypeHandler_Release(branch->up.handler);
+     IMFTopologyNode_Release(branch->down.node);
++    IMFMediaTypeHandler_Release(branch->down.handler);
+     free(branch);
+ }
+ 
+-static HRESULT topology_branch_clone_nodes(struct topoloader_context *context, struct topology_branch *branch)
++static HRESULT topology_branch_create_indirect(struct topology_branch *branch,
++        IMFTopologyNode *node, struct topology_branch **up, struct topology_branch **down)
+ {
+-    IMFTopologyNode *up, *down;
+     HRESULT hr;
+ 
+-    if (FAILED(hr = topology_loader_clone_node(context, branch->up.node, &up)))
+-        return hr;
+-    if (FAILED(hr = topology_loader_clone_node(context, branch->down.node, &down)))
+-    {
+-        IMFTopologyNode_Release(up);
++    if (FAILED(hr = topology_branch_create(branch->up.node, branch->up.stream, node, 0, up)))
+         return hr;
+-    }
++    if (FAILED(hr = topology_branch_create(node, 0, branch->down.node, branch->down.stream, down)))
++        topology_branch_destroy(*up);
+ 
+-    IMFTopologyNode_Release(branch->up.node);
+-    IMFTopologyNode_Release(branch->down.node);
+-    branch->up.node = up;
+-    branch->down.node = down;
+     return hr;
+ }
+ 
+-static HRESULT topology_node_list_branches(IMFTopologyNode *node, struct list *branches)
++/* create a branch for a given node output stream, skipping any optional nodes */
++static HRESULT topology_branch_create_for_output(IMFTopologyNode *node, DWORD stream, struct topology_branch **out)
+ {
+-    struct topology_branch *branch;
+-    DWORD i, count, down_stream;
+     IMFTopologyNode *down_node;
++    DWORD down_stream;
++    UINT32 method;
+     HRESULT hr;
+ 
+-    hr = IMFTopologyNode_GetOutputCount(node, &count);
+-    for (i = 0; SUCCEEDED(hr) && i < count; ++i)
++    if (FAILED(hr = IMFTopologyNode_GetOutput(node, stream, &down_node, &down_stream)))
++        return hr;
++    while (SUCCEEDED(IMFTopologyNode_GetUINT32(down_node, &MF_TOPONODE_CONNECT_METHOD, &method))
++            && (method & MF_CONNECT_AS_OPTIONAL))
+     {
+-        if (FAILED(IMFTopologyNode_GetOutput(node, i, &down_node, &down_stream)))
+-            continue;
++        IMFTopologyNode *tmp = down_node;
++        hr = IMFTopologyNode_GetOutput(tmp, 0, &down_node, &down_stream);
++        IMFTopologyNode_Release(tmp);
++        if (FAILED(hr))
++            return hr;
++    }
++    hr = topology_branch_create(node, stream, down_node, down_stream, out);
++    IMFTopologyNode_Release(down_node);
+ 
+-        if (SUCCEEDED(hr = topology_branch_create(node, i, down_node, down_stream, &branch)))
+-            list_add_tail(branches, &branch->entry);
++    return hr;
++}
++
++/* create a branch for a given node input stream */
++static HRESULT topology_branch_create_for_input(IMFTopologyNode *node, DWORD stream, struct topology_branch **out)
++{
++    IMFTopologyNode *up_node;
++    DWORD up_stream;
++    HRESULT hr;
+ 
+-        IMFTopologyNode_Release(down_node);
++    if (FAILED(hr = IMFTopologyNode_GetInput(node, stream, &up_node, &up_stream)))
++        return hr;
++    hr = topology_branch_create(up_node, up_stream, node, stream, out);
++    IMFTopologyNode_Release(up_node);
++    return hr;
++}
++
++static HRESULT topology_branch_create_cloned(IMFTopology *topology, IMFTopologyNode *up_node, DWORD up_stream,
++        IMFTopologyNode *down_node, DWORD down_stream, struct topology_branch **out)
++{
++    IMFTopologyNode *up, *down;
++    HRESULT hr;
++
++    if (FAILED(hr = topology_clone_node(topology, up_node, &up)))
++        return hr;
++    if (FAILED(hr = topology_clone_node(topology, down_node, &down)))
++    {
++        IMFTopologyNode_Release(up);
++        return hr;
+     }
+ 
++    hr = topology_branch_create(up, up_stream, down, down_stream, out);
++    IMFTopologyNode_Release(up);
++    IMFTopologyNode_Release(down);
++    return hr;
++}
++
++static HRESULT topology_branch_create_optional(IMFTopology *topology, struct topology_branch *branch,
++        IMFTopologyNode *optional, DWORD stream, struct topology_branch **up, struct topology_branch **down)
++{
++    HRESULT hr;
++
++    if (SUCCEEDED(hr = topology_branch_create_cloned(topology, branch->up.node, branch->up.stream, optional, stream, up))
++            && FAILED(hr = topology_branch_create_cloned(topology, optional, 0, branch->down.node, branch->down.stream, down)))
++        topology_branch_destroy(*up);
++
+     return hr;
+ }
+ 
+@@ -266,99 +352,228 @@ static HRESULT update_media_type_from_upstream(IMFMediaType *media_type, IMFMedi
+     return hr;
+ }
+ 
+-static HRESULT topology_branch_connect(IMFTopology *topology, MF_CONNECT_METHOD method_mask,
+-        struct topology_branch *branch, BOOL enumerate_source_types);
+-static HRESULT topology_branch_connect_down(IMFTopology *topology, MF_CONNECT_METHOD method_mask,
+-        struct topology_branch *branch, IMFMediaType *up_type);
+-static HRESULT topology_branch_connect_indirect(IMFTopology *topology, MF_CONNECT_METHOD method_mask,
+-        struct topology_branch *branch, IMFMediaType *up_type, IMFMediaType *down_type)
++static HRESULT clone_media_type(IMFMediaType *in_type, IMFMediaType **out_type)
++{
++    HRESULT hr = MFCreateMediaType(out_type);
++    if (FAILED(hr) || SUCCEEDED(hr = IMFMediaType_CopyAllItems(in_type, (IMFAttributes *)*out_type)))
++        return hr;
++    IMFMediaType_Release(*out_type);
++    *out_type = NULL;
++    return hr;
++}
++
++/* safe version of IMFMediaTypeHandler_GetCurrentMediaType that makes a copy of the returned type if necessary */
++static HRESULT media_type_handler_get_current(IMFMediaTypeHandler *handler, IMFMediaType **type)
+ {
+-    BOOL decoder = (method_mask & MF_CONNECT_ALLOW_DECODER) == MF_CONNECT_ALLOW_DECODER;
+-    MFT_REGISTER_TYPE_INFO input_info, output_info;
++    IMFMediaType *tmp;
++    HRESULT hr;
++
++    if (FAILED(hr = IMFMediaTypeHandler_GetCurrentMediaType(handler, &tmp)))
++        return hr;
++    hr = clone_media_type(tmp, type);
++    IMFMediaType_Release(tmp);
++    return hr;
++}
++
++/* safe version of IMFMediaTypeHandler_GetMediaTypeByIndex that makes a copy of the returned type if necessary */
++static HRESULT media_type_handler_get_type(IMFMediaTypeHandler *handler, UINT32 i, IMFMediaType **type)
++{
++    IMFMediaType *tmp;
++    HRESULT hr;
++
++    if (FAILED(hr = IMFMediaTypeHandler_GetMediaTypeByIndex(handler, i, &tmp)))
++        return hr;
++    hr = clone_media_type(tmp, type);
++    IMFMediaType_Release(tmp);
++    return hr;
++}
++
++static BOOL is_better_media_type(IMFMediaType *type, IMFMediaType *best)
++{
++    GUID guid = {0};
++
++    IMFMediaType_GetGUID(type, &MF_MT_SUBTYPE, &guid);
++    if (IsEqualGUID(&guid, &MFAudioFormat_Float) || IsEqualGUID(&guid, &MFAudioFormat_PCM))
++    {
++        IMFMediaType_GetGUID(best, &MF_MT_SUBTYPE, &guid);
++        return !IsEqualGUID(&guid, &MFAudioFormat_Float);
++    }
++
++    return TRUE;
++}
++
++static void topology_branch_find_best_up_type(struct topology_branch *branch, IMFMediaType *down_type, IMFMediaType **type)
++{
++    IMFMediaType *up_type;
++    DWORD flags;
++    HRESULT hr;
++
++    /* actually set the down type to enforce some transform internal parameters like frame size on the enumerated types */
++    if (FAILED(hr = IMFMediaTypeHandler_SetCurrentMediaType(branch->up.handler, down_type)))
++    {
++        TRACE("down type %s not supported by upstream, hr %#lx\n", debugstr_media_type(down_type), hr);
++        return;
++    }
++
++    for (UINT i = 0; SUCCEEDED(hr = media_type_handler_get_type(branch->up.handler, i, &up_type)); i++)
++    {
++        if (FAILED(hr = update_media_type_from_upstream(up_type, down_type)))
++            WARN("Failed to update media type, hr %#lx\n", hr);
++
++        if ((hr = IMFMediaType_IsEqual(up_type, down_type, &flags)) != S_OK)
++            TRACE("up type %s differs from down type %s, hr %#lx flags %#lx\n", debugstr_media_type(up_type),
++                    debugstr_media_type(down_type), hr, flags);
++        else if (FAILED(hr = IMFMediaTypeHandler_IsMediaTypeSupported(branch->down.handler, up_type, NULL)))
++            TRACE("up type %s not supported by downstream, hr %#lx\n", debugstr_media_type(up_type), hr);
++        else if (*type && !is_better_media_type(up_type, *type))
++            TRACE("up type %s isn't better than selected type %s\n", debugstr_media_type(up_type),
++                    debugstr_media_type(*type));
++        else
++        {
++            TRACE("selecting up type %s\n", debugstr_media_type(up_type));
++            if (*type)
++                IMFMediaType_Release(*type);
++            *type = up_type;
++            continue;
++        }
++        IMFMediaType_Release(up_type);
++    }
++}
++
++static HRESULT topology_branch_find_best_type(struct topology_branch *branch, IMFMediaType *upstream, IMFMediaType **type)
++{
++    BOOL enumerate = topology_node_get_type(branch->down.node) == MF_TOPOLOGY_TRANSFORM_NODE;
++    IMFMediaType *down_type;
++    HRESULT hr;
++
++    *type = NULL;
++
++    if (SUCCEEDED(hr = media_type_handler_get_current(branch->down.handler, &down_type)))
++    {
++        if (FAILED(hr = update_media_type_from_upstream(down_type, upstream)))
++            WARN("Failed to update media type, hr %#lx\n", hr);
++        topology_branch_find_best_up_type(branch, down_type, type);
++        IMFMediaType_Release(down_type);
++    }
++    else if (enumerate || hr == MF_E_NOT_INITIALIZED)
++    {
++        for (UINT i = 0; SUCCEEDED(hr = media_type_handler_get_type(branch->down.handler, i, &down_type)); i++)
++        {
++            if (FAILED(hr = update_media_type_from_upstream(down_type, upstream)))
++                WARN("Failed to update media type, hr %#lx\n", hr);
++            topology_branch_find_best_up_type(branch, down_type, type);
++            IMFMediaType_Release(down_type);
++        }
++    }
++
++    return *type ? S_OK : MF_E_INVALIDMEDIATYPE;
++}
++
++static HRESULT topology_branch_connect_with_type(IMFTopology *topology, struct topology_branch *branch, IMFMediaType *type)
++{
++    HRESULT hr;
++
++    if (FAILED(hr = IMFMediaTypeHandler_SetCurrentMediaType(branch->up.handler, type)))
++    {
++        WARN("Failed to set upstream node media type, hr %#lx\n", hr);
++        return hr;
++    }
++
++    if (topology_node_get_type(branch->down.node) == MF_TOPOLOGY_TRANSFORM_NODE
++            ? FAILED(hr = IMFMediaTypeHandler_SetCurrentMediaType(branch->down.handler, type))
++            : FAILED(hr = IMFMediaTypeHandler_IsMediaTypeSupported(branch->down.handler, type, NULL)))
++    {
++        WARN("Failed to set transform node media type, hr %#lx\n", hr);
++        return hr;
++    }
++
++    TRACE("Connecting branch %s with type %s.\n", debugstr_topology_branch(branch), debugstr_media_type(type));
++    return IMFTopologyNode_ConnectOutput(branch->up.node, branch->up.stream, branch->down.node, branch->down.stream);
++}
++
++static HRESULT topology_branch_connect(IMFTopology *topology, enum connect_method method_mask,
++        struct topology_branch *branch, IMFMediaType *upstream, BOOL force_enumerate);
++static HRESULT topology_branch_connect_indirect(IMFTopology *topology, BOOL decoder,
++        struct topology_branch *branch, IMFMediaType *upstream)
++{
++    enum connect_method method_mask = CONNECT_DIRECT;
++    MFT_REGISTER_TYPE_INFO input_info;
+     IMFTransform *transform;
+     IMFActivate **activates;
+     IMFTopologyNode *node;
+     unsigned int i, count;
+     GUID category, guid;
++    UINT32 enable_xvp;
+     HRESULT hr;
+ 
+-    TRACE("topology %p, method_mask %#x, branch %s, up_type %p, down_type %p.\n",
+-            topology, method_mask, debugstr_topology_branch(branch), up_type, down_type);
++    TRACE("topology %p, decoder %u, branch %s, upstream %s.\n", topology, decoder,
++            debugstr_topology_branch(branch), debugstr_media_type(upstream));
+ 
+-    if (FAILED(hr = IMFMediaType_GetMajorType(up_type, &input_info.guidMajorType)))
++    if (FAILED(hr = IMFMediaType_GetMajorType(upstream, &input_info.guidMajorType)))
+         return hr;
+-    if (FAILED(hr = IMFMediaType_GetGUID(up_type, &MF_MT_SUBTYPE, &input_info.guidSubtype)))
++    if (FAILED(hr = IMFMediaType_GetGUID(upstream, &MF_MT_SUBTYPE, &input_info.guidSubtype)))
+         return hr;
+-    if (!down_type)
+-        output_info = input_info;
+-    else
+-    {
+-        if (FAILED(hr = IMFMediaType_GetMajorType(down_type, &output_info.guidMajorType)))
+-            return hr;
+-        if (FAILED(hr = IMFMediaType_GetGUID(down_type, &MF_MT_SUBTYPE, &output_info.guidSubtype)))
+-            return hr;
+-    }
++
++    if (FAILED(IMFTopology_GetUINT32(topology, &MF_TOPOLOGY_ENABLE_XVP_FOR_PLAYBACK, &enable_xvp)))
++        enable_xvp = 0;
+ 
+     if (IsEqualGUID(&input_info.guidMajorType, &MFMediaType_Audio))
+         category = decoder ? MFT_CATEGORY_AUDIO_DECODER : MFT_CATEGORY_AUDIO_EFFECT;
+     else if (IsEqualGUID(&input_info.guidMajorType, &MFMediaType_Video))
+-        category = decoder ? MFT_CATEGORY_VIDEO_DECODER : MFT_CATEGORY_VIDEO_PROCESSOR;
++        category = decoder ? MFT_CATEGORY_VIDEO_DECODER
++                : enable_xvp ? MFT_CATEGORY_VIDEO_PROCESSOR
++                : MFT_CATEGORY_VIDEO_EFFECT;
+     else
+         return MF_E_INVALIDMEDIATYPE;
+ 
+     if (FAILED(hr = MFCreateTopologyNode(MF_TOPOLOGY_TRANSFORM_NODE, &node)))
+         return hr;
+-    if (!decoder)
+-        method_mask = MF_CONNECT_DIRECT;
+-    else
++    if (decoder)
+     {
+         IMFTopologyNode_SetUINT32(node, &MF_TOPONODE_DECODER, 1);
+-        method_mask = MF_CONNECT_ALLOW_CONVERTER;
++        IMFTopologyNode_SetUINT32(node, &MF_TOPONODE_MARKIN_HERE, 1);
++        IMFTopologyNode_SetUINT32(node, &MF_TOPONODE_MARKOUT_HERE, 1);
++        method_mask |= CONNECT_CONVERTER;
+     }
+ 
+-    if (FAILED(hr = MFTEnumEx(category, MFT_ENUM_FLAG_ALL, &input_info, decoder ? NULL : &output_info, &activates, &count)))
++    if (FAILED(hr = MFTEnumEx(category, MFT_ENUM_FLAG_ALL, &input_info, NULL, &activates, &count)))
+         return hr;
+ 
+-    for (i = 0, hr = MF_E_TRANSFORM_NOT_POSSIBLE_FOR_CURRENT_MEDIATYPE_COMBINATION; i < count; ++i)
++    for (i = 0; i < count; ++i)
+     {
+-        struct topology_branch down_branch = {.up.node = node, .down = branch->down};
+-        struct topology_branch up_branch = {.up = branch->up, .down.node = node};
+-        MF_CONNECT_METHOD method = method_mask;
++        struct topology_branch *up_branch, *down_branch;
+         IMFMediaType *media_type;
+ 
+         if (FAILED(IMFActivate_ActivateObject(activates[i], &IID_IMFTransform, (void **)&transform)))
+             continue;
+-
+         IMFTopologyNode_SetObject(node, (IUnknown *)transform);
+         IMFTopologyNode_DeleteItem(node, &MF_TOPONODE_TRANSFORM_OBJECTID);
+-        if (SUCCEEDED(IMFActivate_GetGUID(activates[i], &MFT_TRANSFORM_CLSID_Attribute, &guid)))
++        if (SUCCEEDED(IMFActivate_GetGUID(activates[i], &MFT_TRANSFORM_CLSID_Attribute, &guid))
++                && !IsEqualGUID(&guid, &CLSID_VideoProcessorMFT))
+             IMFTopologyNode_SetGUID(node, &MF_TOPONODE_TRANSFORM_OBJECTID, &guid);
+-
+-        hr = topology_branch_connect_down(topology, MF_CONNECT_DIRECT, &up_branch, up_type);
+-        if (down_type && SUCCEEDED(MFCreateMediaType(&media_type)))
+-        {
+-            if (SUCCEEDED(IMFMediaType_CopyAllItems(down_type, (IMFAttributes *)media_type))
+-                    && SUCCEEDED(update_media_type_from_upstream(media_type, up_type))
+-                    && SUCCEEDED(IMFTransform_SetOutputType(transform, 0, media_type, 0)))
+-                method = MF_CONNECT_DIRECT;
+-            IMFMediaType_Release(media_type);
+-        }
+         IMFTransform_Release(transform);
+ 
+-        if (SUCCEEDED(hr) && method != MF_CONNECT_DIRECT
+-                && SUCCEEDED(IMFTransform_GetOutputAvailableType(transform, 0, 0, &media_type)))
++        if (SUCCEEDED(hr = topology_branch_create_indirect(branch, node, &up_branch, &down_branch)))
+         {
+-            if (SUCCEEDED(update_media_type_from_upstream(media_type, up_type)))
+-                IMFTransform_SetOutputType(transform, 0, media_type, 0);
+-            IMFMediaType_Release(media_type);
++            if (SUCCEEDED(hr = topology_branch_connect_with_type(topology, up_branch, upstream)))
++            {
++                if (FAILED(hr = topology_branch_find_best_type(down_branch, upstream, &media_type)))
++                    hr = topology_branch_connect(topology, method_mask, down_branch, upstream, FALSE);
++                else
++                {
++                    hr = topology_branch_connect_with_type(topology, down_branch, media_type);
++                    IMFMediaType_Release(media_type);
++                }
++            }
++            topology_branch_destroy(down_branch);
++            topology_branch_destroy(up_branch);
+         }
+ 
+-        if (SUCCEEDED(hr))
+-            hr = topology_branch_connect(topology, method, &down_branch, !down_type);
+         if (SUCCEEDED(hr))
+             hr = IMFTopology_AddNode(topology, node);
+         if (SUCCEEDED(hr))
+             break;
++        IMFTopologyNode_DisconnectOutput(branch->up.node, branch->up.stream);
+     }
+ 
+     IMFTopologyNode_Release(node);
+@@ -366,8 +581,10 @@ static HRESULT topology_branch_connect_indirect(IMFTopology *topology, MF_CONNEC
+         IMFActivate_Release(activates[i]);
+     CoTaskMemFree(activates);
+ 
+-    if (!count)
+-        return MF_E_TOPO_CODEC_NOT_FOUND;
++    if (!count || FAILED(hr))
++        hr = decoder ? MF_E_TOPO_CODEC_NOT_FOUND
++                : MF_E_TRANSFORM_NOT_POSSIBLE_FOR_CURRENT_MEDIATYPE_COMBINATION;
++    TRACE("returning %#lx\n", hr);
+     return hr;
+ }
+ 
+@@ -410,162 +627,260 @@ HRESULT topology_node_init_media_type(IMFTopologyNode *node, DWORD stream, BOOL
+     return hr;
+ }
+ 
+-static HRESULT topology_branch_connect_down(IMFTopology *topology, MF_CONNECT_METHOD method_mask,
+-        struct topology_branch *branch, IMFMediaType *up_type)
++static HRESULT topology_branch_connect_direct(IMFTopology *topology, struct topology_branch *branch, IMFMediaType *up_type)
+ {
+-    IMFMediaTypeHandler *down_handler;
+-    IMFMediaType *down_type = NULL;
+-    MF_TOPOLOGY_TYPE type;
+-    UINT32 method;
++    IMFMediaType *down_type, *type;
+     DWORD flags;
+     HRESULT hr;
+ 
+-    TRACE("topology %p, method_mask %#x, branch %s, up_type %p.\n",
+-            topology, method_mask, debugstr_topology_branch(branch), up_type);
+-
+-    if (FAILED(IMFTopologyNode_GetUINT32(branch->down.node, &MF_TOPONODE_CONNECT_METHOD, &method)))
+-        method = MF_CONNECT_ALLOW_DECODER;
++    TRACE("topology %p, branch %s, up_type %s.\n", topology, debugstr_topology_branch(branch),
++            debugstr_media_type(up_type));
+ 
+-    if (FAILED(hr = topology_node_get_type_handler(branch->down.node, branch->down.stream, FALSE, &down_handler)))
++    if (SUCCEEDED(hr = IMFMediaTypeHandler_GetCurrentMediaType(branch->down.handler, &down_type)))
++    {
++        if (topology_node_get_type(branch->down.node) != MF_TOPOLOGY_OUTPUT_NODE
++                || IMFMediaType_IsEqual(up_type, down_type, &flags) == S_OK)
++            hr = topology_branch_connect_with_type(topology, branch, up_type);
++        else
++        {
++            TRACE("current type %s differs from up type %s, hr %#lx\n", debugstr_media_type(down_type),
++                    debugstr_media_type(up_type), hr);
++            hr = MF_E_INVALIDMEDIATYPE;
++        }
++        IMFMediaType_Release(down_type);
++        TRACE("returning %#lx\n", hr);
+         return hr;
++    }
++
++    IMFMediaType_AddRef((type = up_type));
+ 
+-    if (SUCCEEDED(hr = get_first_supported_media_type(down_handler, &down_type))
+-            && IMFMediaType_IsEqual(up_type, down_type, &flags) == S_OK)
++    if (hr == MF_E_NOT_INITIALIZED)
+     {
+-        TRACE("Connecting branch %s with current type %p.\n", debugstr_topology_branch(branch), up_type);
+-        hr = IMFTopologyNode_ConnectOutput(branch->up.node, branch->up.stream, branch->down.node, branch->down.stream);
+-        goto done;
++        for (UINT i = 0; SUCCEEDED(hr = IMFMediaTypeHandler_GetMediaTypeByIndex(branch->down.handler, i, &down_type)); i++)
++        {
++            if ((hr = IMFMediaType_IsEqual(up_type, down_type, &flags)) != S_OK)
++                TRACE("down type %s differs from up type %s, hr %#lx flags %#lx\n", debugstr_media_type(down_type),
++                        debugstr_media_type(up_type), hr, flags);
++            else if (FAILED(hr = IMFMediaTypeHandler_IsMediaTypeSupported(branch->down.handler, down_type, NULL)))
++                TRACE("down type %s not supported by downstream, hr %#lx\n", debugstr_media_type(down_type), hr);
++            else if (FAILED(hr = IMFMediaTypeHandler_IsMediaTypeSupported(branch->up.handler, down_type, NULL)))
++                TRACE("down type %s not supported by upstream, hr %#lx\n", debugstr_media_type(down_type), hr);
++            else
++            {
++                TRACE("selecting down type %s\n", debugstr_media_type(down_type));
++                IMFMediaType_Release(type);
++                type = down_type;
++                continue;
++            }
++            IMFMediaType_Release(down_type);
++        }
+     }
+ 
+-    if (SUCCEEDED(hr = IMFMediaTypeHandler_IsMediaTypeSupported(down_handler, up_type, NULL)))
+-    {
+-        TRACE("Connected branch %s with upstream type %p.\n", debugstr_topology_branch(branch), up_type);
++    if (FAILED(hr = IMFMediaTypeHandler_IsMediaTypeSupported(branch->down.handler, type, NULL)))
++        TRACE("type %s not supported by downstream, hr %#lx\n", debugstr_media_type(type), hr);
++    else
++        hr = topology_branch_connect_with_type(topology, branch, type);
+ 
+-        if (SUCCEEDED(IMFTopologyNode_GetNodeType(branch->down.node, &type)) && type == MF_TOPOLOGY_TRANSFORM_NODE
+-                && FAILED(hr = IMFMediaTypeHandler_SetCurrentMediaType(down_handler, up_type)))
+-            WARN("Failed to set transform node media type, hr %#lx\n", hr);
++    IMFMediaType_Release(type);
++    TRACE("returning %#lx\n", hr);
++    return hr;
++}
+ 
+-        hr = IMFTopologyNode_ConnectOutput(branch->up.node, branch->up.stream, branch->down.node, branch->down.stream);
++static HRESULT topology_branch_connect_down(IMFTopology *topology, enum connect_method method,
++        struct topology_branch *branch, IMFMediaType *up_type)
++{
++    HRESULT hr = MF_E_INVALIDMEDIATYPE;
+ 
+-        goto done;
+-    }
++    TRACE("topology %p, branch %s, up_type %s.\n", topology, debugstr_topology_branch(branch), debugstr_media_type(up_type));
+ 
+-    if (FAILED(hr) && (method & method_mask & MF_CONNECT_ALLOW_CONVERTER) == MF_CONNECT_ALLOW_CONVERTER)
+-        hr = topology_branch_connect_indirect(topology, MF_CONNECT_ALLOW_CONVERTER,
+-                branch, up_type, down_type);
++    if (FAILED(hr) && (method & CONNECT_DIRECT))
++        hr = topology_branch_connect_direct(topology, branch, up_type);
++    if (FAILED(hr) && (method & CONNECT_CONVERTER))
++        hr = topology_branch_connect_indirect(topology, FALSE, branch, up_type);
++    if (FAILED(hr) && (method & CONNECT_DECODER))
++        hr = topology_branch_connect_indirect(topology, TRUE, branch, up_type);
+ 
+-    if (FAILED(hr) && (method & method_mask & MF_CONNECT_ALLOW_DECODER) == MF_CONNECT_ALLOW_DECODER)
+-        hr = topology_branch_connect_indirect(topology, MF_CONNECT_ALLOW_DECODER,
+-                branch, up_type, down_type);
++    TRACE("returning %#lx\n", hr);
++    return hr;
++}
+ 
+-done:
+-    if (down_type)
+-        IMFMediaType_Release(down_type);
+-    IMFMediaTypeHandler_Release(down_handler);
++static HRESULT topology_branch_foreach_up_types(IMFTopology *topology, enum connect_method method_mask,
++        struct topology_branch *branch, IMFMediaType *upstream, BOOL force_enumerate)
++{
++    HRESULT hr = MF_E_INVALIDMEDIATYPE;
++    UINT32 enumerate = TRUE;
++    IMFMediaType *up_type;
++
++    TRACE("topology %p, method_mask %#x, branch %s, upstream %s.\n", topology, method_mask, debugstr_topology_branch(branch),
++            debugstr_media_type(upstream));
+ 
++    switch (topology_node_get_type(branch->up.node))
++    {
++        case MF_TOPOLOGY_SOURCESTREAM_NODE:
++            if (FAILED(IMFTopology_GetUINT32(topology, &MF_TOPOLOGY_ENUMERATE_SOURCE_TYPES, &enumerate)))
++                enumerate = FALSE;
++            break;
++        default:
++            if (SUCCEEDED(IMFMediaTypeHandler_GetCurrentMediaType(branch->up.handler, &up_type)))
++            {
++                IMFMediaType_Release(up_type);
++                enumerate = FALSE;
++            }
++            break;
++    }
++
++    if (enumerate || force_enumerate)
++    {
++        for (UINT i = 0; SUCCEEDED(hr = media_type_handler_get_type(branch->up.handler, i, &up_type)); i++)
++        {
++            if (upstream && FAILED(hr = update_media_type_from_upstream(up_type, upstream)))
++                WARN("Failed to update type from upstream, hr %#lx\n", hr);
++            hr = topology_branch_connect_down(topology, method_mask, branch, up_type);
++            IMFMediaType_Release(up_type);
++            if (SUCCEEDED(hr))
++                return hr;
++        }
++        return hr;
++    }
++
++    if (SUCCEEDED(hr = media_type_handler_get_current(branch->up.handler, &up_type))
++            || SUCCEEDED(hr = media_type_handler_get_type(branch->up.handler, 0, &up_type)))
++    {
++        if (upstream && FAILED(hr = update_media_type_from_upstream(up_type, upstream)))
++            WARN("Failed to update type from upstream, hr %#lx\n", hr);
++        hr = topology_branch_connect_down(topology, method_mask, branch, up_type);
++        IMFMediaType_Release(up_type);
++        return hr;
++    }
++
++    TRACE("returning %#lx\n", hr);
+     return hr;
+ }
+ 
+-static HRESULT topology_branch_foreach_up_types(IMFTopology *topology, MF_CONNECT_METHOD method_mask,
+-        struct topology_branch *branch)
++static HRESULT topology_branch_connect(IMFTopology *topology, enum connect_method method_mask,
++        struct topology_branch *branch, IMFMediaType *upstream, BOOL force_enumerate)
+ {
+-    IMFMediaTypeHandler *handler;
+-    IMFMediaType *type;
+-    DWORD index = 0;
+-    HRESULT hr;
++    HRESULT hr = MF_E_INVALIDMEDIATYPE;
++    UINT32 up_method, down_method;
+ 
+-    if (FAILED(hr = topology_node_get_type_handler(branch->up.node, branch->up.stream, TRUE, &handler)))
+-        return hr;
++    TRACE("topology %p, method_mask %#x, branch %s, upstream %s.\n", topology, method_mask, debugstr_topology_branch(branch),
++            debugstr_media_type(upstream));
++
++    if (FAILED(IMFTopologyNode_GetUINT32(branch->down.node, &MF_TOPONODE_CONNECT_METHOD, &down_method)))
++        down_method = MF_CONNECT_ALLOW_DECODER;
++    down_method = connect_method_from_mf(down_method) & method_mask;
+ 
+-    while (SUCCEEDED(hr = IMFMediaTypeHandler_GetMediaTypeByIndex(handler, index++, &type)))
++    if (topology_node_get_type(branch->up.node) != MF_TOPOLOGY_SOURCESTREAM_NODE
++            || FAILED(IMFTopologyNode_GetUINT32(branch->up.node, &MF_TOPONODE_CONNECT_METHOD, &up_method)))
++        up_method = MF_CONNECT_DIRECT;
++
++    if (up_method & MF_CONNECT_RESOLVE_INDEPENDENT_OUTPUTTYPES)
++        hr = topology_branch_foreach_up_types(topology, down_method, branch, upstream, force_enumerate);
++    else
+     {
+-        hr = topology_branch_connect_down(topology, method_mask, branch, type);
+-        if (SUCCEEDED(hr))
+-            hr = IMFMediaTypeHandler_SetCurrentMediaType(handler, type);
+-        IMFMediaType_Release(type);
+-        if (SUCCEEDED(hr))
+-            break;
++        if (FAILED(hr) && (down_method & CONNECT_DIRECT))
++            hr = topology_branch_foreach_up_types(topology, CONNECT_DIRECT, branch, upstream, force_enumerate);
++        if (FAILED(hr) && (down_method & CONNECT_CONVERTER))
++            hr = topology_branch_foreach_up_types(topology, CONNECT_CONVERTER, branch, upstream, force_enumerate);
++        if (FAILED(hr) && (down_method & CONNECT_DECODER))
++            hr = topology_branch_foreach_up_types(topology, CONNECT_DECODER, branch, upstream, force_enumerate);
+     }
+ 
+-    IMFMediaTypeHandler_Release(handler);
++    TRACE("returning %#lx\n", hr);
+     return hr;
+ }
+ 
+-static HRESULT topology_branch_connect(IMFTopology *topology, MF_CONNECT_METHOD method_mask,
+-        struct topology_branch *branch, BOOL enumerate_source_types)
++static HRESULT topology_branch_connect_optional_chain(IMFTopology *topology, struct topology_branch *branch,
++        IMFTopologyNode *down_node, DWORD down_stream)
+ {
+-    UINT32 method;
++    struct topology_branch *current, *up_branch, *down_branch;
++    IMFTopologyNode *node;
++    DWORD stream;
+     HRESULT hr;
+ 
+-    TRACE("topology %p, method_mask %#x, branch %s.\n", topology, method_mask, debugstr_topology_branch(branch));
++    TRACE("topology %p, branch %s, down_node %p, down_stream %lu\n", topology, debugstr_topology_branch(branch),
++            down_node, down_stream);
+ 
+-    if (FAILED(IMFTopologyNode_GetUINT32(branch->up.node, &MF_TOPONODE_CONNECT_METHOD, &method)))
+-        method = MF_CONNECT_DIRECT;
+-
+-    if (enumerate_source_types)
++    if (FAILED(hr = IMFTopologyNode_GetOutput(branch->up.node, branch->up.stream, &node, &stream)))
++        return hr;
++    while (SUCCEEDED(hr) && node != branch->down.node)
+     {
+-        if (method & MF_CONNECT_RESOLVE_INDEPENDENT_OUTPUTTYPES)
+-            hr = topology_branch_foreach_up_types(topology, method_mask & MF_CONNECT_ALLOW_DECODER, branch);
+-        else
++        IMFTopologyNode *tmp = node;
++        IMFMediaType *orig;
++        UINT32 method;
++
++        if (FAILED(IMFTopologyNode_GetUINT32(node, &MF_TOPONODE_CONNECT_METHOD, &method)))
++            method = MF_CONNECT_DIRECT;
++        method &= MF_CONNECT_ALLOW_CONVERTER;
++
++        /* The loader may have inserted one or more transforms upstream. Only try inserting the optional node
++         * downstream of them. Support for upstream insertion is untested in native, but seems unlikely to work. */
++        if (FAILED(hr = topology_branch_create_for_input(down_node, down_stream, &current)))
++            break;
++        if (FAILED(hr = IMFMediaTypeHandler_GetCurrentMediaType(current->up.handler, &orig)))
+         {
+-            hr = topology_branch_foreach_up_types(topology, method_mask & MF_CONNECT_DIRECT, branch);
+-            if (FAILED(hr))
+-                hr = topology_branch_foreach_up_types(topology, method_mask & MF_CONNECT_ALLOW_CONVERTER, branch);
+-            if (FAILED(hr))
+-                hr = topology_branch_foreach_up_types(topology, method_mask & MF_CONNECT_ALLOW_DECODER, branch);
++            topology_branch_destroy(current);
++            break;
+         }
+-    }
+-    else
+-    {
+-        IMFMediaTypeHandler *up_handler;
+-        IMFMediaType *up_type;
+ 
+-        if (FAILED(hr = topology_node_get_type_handler(branch->up.node, branch->up.stream, TRUE, &up_handler)))
+-            return hr;
+-        if (SUCCEEDED(hr = IMFMediaTypeHandler_GetCurrentMediaType(up_handler, &up_type))
+-                || SUCCEEDED(hr = IMFMediaTypeHandler_GetMediaTypeByIndex(up_handler, 0, &up_type)))
++        if (SUCCEEDED(hr = topology_branch_create_optional(topology, current, node, stream, &up_branch, &down_branch)))
+         {
+-            hr = topology_branch_connect_down(topology, method_mask, branch, up_type);
+-            IMFMediaType_Release(up_type);
++            if (FAILED(hr = topology_branch_connect(topology, CONNECT_DIRECT, up_branch, NULL, !!method))
++                    || FAILED(hr = topology_branch_connect(topology, CONNECT_DIRECT, down_branch, NULL, FALSE)))
++            {
++                if (FAILED(hr = topology_branch_connect_with_type(topology, current, orig)))
++                    WARN("Failed to restore previous branch %s\n", debugstr_topology_branch(current));
++                IMFTopology_RemoveNode(topology, down_branch->up.node);
++            }
++            topology_branch_destroy(down_branch);
++            topology_branch_destroy(up_branch);
+         }
+-        IMFMediaTypeHandler_Release(up_handler);
++        IMFMediaType_Release(orig);
++        topology_branch_destroy(current);
++
++        hr = IMFTopologyNode_GetOutput(tmp, 0, &node, &stream);
++        IMFTopologyNode_Release(tmp);
++        if (FAILED(hr))
++            return hr;
+     }
++    IMFTopologyNode_Release(node);
+ 
+     TRACE("returning %#lx\n", hr);
+     return hr;
+ }
+ 
+-static HRESULT topology_loader_resolve_branches(struct topoloader_context *context, struct list *branches,
+-        BOOL enumerate_source_types)
++static HRESULT topology_loader_resolve_node(IMFTopology *topology, IMFTopologyNode *node)
+ {
+-    struct list new_branches = LIST_INIT(new_branches);
+-    struct topology_branch *branch, *next;
+-    MF_TOPOLOGY_TYPE node_type;
+-    HRESULT hr = S_OK;
++    enum connect_method method_mask = connect_method_from_mf(MF_CONNECT_ALLOW_DECODER);
++    struct topology_branch *branch, *cloned;
++    DWORD output_count;
++    UINT32 method;
++    HRESULT hr;
+ 
+-    LIST_FOR_EACH_ENTRY_SAFE(branch, next, branches, struct topology_branch, entry)
+-    {
+-        list_remove(&branch->entry);
++    TRACE("topology %p, node %p\n", topology, node);
+ 
+-        if (FAILED(hr = topology_node_list_branches(branch->down.node, &new_branches)))
+-            WARN("Failed to list branches from branch %s\n", debugstr_topology_branch(branch));
+-        else if (FAILED(hr = IMFTopologyNode_GetNodeType(branch->up.node, &node_type)))
+-            WARN("Failed to get source node type for branch %s\n", debugstr_topology_branch(branch));
+-        else if (FAILED(hr = topology_branch_clone_nodes(context, branch)))
+-            WARN("Failed to clone nodes for branch %s\n", debugstr_topology_branch(branch));
+-        else
++    if (SUCCEEDED(hr = IMFTopologyNode_GetOutputCount(node, &output_count)) && !output_count)
++        return topology_node_get_type(node) == MF_TOPOLOGY_OUTPUT_NODE ? S_OK : MF_E_TOPO_UNSUPPORTED;
++
++    if (SUCCEEDED(IMFTopologyNode_GetUINT32(node, &MF_TOPONODE_CONNECT_METHOD, &method))
++            && (method & MF_CONNECT_AS_OPTIONAL_BRANCH))
++        FIXME("MF_CONNECT_AS_OPTIONAL_BRANCH not implemented\n");
++
++    for (UINT i = 0; SUCCEEDED(hr) && SUCCEEDED(topology_branch_create_for_output(node, i, &branch)); ++i)
++    {
++        if (SUCCEEDED(hr = topology_branch_create_cloned(topology, branch->up.node, branch->up.stream,
++                branch->down.node, branch->down.stream, &cloned)))
+         {
+-            hr = topology_branch_connect(context->output_topology, MF_CONNECT_ALLOW_DECODER, branch, enumerate_source_types);
+-            if (hr == MF_E_INVALIDMEDIATYPE && !enumerate_source_types && node_type == MF_TOPOLOGY_TRANSFORM_NODE)
+-                hr = topology_branch_connect(context->output_topology, MF_CONNECT_ALLOW_DECODER, branch, TRUE);
++            if (SUCCEEDED(hr = topology_branch_connect(topology, method_mask, cloned, NULL, FALSE)))
++                topology_branch_connect_optional_chain(topology, branch, cloned->down.node, cloned->down.stream);
++            topology_branch_destroy(cloned);
+         }
+-
++        if (SUCCEEDED(hr))
++            hr = topology_loader_resolve_node(topology, branch->down.node);
+         topology_branch_destroy(branch);
+-        if (FAILED(hr))
+-            break;
+     }
+ 
+-    list_move_tail(branches, &new_branches);
++    TRACE("returning %#lx\n", hr);
+     return hr;
+ }
+ 
+@@ -600,6 +915,21 @@ BOOL topology_node_is_d3d_aware(IMFTopologyNode *node)
+     return d3d_aware || d3d11_aware;
+ }
+ 
++IMFAttributes *topology_node_transform_async_get_attributes(IMFTopologyNode *node)
++{
++    IMFAttributes *attributes;
++
++    if (SUCCEEDED(topology_node_get_object_attributes(node, &attributes)))
++    {
++        UINT32 async;
++        if (SUCCEEDED(IMFAttributes_GetUINT32(attributes, &MF_TRANSFORM_ASYNC, &async)) && async)
++            return attributes;
++        IMFAttributes_Release(attributes);
++    }
++
++    return NULL;
++}
++
+ static HRESULT topology_loader_create_copier(IMFTopologyNode *upstream_node, DWORD upstream_output,
+         IMFTopologyNode *downstream_node, unsigned int downstream_input, IMFTransform **copier)
+ {
+@@ -634,7 +964,7 @@ static HRESULT topology_loader_create_copier(IMFTopologyNode *upstream_node, DWO
+     return hr;
+ }
+ 
+-static HRESULT topology_loader_connect_copier(struct topoloader_context *context, IMFTopologyNode *upstream_node,
++static HRESULT topology_loader_connect_copier(IMFTopology *topology, IMFTopologyNode *upstream_node,
+         DWORD upstream_output, IMFTopologyNode *downstream_node, DWORD downstream_input, IMFTransform *copier)
+ {
+     IMFTopologyNode *copier_node;
+@@ -644,7 +974,7 @@ static HRESULT topology_loader_connect_copier(struct topoloader_context *context
+         return hr;
+ 
+     IMFTopologyNode_SetObject(copier_node, (IUnknown *)copier);
+-    IMFTopology_AddNode(context->output_topology, copier_node);
++    IMFTopology_AddNode(topology, copier_node);
+     IMFTopologyNode_ConnectOutput(upstream_node, upstream_output, copier_node, 0);
+     IMFTopologyNode_ConnectOutput(copier_node, 0, downstream_node, downstream_input);
+ 
+@@ -701,7 +1031,7 @@ HRESULT stream_sink_get_device_manager(IMFStreamSink *stream_sink, IUnknown **de
+ }
+ 
+ /* Right now this should be used for output nodes only. */
+-static HRESULT topology_loader_connect_d3d_aware_sink(struct topoloader_context *context,
++static HRESULT topology_loader_connect_d3d_aware_sink(IMFTopology *topology,
+         IMFTopologyNode *node, MFTOPOLOGY_DXVA_MODE dxva_mode)
+ {
+     IMFTopologyNode *upstream_node;
+@@ -734,7 +1064,7 @@ static HRESULT topology_loader_connect_d3d_aware_sink(struct topoloader_context
+ 
+             if (needs_copier && SUCCEEDED(hr = topology_loader_create_copier(upstream_node, upstream_output, node, 0, &copier)))
+             {
+-                hr = topology_loader_connect_copier(context, upstream_node, upstream_output, node, 0, copier);
++                hr = topology_loader_connect_copier(topology, upstream_node, upstream_output, node, 0, copier);
+                 IMFTransform_Release(copier);
+             }
+ 
+@@ -752,39 +1082,39 @@ static HRESULT topology_loader_connect_d3d_aware_sink(struct topoloader_context
+     return hr;
+ }
+ 
+-static void topology_loader_resolve_complete(struct topoloader_context *context)
++static void topology_loader_resolve_complete(IMFTopology *topology)
+ {
+     MFTOPOLOGY_DXVA_MODE dxva_mode;
+-    MF_TOPOLOGY_TYPE node_type;
+     IMFTopologyNode *node;
+     WORD i, node_count;
+     HRESULT hr;
+ 
+-    IMFTopology_GetNodeCount(context->output_topology, &node_count);
++    IMFTopology_GetNodeCount(topology, &node_count);
+ 
+-    if (FAILED(IMFTopology_GetUINT32(context->input_topology, &MF_TOPOLOGY_DXVA_MODE, (UINT32 *)&dxva_mode)))
++    if (FAILED(IMFTopology_GetUINT32(topology, &MF_TOPOLOGY_DXVA_MODE, (UINT32 *)&dxva_mode)))
+         dxva_mode = 0;
+ 
+     for (i = 0; i < node_count; ++i)
+     {
+-        if (SUCCEEDED(IMFTopology_GetNode(context->output_topology, i, &node)))
++        if (SUCCEEDED(IMFTopology_GetNode(topology, i, &node)))
+         {
+-            IMFTopologyNode_GetNodeType(node, &node_type);
+-
+-            if (node_type == MF_TOPOLOGY_OUTPUT_NODE)
++            switch (topology_node_get_type(node))
+             {
+-                /* Set MF_TOPONODE_STREAMID for all outputs. */
+-                if (FAILED(IMFTopologyNode_GetItem(node, &MF_TOPONODE_STREAMID, NULL)))
+-                    IMFTopologyNode_SetUINT32(node, &MF_TOPONODE_STREAMID, 0);
+-
+-                if (FAILED(hr = topology_loader_connect_d3d_aware_sink(context, node, dxva_mode)))
+-                    WARN("Failed to connect D3D-aware input, hr %#lx.\n", hr);
+-            }
+-            else if (node_type == MF_TOPOLOGY_SOURCESTREAM_NODE)
+-            {
+-                /* Set MF_TOPONODE_MEDIASTART for all sources. */
+-                if (FAILED(IMFTopologyNode_GetItem(node, &MF_TOPONODE_MEDIASTART, NULL)))
+-                    IMFTopologyNode_SetUINT64(node, &MF_TOPONODE_MEDIASTART, 0);
++                case MF_TOPOLOGY_OUTPUT_NODE:
++                    /* Set MF_TOPONODE_STREAMID for all outputs. */
++                    if (FAILED(IMFTopologyNode_GetItem(node, &MF_TOPONODE_STREAMID, NULL)))
++                        IMFTopologyNode_SetUINT32(node, &MF_TOPONODE_STREAMID, 0);
++
++                    if (FAILED(hr = topology_loader_connect_d3d_aware_sink(topology, node, dxva_mode)))
++                        WARN("Failed to connect D3D-aware input, hr %#lx.\n", hr);
++                    break;
++                case MF_TOPOLOGY_SOURCESTREAM_NODE:
++                    /* Set MF_TOPONODE_MEDIASTART for all sources. */
++                    if (FAILED(IMFTopologyNode_GetItem(node, &MF_TOPONODE_MEDIASTART, NULL)))
++                        IMFTopologyNode_SetUINT64(node, &MF_TOPONODE_MEDIASTART, 0);
++                    break;
++                default:
++                    ;
+             }
+ 
+             IMFTopologyNode_Release(node);
+@@ -792,103 +1122,95 @@ static void topology_loader_resolve_complete(struct topoloader_context *context)
+     }
+ }
+ 
+-static HRESULT WINAPI topology_loader_Load(IMFTopoLoader *iface, IMFTopology *input_topology,
+-        IMFTopology **ret_topology, IMFTopology *current_topology)
++static HRESULT clone_topology(IMFTopology *input_topology, IMFCollection *sources,
++        IMFTopology **output_topology)
+ {
+-    struct list branches = LIST_INIT(branches);
+-    struct topoloader_context context = { 0 };
+-    struct topology_branch *branch, *next;
+-    UINT32 enumerate_source_types;
+-    IMFTopology *output_topology;
+-    MF_TOPOLOGY_TYPE node_type;
++    BOOL has_source = FALSE;
+     IMFTopologyNode *node;
+-    unsigned short i = 0;
+     IMFStreamSink *sink;
++    HRESULT hr = S_OK;
+     IUnknown *object;
+     TOPOID topoid;
+-    HRESULT hr = E_FAIL;
+-
+-    FIXME("iface %p, input_topology %p, ret_topology %p, current_topology %p stub!\n",
+-          iface, input_topology, ret_topology, current_topology);
+-
+-    if (current_topology)
+-        FIXME("Current topology instance is ignored.\n");
++    UINT32 method;
+ 
+-    /* Basic sanity checks for input topology:
++    IMFTopology_GetTopologyID(input_topology, &topoid);
++    if (FAILED(hr = create_topology(topoid, output_topology)))
++        return hr;
++    hr = IMFTopology_CopyAllItems(input_topology, (IMFAttributes *)*output_topology);
+ 
+-       - source nodes must have stream descriptor set;
+-       - sink nodes must be resolved to stream sink objects;
+-    */
+-    while (SUCCEEDED(IMFTopology_GetNode(input_topology, i++, &node)))
++    for (UINT i = 0; SUCCEEDED(hr) && SUCCEEDED(IMFTopology_GetNode(input_topology, i, &node)); i++)
+     {
+-        IMFTopologyNode_GetNodeType(node, &node_type);
+-
+-        switch (node_type)
++        switch (topology_node_get_type(node))
+         {
+             case MF_TOPOLOGY_OUTPUT_NODE:
+-                if (SUCCEEDED(hr = IMFTopologyNode_GetObject(node, &object)))
++                if (SUCCEEDED(IMFTopologyNode_GetUINT32(node, &MF_TOPONODE_CONNECT_METHOD, &method))
++                        && (method & MF_CONNECT_AS_OPTIONAL))
++                    hr = MF_E_TOPO_UNSUPPORTED;
++                else if (SUCCEEDED(hr = IMFTopologyNode_GetObject(node, &object)))
+                 {
+-                    /* Sinks must be bound beforehand. */
+                     if (FAILED(IUnknown_QueryInterface(object, &IID_IMFStreamSink, (void **)&sink)))
+                         hr = MF_E_TOPO_SINK_ACTIVATES_UNSUPPORTED;
+-                    else if (sink)
++                    else
+                         IMFStreamSink_Release(sink);
+                     IUnknown_Release(object);
+                 }
+                 break;
+             case MF_TOPOLOGY_SOURCESTREAM_NODE:
+-                hr = IMFTopologyNode_GetItem(node, &MF_TOPONODE_STREAM_DESCRIPTOR, NULL);
++                if (SUCCEEDED(hr = IMFTopologyNode_GetItem(node, &MF_TOPONODE_STREAM_DESCRIPTOR, NULL)))
++                    hr = IMFCollection_AddElement(sources, (IUnknown *)node);
++                has_source = TRUE;
+                 break;
+             default:
+-                ;
++                break;
+         }
+ 
+         IMFTopologyNode_Release(node);
+-        if (FAILED(hr))
+-            return hr;
+     }
+ 
+-    IMFTopology_GetTopologyID(input_topology, &topoid);
+-    if (FAILED(hr = create_topology(topoid, &output_topology)))
++    if (SUCCEEDED(hr) && !has_source)
++        hr = MF_E_TOPO_UNSUPPORTED;
++    if (SUCCEEDED(hr))
+         return hr;
+ 
+-    IMFTopology_CopyAllItems(input_topology, (IMFAttributes *)output_topology);
++    IMFTopology_Release(*output_topology);
++    return hr;
++}
+ 
+-    context.input_topology = input_topology;
+-    context.output_topology = output_topology;
++static HRESULT WINAPI topology_loader_Load(IMFTopoLoader *iface, IMFTopology *input_topology,
++        IMFTopology **ret_topology, IMFTopology *current_topology)
++{
++    IMFTopology *output_topology;
++    IMFTopologyNode *node;
++    IMFCollection *nodes;
++    HRESULT hr;
+ 
+-    for (i = 0; SUCCEEDED(IMFTopology_GetNode(input_topology, i, &node)); i++)
+-    {
+-        hr = topology_node_list_branches(node, &branches);
+-        IMFTopologyNode_Release(node);
+-        if (FAILED(hr))
+-            break;
+-    }
+-    if (SUCCEEDED(hr) && list_empty(&branches))
+-        hr = MF_E_TOPO_UNSUPPORTED;
++    TRACE("iface %p, input_topology %p, ret_topology %p, current_topology %p.\n",
++            iface, input_topology, ret_topology, current_topology);
+ 
+-    if (FAILED(IMFTopology_GetUINT32(input_topology, &MF_TOPOLOGY_ENUMERATE_SOURCE_TYPES,
+-            &enumerate_source_types)))
+-        enumerate_source_types = 0;
++    if (current_topology)
++        FIXME("Current topology instance is ignored.\n");
+ 
+-    while (SUCCEEDED(hr) && !list_empty(&branches))
+-        hr = topology_loader_resolve_branches(&context, &branches, enumerate_source_types);
++    if (FAILED(hr = MFCreateCollection(&nodes)))
++        return hr;
++    if (FAILED(hr = clone_topology(input_topology, nodes, &output_topology)))
++        goto done;
+ 
+-    LIST_FOR_EACH_ENTRY_SAFE(branch, next, &branches, struct topology_branch, entry)
++    while (SUCCEEDED(hr) && SUCCEEDED(IMFCollection_RemoveElement(nodes, 0, (IUnknown **)&node)))
+     {
+-        WARN("Failed to resolve branch %s\n", debugstr_topology_branch(branch));
+-        list_remove(&branch->entry);
+-        topology_branch_destroy(branch);
++        hr = topology_loader_resolve_node(output_topology, node);
++        IMFTopologyNode_Release(node);
+     }
+ 
+     if (FAILED(hr))
+         IMFTopology_Release(output_topology);
+     else
+     {
+-        topology_loader_resolve_complete(&context);
++        topology_loader_resolve_complete(output_topology);
+         *ret_topology = output_topology;
+     }
+ 
++done:
++    IMFCollection_Release(nodes);
+     return hr;
+ }
+ 

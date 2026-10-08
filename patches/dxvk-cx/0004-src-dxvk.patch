@@ -1,0 +1,759 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 4/6] src-dxvk: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/dxvk (DXVK 1.10.3)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/src/dxvk/dxvk_buffer.cpp b/src/dxvk/dxvk_buffer.cpp
+index 931a626..f1e9811 100644
+--- a/src/dxvk/dxvk_buffer.cpp
++++ b/src/dxvk/dxvk_buffer.cpp
+@@ -19,7 +19,8 @@ namespace dxvk {
+     // requirements imposed by the Vulkan device/driver
+     VkDeviceSize sliceAlignment = computeSliceAlignment();
+     m_physSliceLength = createInfo.size;
+-    m_physSliceStride = align(createInfo.size, sliceAlignment);
++    // Ember: 크기 0 버퍼(GetDC 등)에서 아래 256 / stride 가 0 나누기로 튕겼다
++    m_physSliceStride = align(std::max<VkDeviceSize>(createInfo.size, 1), sliceAlignment);
+     m_physSliceCount  = std::max<VkDeviceSize>(1, 256 / m_physSliceStride);
+ 
+     // Limit size of multi-slice buffers to reduce fragmentation
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+index fd63f9a..4cff5f3 100644
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -1804,6 +1804,20 @@ namespace dxvk {
+     const Rc<DxvkImage>&            srcImage,
+     const VkImageResolve&           region,
+           VkFormat                  format) {
++    // Ember: 1샘플 원본을 "resolve" 하는 호출이 있다(d3d9 스왑체인·StretchRect·잠금 경로 — 레프트 4 데드 2 로딩 중 수천 번).
++    // Vulkan 규칙상 원본은 멀티샘플이어야 하고, 다른 드라이버는 복사처럼 넘어가지만 MoltenVK 는 Metal 렌더 패스의
++    // resolveTexture 로 옮겨 GPU 가 "Internal Error(0x10d)" 로 명령 버퍼를 버린다 → VK_ERROR_DEVICE_LOST(로딩 멈춤).
++    // 1샘플 resolve 는 복사와 같으니 형식이 같으면 복사로 바꾼다.
++    if (srcImage->info().sampleCount == VK_SAMPLE_COUNT_1_BIT
++     && (format == VK_FORMAT_UNDEFINED || format == srcImage->info().format)
++     && dstImage->info().format == srcImage->info().format) {
++      this->copyImage(
++        dstImage, region.dstSubresource, region.dstOffset,
++        srcImage, region.srcSubresource, region.srcOffset,
++        region.extent);
++      return;
++    }
++
+     this->spillRenderPass(true);
+     this->prepareImage(m_execBarriers, dstImage, vk::makeSubresourceRange(region.dstSubresource));
+     this->prepareImage(m_execBarriers, srcImage, vk::makeSubresourceRange(region.srcSubresource));
+@@ -1837,6 +1851,17 @@ namespace dxvk {
+     const VkImageResolve&           region,
+           VkResolveModeFlagBitsKHR  depthMode,
+           VkResolveModeFlagBitsKHR  stencilMode) {
++    // Ember: 위 resolveImage 와 같은 이유 — 1샘플 원본은 복사로.
++    if (srcImage->info().sampleCount == VK_SAMPLE_COUNT_1_BIT
++     && dstImage->info().format == srcImage->info().format
++     && (depthMode || stencilMode)) {
++      this->copyImage(
++        dstImage, region.dstSubresource, region.dstOffset,
++        srcImage, region.srcSubresource, region.srcOffset,
++        region.extent);
++      return;
++    }
++
+     this->spillRenderPass(true);
+     this->prepareImage(m_execBarriers, dstImage, vk::makeSubresourceRange(region.dstSubresource));
+     this->prepareImage(m_execBarriers, srcImage, vk::makeSubresourceRange(region.srcSubresource));
+@@ -4154,7 +4179,8 @@ namespace dxvk {
+     
+     // Retrieve and bind actual Vulkan pipeline handle
+     m_gpActivePipeline = m_state.gp.pipeline->getPipelineHandle(
+-      m_state.gp.state, m_state.om.framebufferInfo.renderPass());
++      m_state.gp.state, m_state.om.framebufferInfo.renderPass(),
++      this->checkAsyncCompilationCompat());
+ 
+     if (unlikely(!m_gpActivePipeline))
+       return false;
+@@ -4417,6 +4443,8 @@ namespace dxvk {
+         m_state.gp.state.omSwizzle[i] = DxvkOmAttachmentSwizzle(mapping);
+       }
+ 
++      m_asyncRtDirty = true;
++
+       m_flags.set(DxvkContextFlag::GpDirtyPipelineState);
+     }
+   }
+@@ -4829,6 +4857,9 @@ namespace dxvk {
+ 
+     m_hackRenderAreaTrimmedToViewport = false;
+ 
++    if (m_device->config().enableAsync)
++      this->trackAsyncRenderTargets();
++
+     if (m_flags.test(DxvkContextFlag::GpDirtyIndexBuffer) && Indexed) {
+       if (unlikely(!this->updateIndexBufferBinding()))
+         return false;
+@@ -5239,6 +5270,57 @@ namespace dxvk {
+   }
+   
+ 
++  void DxvkContext::trackAsyncRenderTargets() {
++    // Ember: 원본 패치는 드로 중에 프레임버퍼가 다시 바인딩될 때만 기록한다.
++    // 프레임 첫머리의 Clear 가 먼저 프레임버퍼를 바인딩하면 드로에서는 기록이
++    // 안 돼 비동기가 거의 켜지지 않는다. 그래서 드로마다, 프레임버퍼가 바뀌었거나
++    // 새 프레임일 때만 현재 렌더 타깃에 프레임 번호를 남긴다.
++    uint32_t frameId = m_device->getCurrentFrameId();
++
++    if (likely(!m_asyncRtDirty && frameId == m_asyncRtFrameId))
++      return;
++
++    m_asyncRtDirty   = false;
++    m_asyncRtFrameId = frameId;
++
++    const DxvkFramebufferInfo& fbInfo = m_state.om.framebufferInfo;
++
++    for (uint32_t i = 0; i < fbInfo.numAttachments(); i++)
++      fbInfo.getAttachment(i).view->setRtBindingFrameId(frameId);
++  }
++
++
++  bool DxvkContext::checkAsyncCompilationCompat() {
++    if (!m_device->config().enableAsync)
++      return false;
++
++    // Ember: 원본 dxvk-async 는 렌더 타깃 조건만 본다. 트랜스폼 피드백이나
++    // 오클루전·파이프라인 통계 쿼리가 켜진 동안 드로를 건너뛰면 결과 값이
++    // 틀어지므로 그때는 기존처럼 동기로 컴파일한다.
++    if (m_flags.test(DxvkContextFlag::GpXfbActive)
++     || m_state.gp.flags.test(DxvkGraphicsPipelineFlag::HasTransformFeedback)
++     || m_queryManager.hasEnabledQueries(VK_QUERY_TYPE_OCCLUSION)
++     || m_queryManager.hasEnabledQueries(VK_QUERY_TYPE_PIPELINE_STATISTICS))
++      return false;
++
++    // Framebuffers without any attachments are rejected as well,
++    // since there is no render target whose use we could track.
++    uint32_t numAttachments = m_state.om.framebufferInfo.numAttachments();
++
++    if (!numAttachments)
++      return false;
++
++    for (uint32_t i = 0; i < numAttachments; i++) {
++      const auto& attachment = m_state.om.framebufferInfo.getAttachment(i);
++
++      if (!attachment.view->getRtBindingAsyncCompilationCompat())
++        return false;
++    }
++
++    return true;
++  }
++
++
+   DxvkGraphicsPipeline* DxvkContext::lookupGraphicsPipeline(
+     const DxvkGraphicsPipelineShaders&  shaders) {
+     auto idx = shaders.hash() % m_gpLookupCache.size();
+diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
+index b1377a5..d2efd69 100644
+--- a/src/dxvk/dxvk_context.h
++++ b/src/dxvk/dxvk_context.h
+@@ -1093,6 +1093,10 @@ namespace dxvk {
+ 
+     bool m_hackRenderAreaTrimmedToViewport = false;
+ 
++    // Ember: dxvk-async 렌더 타깃 사용 추적 (trackAsyncRenderTargets)
++    bool     m_asyncRtDirty   = true;
++    uint32_t m_asyncRtFrameId = 0;
++
+     void blitImageFb(
+       const Rc<DxvkImage>&        dstImage,
+       const Rc<DxvkImage>&        srcImage,
+@@ -1250,6 +1254,8 @@ namespace dxvk {
+       const DxvkRenderTargets&      renderTargets);
+ 
+     void updateFramebuffer();
++
++    void trackAsyncRenderTargets();
+     
+     void applyRenderTargetLoadLayouts();
+ 
+@@ -1329,6 +1335,8 @@ namespace dxvk {
+       const Rc<DxvkBuffer>&           buffer,
+             VkDeviceSize              copySize);
+ 
++    bool checkAsyncCompilationCompat();
++
+     DxvkGraphicsPipeline* lookupGraphicsPipeline(
+       const DxvkGraphicsPipelineShaders&  shaders);
+ 
+diff --git a/src/dxvk/dxvk_gpu_query.cpp b/src/dxvk/dxvk_gpu_query.cpp
+index 40d3a09..44c9eb7 100644
+--- a/src/dxvk/dxvk_gpu_query.cpp
++++ b/src/dxvk/dxvk_gpu_query.cpp
+@@ -342,6 +342,19 @@ namespace dxvk {
+   }
+ 
+ 
++  bool DxvkGpuQueryManager::hasEnabledQueries(
++          VkQueryType           type) const {
++    // Ember: dxvk-async. 오클루전 쿼리 도중 드로를 건너뛰면 샘플 수가 줄어
++    // 게임이 물체를 가려진 것으로 판단한다(깜빡임·사라짐). 이때는 동기로 컴파일.
++    for (size_t i = 0; i < m_activeQueries.size(); i++) {
++      if (m_activeQueries[i]->type() == type)
++        return true;
++    }
++
++    return false;
++  }
++
++
+   void DxvkGpuQueryManager::beginSingleQuery(
+     const Rc<DxvkCommandList>&  cmd,
+     const Rc<DxvkGpuQuery>&     query) {
+diff --git a/src/dxvk/dxvk_gpu_query.h b/src/dxvk/dxvk_gpu_query.h
+index 0c45d12..92166b6 100644
+--- a/src/dxvk/dxvk_gpu_query.h
++++ b/src/dxvk/dxvk_gpu_query.h
+@@ -393,6 +393,17 @@ namespace dxvk {
+       const Rc<DxvkCommandList>&  cmd,
+             VkQueryType           type);
+ 
++    /**
++     * \brief Checks whether any query of a given type is enabled
++     * 
++     * Used to disable async pipeline compilation while
++     * a draw being skipped would change query results.
++     * \param [in] type Query type
++     * \returns \c true if a query of that type is enabled
++     */
++    bool hasEnabledQueries(
++            VkQueryType           type) const;
++
+   private:
+ 
+     DxvkGpuQueryPool*             m_pool;
+diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+index 66c4131..87dc68f 100644
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -62,7 +62,8 @@ namespace dxvk {
+ 
+   VkPipeline DxvkGraphicsPipeline::getPipelineHandle(
+     const DxvkGraphicsPipelineStateInfo& state,
+-    const DxvkRenderPass*                renderPass) {
++    const DxvkRenderPass*                renderPass,
++          bool                           async) {
+     DxvkGraphicsPipelineInstance* instance = this->findInstance(state, renderPass);
+ 
+     if (unlikely(!instance)) {
+@@ -70,6 +71,14 @@ namespace dxvk {
+       if (!this->validatePipelineState(state, true))
+         return VK_NULL_HANDLE;
+ 
++      // Ember: dxvk-async. 원본 패치는 여기서 잠금을 빼고 m_mutex2 를 더했지만,
++      // 비동기 쪽은 잠금 없이 큐에만 넣고 바로 돌아가게 하고 동기 쪽은 원래 잠금을
++      // 그대로 둔다. 인스턴스 추가가 늘 m_mutex 아래라 잠금 없는 목록이 안전하다.
++      if (async && m_pipeMgr->m_compiler != nullptr) {
++        m_pipeMgr->m_compiler->queueCompilation(this, state, renderPass);
++        return VK_NULL_HANDLE;
++      }
++
+       // Prevent other threads from adding new instances and check again
+       std::lock_guard<dxvk::mutex> lock(m_mutex);
+       instance = this->findInstance(state, renderPass);
+@@ -102,6 +111,21 @@ namespace dxvk {
+   }
+ 
+ 
++  bool DxvkGraphicsPipeline::compileAsyncPipeline(
++    const DxvkGraphicsPipelineStateInfo& state,
++    const DxvkRenderPass*                renderPass) {
++    // Ember: 상태 캐시용 엄격한 검사(trusted=false)를 여기서 하면 동기 경로에선
++    // 만들어질 파이프라인이 거부돼 드로가 영영 빠질 수 있다. 검사는 이미 끝났다.
++    std::lock_guard<dxvk::mutex> lock(m_mutex);
++
++    if (this->findInstance(state, renderPass))
++      return false;
++
++    this->createInstance(state, renderPass);
++    return true;
++  }
++
++
+   DxvkGraphicsPipelineInstance* DxvkGraphicsPipeline::createInstance(
+     const DxvkGraphicsPipelineStateInfo& state,
+     const DxvkRenderPass*                renderPass) {
+diff --git a/src/dxvk/dxvk_graphics.h b/src/dxvk/dxvk_graphics.h
+index 50d16b1..9500ab3 100644
+--- a/src/dxvk/dxvk_graphics.h
++++ b/src/dxvk/dxvk_graphics.h
+@@ -199,11 +199,14 @@ namespace dxvk {
+      * state. If necessary, a new pipeline will be created.
+      * \param [in] state Pipeline state vector
+      * \param [in] renderPass The render pass
+-     * \returns Pipeline handle
++     * \param [in] async Compile asynchronously
++     * \returns Pipeline handle, or \c VK_NULL_HANDLE
++     *    if the pipeline is being compiled asynchronously
+      */
+     VkPipeline getPipelineHandle(
+       const DxvkGraphicsPipelineStateInfo&    state,
+-      const DxvkRenderPass*                   renderPass);
++      const DxvkRenderPass*                   renderPass,
++            bool                              async = false);
+     
+     /**
+      * \brief Compiles a pipeline
+@@ -217,6 +220,24 @@ namespace dxvk {
+       const DxvkGraphicsPipelineStateInfo&    state,
+       const DxvkRenderPass*                   renderPass);
+     
++    /**
++     * \brief Compiles a pipeline queued by the async compiler
++     * 
++     * The state vector must already have been validated
++     * by \ref getPipelineHandle, so this skips the more
++     * thorough validation used for state cache entries.
++     * \param [in] state Pipeline state vector
++     * \param [in] renderPass The render pass
++     * \returns \c true if a new pipeline was created
++     */
++    bool compileAsyncPipeline(
++      const DxvkGraphicsPipelineStateInfo&    state,
++      const DxvkRenderPass*                   renderPass);
++    
++    void writePipelineStateToCache(
++      const DxvkGraphicsPipelineStateInfo& state,
++      const DxvkRenderPassFormat&          format) const;
++    
+   private:
+     
+     Rc<vk::DeviceFn>            m_vkd;
+@@ -264,10 +285,6 @@ namespace dxvk {
+       const DxvkGraphicsPipelineStateInfo& state,
+             bool                           trusted) const;
+     
+-    void writePipelineStateToCache(
+-      const DxvkGraphicsPipelineStateInfo& state,
+-      const DxvkRenderPassFormat&          format) const;
+-    
+     void logPipelineState(
+             LogLevel                       level,
+       const DxvkGraphicsPipelineStateInfo& state) const;
+diff --git a/src/dxvk/dxvk_image.h b/src/dxvk/dxvk_image.h
+index b3b8a58..5d665ba 100644
+--- a/src/dxvk/dxvk_image.h
++++ b/src/dxvk/dxvk_image.h
+@@ -552,6 +552,42 @@ namespace dxvk {
+         view->imageSubresources());
+     }
+ 
++    /**
++     * \brief Sets render target usage frame number
++     *
++     * The image view will track internally when
++     * it was last used as a render target. This
++     * info is used for async shader compilation.
++     * \param [in] frameId Frame number
++     */
++    void setRtBindingFrameId(uint32_t frameId) {
++      if (frameId != m_rtBindingFrameId) {
++        // Ember: 원본은 바로 앞 프레임만 연속으로 친다. d3d9 백버퍼는 Present 마다
++        // 이미지가 돌아가서(백버퍼 수+1개, 최대 4개) 같은 뷰가 2~4 프레임마다 온다.
++        // 그러면 백버퍼 드로가 영영 비동기가 안 되므로 4 프레임 간격까지 연속으로 본다.
++        if (frameId - m_rtBindingFrameId <= 4)
++          m_rtBindingFrameCount += 1;
++        else
++          m_rtBindingFrameCount = 0;
++
++        m_rtBindingFrameId = frameId;
++      }
++    }
++
++    /**
++     * \brief Checks for async pipeline compatibility
++     *
++     * Asynchronous pipeline compilation may be enabled if the
++     * render target has been drawn to in the previous frames.
++     * Render targets that are only drawn to once, e.g. during
++     * loading, never qualify, since skipping a draw would
++     * permanently corrupt their contents.
++     * \returns \c true if async compilation is supported
++     */
++    bool getRtBindingAsyncCompilationCompat() const {
++      return m_rtBindingFrameCount >= 5;
++    }
++
+   private:
+     
+     Rc<vk::DeviceFn>  m_vkd;
+@@ -564,6 +600,12 @@ namespace dxvk {
+ 
+     static std::atomic<uint64_t> s_cookie;
+ 
++    // Ember: dxvk-async. 5 프레임 연속 그려진 렌더 타깃에만 비동기 컴파일을
++    // 허용한다. 한 번만 그리는 타깃(로딩·임포스터·그림자 굽기)은 드로가 빠지면
++    // 결과가 영구히 틀어지기 때문이다. 원본 패치와 같은 기준.
++    uint32_t m_rtBindingFrameId    = 0;
++    uint32_t m_rtBindingFrameCount = 0;
++
+     void createView(VkImageViewType type, uint32_t numLayers);
+     
+   };
+diff --git a/src/dxvk/dxvk_options.cpp b/src/dxvk/dxvk_options.cpp
+index ea82eed..d8321d9 100644
+--- a/src/dxvk/dxvk_options.cpp
++++ b/src/dxvk/dxvk_options.cpp
+@@ -1,3 +1,5 @@
++#include "../util/util_env.h"
++
+ #include "dxvk_options.h"
+ 
+ namespace dxvk {
+@@ -9,6 +11,14 @@ namespace dxvk {
+     useRawSsbo            = config.getOption<Tristate>("dxvk.useRawSsbo",             Tristate::Auto);
+     shrinkNvidiaHvvHeap   = config.getOption<Tristate>("dxvk.shrinkNvidiaHvvHeap",    Tristate::Auto);
+     hud                   = config.getOption<std::string>("dxvk.hud", "");
++
++    // Ember: 셰이더 컴파일 끊김을 줄이는 dxvk-async (Sporif 1.10.x 방식).
++    // 첫 드로가 빠질 수 있어 기본은 꺼 두고 DXVK_ASYNC=1 이나 설정으로만 켠다.
++    enableAsync           = config.getOption<bool>    ("dxvk.enableAsync",            false);
++    numAsyncThreads       = config.getOption<int32_t> ("dxvk.numAsyncThreads",        0);
++
++    if (env::getEnvVar("DXVK_ASYNC") == "1")
++      enableAsync = true;
+   }
+ 
+ }
+diff --git a/src/dxvk/dxvk_options.h b/src/dxvk/dxvk_options.h
+index 992ec76..19eda9b 100644
+--- a/src/dxvk/dxvk_options.h
++++ b/src/dxvk/dxvk_options.h
+@@ -18,6 +18,14 @@ namespace dxvk {
+     /// when using the state cache
+     int32_t numCompilerThreads;
+ 
++    /// Ember: 비동기 파이프라인 컴파일 (dxvk-async).
++    /// DXVK_ASYNC=1 도 이 값을 켠다.
++    bool enableAsync;
++
++    /// Number of compiler threads
++    /// when using async pipelines
++    int32_t numAsyncThreads;
++
+     /// Shader-related options
+     Tristate useRawSsbo;
+ 
+diff --git a/src/dxvk/dxvk_pipecompiler.cpp b/src/dxvk/dxvk_pipecompiler.cpp
+new file mode 100644
+index 0000000..12b4cbf
+--- /dev/null
++++ b/src/dxvk/dxvk_pipecompiler.cpp
+@@ -0,0 +1,133 @@
++#include "dxvk_device.h"
++#include "dxvk_graphics.h"
++#include "dxvk_pipecompiler.h"
++
++namespace dxvk {
++
++  DxvkPipelineCompiler::DxvkPipelineCompiler(const DxvkDevice* device)
++  : m_device(device) {
++
++  }
++
++
++  DxvkPipelineCompiler::~DxvkPipelineCompiler() {
++    this->stopWorkerThreads();
++  }
++
++
++  void DxvkPipelineCompiler::queueCompilation(
++          DxvkGraphicsPipeline*             pipeline,
++    const DxvkGraphicsPipelineStateInfo&    state,
++    const DxvkRenderPass*                   renderPass) {
++    size_t key = computeKey(pipeline, state, renderPass);
++
++    std::lock_guard<dxvk::mutex> lock(m_compilerLock);
++
++    if (m_compilerStop.load())
++      return;
++
++    // Ember: 파이프라인이 준비될 때까지 드로마다 여기로 다시 온다.
++    // 같은 상태가 큐에 쌓이지 않도록 대기 중인 키는 건너뛴다.
++    // 해시 충돌이면 한쪽이 끝난 뒤 다음 드로에서 다시 큐에 들어간다.
++    if (!m_compilerPending.insert(key).second)
++      return;
++
++    this->createWorkers();
++
++    m_pendingCount += 1;
++    m_compilerQueue.push({ pipeline, state, renderPass, key });
++    m_compilerCond.notify_one();
++  }
++
++
++  void DxvkPipelineCompiler::stopWorkerThreads() {
++    { std::lock_guard<dxvk::mutex> lock(m_compilerLock);
++
++      if (m_compilerStop.exchange(true))
++        return;
++
++      m_compilerCond.notify_all();
++    }
++
++    for (auto& thread : m_compilerThreads)
++      thread.join();
++
++    m_compilerThreads.clear();
++  }
++
++
++  void DxvkPipelineCompiler::createWorkers() {
++    if (!m_compilerThreads.empty())
++      return;
++
++    uint32_t numCpuCores = dxvk::thread::hardware_concurrency();
++    uint32_t numWorkers  = ((std::max(1u, numCpuCores) - 1) * 5) / 7;
++
++    if (numWorkers <  1) numWorkers =  1;
++    if (numWorkers > 32) numWorkers = 32;
++
++    if (m_device->config().numAsyncThreads > 0)
++      numWorkers = m_device->config().numAsyncThreads;
++
++    Logger::info(str::format("DXVK: Using ", numWorkers, " async compiler threads"));
++
++    for (uint32_t i = 0; i < numWorkers; i++)
++      m_compilerThreads.emplace_back([this] () { this->runCompilerThread(); });
++  }
++
++
++  void DxvkPipelineCompiler::runCompilerThread() {
++    env::setThreadName("dxvk-pcompiler");
++
++    while (!m_compilerStop.load()) {
++      PipelineEntry entry;
++
++      { std::unique_lock<dxvk::mutex> lock(m_compilerLock);
++
++        m_compilerCond.wait(lock, [this] {
++          return m_compilerStop.load()
++              || !m_compilerQueue.empty();
++        });
++
++        if (m_compilerStop.load())
++          break;
++
++        entry = std::move(m_compilerQueue.front());
++        m_compilerQueue.pop();
++      }
++
++      if (entry.pipeline->compileAsyncPipeline(entry.state, entry.renderPass))
++        entry.pipeline->writePipelineStateToCache(entry.state, entry.renderPass->format());
++
++      // Only remove the key once the pipeline instance is visible
++      // to the context, otherwise it could get queued again.
++      { std::lock_guard<dxvk::mutex> lock(m_compilerLock);
++        m_compilerPending.erase(entry.key);
++        m_pendingCount -= 1;
++      }
++    }
++  }
++
++
++  size_t DxvkPipelineCompiler::computeKey(
++    const DxvkGraphicsPipeline*             pipeline,
++    const DxvkGraphicsPipelineStateInfo&    state,
++    const DxvkRenderPass*                   renderPass) {
++    // FNV-1a over the raw state vector, which is compared
++    // bytewise as well when looking up pipeline instances
++    auto data = reinterpret_cast<const uint8_t*>(&state);
++    uint64_t hash = 0xcbf29ce484222325ull;
++
++    for (size_t i = 0; i < sizeof(state); i++) {
++      hash ^= data[i];
++      hash *= 0x100000001b3ull;
++    }
++
++    DxvkHashState result;
++    result.add(size_t(hash));
++    result.add(reinterpret_cast<uintptr_t>(pipeline));
++    result.add(reinterpret_cast<uintptr_t>(renderPass));
++    return result;
++  }
++
++}
+diff --git a/src/dxvk/dxvk_pipecompiler.h b/src/dxvk/dxvk_pipecompiler.h
+new file mode 100644
+index 0000000..6494f70
+--- /dev/null
++++ b/src/dxvk/dxvk_pipecompiler.h
+@@ -0,0 +1,95 @@
++#pragma once
++
++#include <atomic>
++#include <queue>
++#include <unordered_set>
++#include <vector>
++
++#include "../util/thread.h"
++
++#include "dxvk_graphics_state.h"
++#include "dxvk_include.h"
++
++// Ember: dxvk-async (Sporif/dxvk-async, 1.10.2-1.10.3 용 af418dc 패치) 이식.
++// 아직 없는 그래픽 파이프라인을 별도 스레드에서 만들고, 그동안 드로는 건너뛴다.
++// 원본 패치와 달리 같은 상태를 드로마다 다시 큐에 넣지 않도록 대기 목록을 둔다.
++
++namespace dxvk {
++
++  class DxvkDevice;
++  class DxvkGraphicsPipeline;
++  class DxvkRenderPass;
++
++  /**
++   * \brief Pipeline compiler
++   *
++   * Asynchronous graphics pipeline compiler.
++   * Worker threads are created on first use.
++   */
++  class DxvkPipelineCompiler : public RcObject {
++
++  public:
++
++    DxvkPipelineCompiler(const DxvkDevice* device);
++    ~DxvkPipelineCompiler();
++
++    /**
++     * \brief Compiles a pipeline asynchronously
++     *
++     * Does nothing if the same pipeline state is
++     * already queued or currently being compiled.
++     * \param [in] pipeline The pipeline object
++     * \param [in] state The pipeline state info object
++     * \param [in] renderPass The render pass
++     */
++    void queueCompilation(
++            DxvkGraphicsPipeline*             pipeline,
++      const DxvkGraphicsPipelineStateInfo&    state,
++      const DxvkRenderPass*                   renderPass);
++
++    /**
++     * \brief Checks whether pipelines are being compiled
++     * \returns \c true if the queue is not empty
++     */
++    bool isCompilingShaders() const {
++      return m_pendingCount.load() != 0;
++    }
++
++    /**
++     * \brief Stops compiler threads
++     *
++     * Pending pipelines are discarded.
++     */
++    void stopWorkerThreads();
++
++  private:
++
++    struct PipelineEntry {
++      DxvkGraphicsPipeline*                   pipeline = nullptr;
++      DxvkGraphicsPipelineStateInfo           state;
++      const DxvkRenderPass*                   renderPass = nullptr;
++      size_t                                  key = 0;
++    };
++
++    const DxvkDevice*           m_device;
++
++    std::atomic<bool>           m_compilerStop = { false };
++    std::atomic<uint32_t>       m_pendingCount = { 0u };
++    dxvk::mutex                 m_compilerLock;
++    dxvk::condition_variable    m_compilerCond;
++    std::queue<PipelineEntry>   m_compilerQueue;
++    std::unordered_set<size_t>  m_compilerPending;
++    std::vector<dxvk::thread>   m_compilerThreads;
++
++    void createWorkers();
++
++    void runCompilerThread();
++
++    static size_t computeKey(
++      const DxvkGraphicsPipeline*             pipeline,
++      const DxvkGraphicsPipelineStateInfo&    state,
++      const DxvkRenderPass*                   renderPass);
++
++  };
++
++}
+diff --git a/src/dxvk/dxvk_pipemanager.cpp b/src/dxvk/dxvk_pipemanager.cpp
+index 4c5ea32..c4c9fcc 100644
+--- a/src/dxvk/dxvk_pipemanager.cpp
++++ b/src/dxvk/dxvk_pipemanager.cpp
+@@ -13,11 +13,20 @@ namespace dxvk {
+     
+     if (useStateCache != "0" && device->config().enableStateCache)
+       m_stateCache = new DxvkStateCache(device, this, passManager);
++
++    // Ember: dxvk-async. DXVK_ASYNC=1 은 DxvkOptions 에서 enableAsync 로 합쳐진다.
++    if (device->config().enableAsync) {
++      Logger::info("DXVK: Async pipeline compilation enabled");
++      m_compiler = new DxvkPipelineCompiler(device);
++    }
+   }
+   
+   
+   DxvkPipelineManager::~DxvkPipelineManager() {
+-    
++    // Ember: 컴파일러 스레드가 파이프라인 객체를 가리키므로
++    // 멤버 해제 순서와 상관없이 파이프라인보다 먼저 멈춘다.
++    if (m_compiler != nullptr)
++      m_compiler->stopWorkerThreads();
+   }
+   
+   
+@@ -75,12 +84,19 @@ namespace dxvk {
+ 
+ 
+   bool DxvkPipelineManager::isCompilingShaders() const {
++    // Ember: HUD 의 컴파일 표시에 비동기 컴파일도 포함
++    if (m_compiler != nullptr && m_compiler->isCompilingShaders())
++      return true;
++
+     return m_stateCache != nullptr
+         && m_stateCache->isCompilingShaders();
+   }
+ 
+ 
+   void DxvkPipelineManager::stopWorkerThreads() const {
++    if (m_compiler != nullptr)
++      m_compiler->stopWorkerThreads();
++
+     if (m_stateCache != nullptr)
+       m_stateCache->stopWorkerThreads();
+   }
+diff --git a/src/dxvk/dxvk_pipemanager.h b/src/dxvk/dxvk_pipemanager.h
+index 08c79e0..a176813 100644
+--- a/src/dxvk/dxvk_pipemanager.h
++++ b/src/dxvk/dxvk_pipemanager.h
+@@ -6,6 +6,7 @@
+ 
+ #include "dxvk_compute.h"
+ #include "dxvk_graphics.h"
++#include "dxvk_pipecompiler.h"
+ 
+ namespace dxvk {
+ 
+@@ -100,6 +101,7 @@ namespace dxvk {
+     DxvkDevice*               m_device;
+     Rc<DxvkPipelineCache>     m_cache;
+     Rc<DxvkStateCache>        m_stateCache;
++    Rc<DxvkPipelineCompiler>  m_compiler; // Ember: dxvk-async
+ 
+     std::atomic<uint32_t>     m_numComputePipelines  = { 0 };
+     std::atomic<uint32_t>     m_numGraphicsPipelines = { 0 };
+diff --git a/src/dxvk/meson.build b/src/dxvk/meson.build
+index e0e3e8f..b55e5fa 100644
+--- a/src/dxvk/meson.build
++++ b/src/dxvk/meson.build
+@@ -91,6 +91,7 @@ dxvk_src = files([
+   'dxvk_openxr.cpp',
+   'dxvk_options.cpp',
+   'dxvk_pipecache.cpp',
++  'dxvk_pipecompiler.cpp', # Ember: dxvk-async 비동기 파이프라인 컴파일러
+   'dxvk_pipelayout.cpp',
+   'dxvk_pipemanager.cpp',
+   'dxvk_queue.cpp',

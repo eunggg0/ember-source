@@ -1,0 +1,69 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 6/6] top: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/dxvk (DXVK 1.10.3)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/build-arm64ec.txt b/build-arm64ec.txt
+new file mode 100644
+index 0000000..53c3f3a
+--- /dev/null
++++ b/build-arm64ec.txt
+@@ -0,0 +1,16 @@
++# Ember: FEX(ARM64EC) 용 DXVK — x64 게임이 FEX 로 도는 프로세스에 네이티브로 올라간다(번역 없음)
++[binaries]
++c = 'arm64ec-w64-mingw32-gcc'
++cpp = 'arm64ec-w64-mingw32-g++'
++ar = 'arm64ec-w64-mingw32-ar'
++strip = 'arm64ec-w64-mingw32-strip'
++windres = 'arm64ec-w64-mingw32-windres'
++
++[properties]
++needs_exe_wrapper = true
++
++[host_machine]
++system = 'windows'
++cpu_family = 'aarch64'
++cpu = 'aarch64'
++endian = 'little'
+diff --git a/dxvk.conf b/dxvk.conf
+index 7aa4c07..49a3fb3 100644
+--- a/dxvk.conf
++++ b/dxvk.conf
+@@ -244,6 +244,22 @@ dxgi.numBackBuffers = 3
+ # dxvk.numCompilerThreads = 0
+ 
+ 
++# Ember: dxvk-async. Compiles missing graphics pipelines on separate
++# threads and skips the affected draws until they are ready, which
++# reduces shader compilation stutter. Only used for render targets
++# that were drawn to over several recent frames, and never while
++# occlusion queries or transform feedback are active.
++# Also enabled by the environment variable DXVK_ASYNC=1.
++#
++# dxvk.enableAsync = False
++
++
++# Sets the number of async pipeline compiler threads.
++# 0 uses the same heuristic as dxvk.numCompilerThreads.
++#
++# dxvk.numAsyncThreads = 0
++
++
+ # Toggles raw SSBO usage.
+ # 
+ # Uses storage buffers to implement raw and structured buffer
+diff --git a/meson.build b/meson.build
+index 248efdb..bb016d3 100644
+--- a/meson.build
++++ b/meson.build
+@@ -58,6 +58,9 @@ dxvk_include_path = include_directories('./include')
+ 
+ if (cpu_family == 'x86_64')
+   dxvk_library_path = meson.source_root() + '/lib'
++elif (cpu_family == 'aarch64')
++  # Ember: ARM64EC(FEX) 빌드 — llvm-dlltool -m arm64ec 로 만든 가져오기 라이브러리
++  dxvk_library_path = meson.source_root() + '/libarm64ec'
+ else
+   dxvk_library_path = meson.source_root() + '/lib32'
+ endif

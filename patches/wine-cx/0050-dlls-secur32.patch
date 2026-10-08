@@ -1,0 +1,75 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 50/74] dlls-secur32: Ember changes
+
+Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/secur32/lsa.c b/dlls/secur32/lsa.c
+index 11e05a5..9fd9ed0 100644
+--- a/dlls/secur32/lsa.c
++++ b/dlls/secur32/lsa.c
+@@ -397,7 +397,7 @@ static SECURITY_STATUS WINAPI lsa_AcquireCredentialsHandleA(
+ {
+     SECURITY_STATUS status = SEC_E_INSUFFICIENT_MEMORY;
+     SEC_WCHAR *principalW = NULL, *packageW = NULL;
+-    SEC_WINNT_AUTH_IDENTITY_A *id = auth_data;
++    SEC_WINNT_AUTH_IDENTITY_A *id = auth_data, id_ex_mapped;
+     SEC_WINNT_AUTH_IDENTITY_W idW = {};
+ 
+     TRACE("%s %s %#lx %p %p %p %p %p\n", debugstr_a(principal), debugstr_a(package),
+@@ -415,6 +415,23 @@ static SECURITY_STATUS WINAPI lsa_AcquireCredentialsHandleA(
+         if (!(packageW = malloc( len * sizeof(SEC_WCHAR) ))) goto done;
+         MultiByteToWideChar( CP_ACP, 0, package, -1, packageW, len );
+     }
++    /* Ember: SEC_WINNT_AUTH_IDENTITY_EXA(앞 ULONG 이 버전 0x200)를 일반 구조체로 읽으면 버전·길이를
++     * User 포인터로 써서 튕겼다(0x0000004800000200 읽기). 일반 구조체로 옮겨 읽는다. */
++    if (id && *(ULONG *)id == 0x200)
++    {
++        const struct { ULONG Version, Length; unsigned char *User; ULONG UserLength; unsigned char *Domain;
++                       ULONG DomainLength; unsigned char *Password; ULONG PasswordLength; ULONG Flags;
++                       unsigned char *PackageList; ULONG PackageListLength; } *idex = auth_data;
++        id_ex_mapped.User           = idex->User;
++        id_ex_mapped.UserLength     = idex->UserLength;
++        id_ex_mapped.Domain         = idex->Domain;
++        id_ex_mapped.DomainLength   = idex->DomainLength;
++        id_ex_mapped.Password       = idex->Password;
++        id_ex_mapped.PasswordLength = idex->PasswordLength;
++        id_ex_mapped.Flags          = idex->Flags;
++        id = &id_ex_mapped;
++        auth_data = id;
++    }
+     if (id && (id->Flags == SEC_WINNT_AUTH_IDENTITY_ANSI))
+     {
+         if (id->UserLength)
+@@ -491,13 +508,13 @@ static SECURITY_STATUS WINAPI lsa_InitializeSecurityContextW(
+     if (context)
+     {
+         lsa_ctx = (struct lsa_handle *)context->dwLower;
+-        if (lsa_ctx->magic != LSA_MAGIC_CONTEXT) return SEC_E_INVALID_HANDLE;
++        if (!lsa_ctx || lsa_ctx->magic != LSA_MAGIC_CONTEXT) return SEC_E_INVALID_HANDLE;
+         package = lsa_ctx->package;
+     }
+     else if (credential)
+     {
+         lsa_cred = (struct lsa_handle *)credential->dwLower;
+-        if (lsa_cred->magic != LSA_MAGIC_CREDENTIALS) return SEC_E_INVALID_HANDLE;
++        if (!lsa_cred || lsa_cred->magic != LSA_MAGIC_CREDENTIALS) return SEC_E_INVALID_HANDLE;
+         package = lsa_cred->package;
+     }
+     if (!package || !new_context) return SEC_E_INVALID_HANDLE;
+@@ -564,13 +581,13 @@ static SECURITY_STATUS WINAPI lsa_AcceptSecurityContext(
+     if (context)
+     {
+         lsa_ctx = (struct lsa_handle *)context->dwLower;
+-        if (lsa_ctx->magic != LSA_MAGIC_CONTEXT) return SEC_E_INVALID_HANDLE;
++        if (!lsa_ctx || lsa_ctx->magic != LSA_MAGIC_CONTEXT) return SEC_E_INVALID_HANDLE;
+         package = lsa_ctx->package;
+     }
+     else if (credential)
+     {
+         lsa_cred = (struct lsa_handle *)credential->dwLower;
+-        if (lsa_cred->magic != LSA_MAGIC_CREDENTIALS) return SEC_E_INVALID_HANDLE;
++        if (!lsa_cred || lsa_cred->magic != LSA_MAGIC_CREDENTIALS) return SEC_E_INVALID_HANDLE;
+         package = lsa_cred->package;
+     }
+     if (!package || !new_context) return SEC_E_INVALID_HANDLE;

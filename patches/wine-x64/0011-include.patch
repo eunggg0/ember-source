@@ -1,0 +1,68 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 11/12] include: Ember changes
+
+Base: wine-11.0.tar.xz
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/include/Makefile.in b/include/Makefile.in
+index e0987ce..0a21b79 100644
+--- a/include/Makefile.in
++++ b/include/Makefile.in
+@@ -991,6 +991,7 @@ SOURCES = \
+ 	wine/server_protocol.h \
+ 	wine/strmbase.h \
+ 	wine/svcctl.idl \
++	wine/inproc_sync_macos.h \
+ 	wine/test.h \
+ 	wine/unixlib.h \
+ 	wine/vulkan.h \
+diff --git a/include/wine/inproc_sync_macos.h b/include/wine/inproc_sync_macos.h
+new file mode 100644
+index 0000000..244c733
+--- /dev/null
++++ b/include/wine/inproc_sync_macos.h
+@@ -0,0 +1,44 @@
++/*
++ * macOS 용 in-process 동기화 객체의 공유 상태.
++ *
++ * 리눅스는 /dev/ntsync 커널 드라이버가 같은 일을 한다. macOS 에는 그런 게 없어서
++ * 객체마다 공유 메모리 한 장을 두고, 대기는 __ulock_wait 으로 한다.
++ * wineserver 가 만들어 fd 로 넘기고, 각 프로세스가 그 fd 를 mmap 해서 같은 장을 본다.
++ *
++ * 서버와 클라이언트가 같은 배치를 봐야 하므로 여기 한 곳에만 적는다.
++ */
++#ifndef __WINE_INPROC_SYNC_MACOS_H
++#define __WINE_INPROC_SYNC_MACOS_H
++
++struct macos_sync_state
++{
++    int          type;       /* enum inproc_sync_type */
++    int          manual;     /* 이벤트: 수동 리셋인가 */
++    unsigned int max;        /* 세마포어: 최대값 */
++    int          owner;      /* 뮤텍스: 가진 스레드, 0 이면 비어 있음 */
++    unsigned int count;      /* 이벤트: 0/1, 세마포어: 남은 수, 뮤텍스: 재진입 횟수 */
++    int          abandoned;  /* 뮤텍스: 주인이 죽은 채 남았는가 */
++    unsigned int seq;        /* 깨우기 신호. 값이 바뀌면 대기자가 다시 확인한다 */
++    unsigned int waiters;    /* 이 객체 하나만 보고 자는 수. 0 이면 깨우기 syscall 을 건너뛴다 */
++    unsigned int multi;      /* 이 객체를 다중 대기 목록에 넣고 자는 수 */
++    unsigned int pad;
++    /* 대기 타이머(로컬 처리). 서버는 타이머를 켤 때 만료 시각(1601 기준 100ns, 0 이면 없음)과
++     * 주기(ms)만 여기 적고 자기 타임아웃을 걸지 않는다. 만료 판정·소모는 대기자가 한다.
++     * 실측(2026-09-24, 로아 FEX): wineserver 시간의 절반이 타이머 만료→신호→깨우기 왕복이었다. */
++    long long    due;
++    unsigned int period_ms;
++    unsigned int pad2;
++};
++
++/* 객체 여러 개를 한꺼번에 기다릴 때 쓴다. __ulock_wait 은 주소 하나만 볼 수 있어서,
++ * 어떤 객체가 신호를 받든 이 값이 함께 올라가게 해 두고 대기자가 여기서 깨어나
++ * 다시 확인한다. wineserver 가 만들어 모든 프로세스에 fd 로 넘긴다. */
++struct macos_sync_global
++{
++    unsigned int seq;
++    unsigned int waiters;
++};
++
++#define MACOS_SYNC_MAP_SIZE 4096
++
++#endif

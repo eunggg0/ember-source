@@ -1,0 +1,54 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 3/12] dlls-kernelbase: Ember changes
+
+Base: wine-11.0.tar.xz
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/kernelbase/process.c b/dlls/kernelbase/process.c
+index 3656e40..8bcc752 100644
+--- a/dlls/kernelbase/process.c
++++ b/dlls/kernelbase/process.c
+@@ -500,6 +500,34 @@ done:
+     return ret;
+ }
+ 
++/* Ember: 스팀 CEF 브라우저 프로세스(steamwebhelper.exe, --type 없는 것)에 EMBER_CEF_ARGS 를 덧붙인다.
++ * 스팀은 -cef-in-process-gpu 를 전달하지 않는다. viz 합성기가 별도 gpu 프로세스에서 돌면 브라우저
++ * 프로세스 소유의 창에 다른 프로세스가 GDI 로 그리게 되는데, Wine 의 창 표면은 프로세스마다 따로라
++ * 화면이 검게 남는다. --in-process-gpu 로 합성기를 창 주인 프로세스 안에 두면 그려진다. */
++static WCHAR *ember_append_cef_args( const WCHAR *app_name, WCHAR *cmdline, const WCHAR *orig )
++{
++    static const WCHAR helper[] = L"steamwebhelper.exe";
++    WCHAR extra[512], *out;
++    const WCHAR *base;
++    DWORD len, extra_len, cmd_len;
++
++    if (!app_name || !cmdline) return cmdline;
++    for (base = app_name; *app_name; app_name++) if (*app_name == '\\' || *app_name == '/') base = app_name + 1;
++    if (wcsicmp( base, helper )) return cmdline;
++    if (wcsstr( cmdline, L"--type=" )) return cmdline;
++    if (!(extra_len = GetEnvironmentVariableW( L"EMBER_CEF_ARGS", extra, ARRAY_SIZE(extra) )) ||
++        extra_len >= ARRAY_SIZE(extra)) return cmdline;
++    cmd_len = lstrlenW( cmdline );
++    len = cmd_len + 1 + extra_len + 1;
++    if (!(out = RtlAllocateHeap( GetProcessHeap(), 0, len * sizeof(WCHAR) ))) return cmdline;
++    memcpy( out, cmdline, cmd_len * sizeof(WCHAR) );
++    out[cmd_len] = ' ';
++    memcpy( out + cmd_len + 1, extra, (extra_len + 1) * sizeof(WCHAR) );
++    if (cmdline != orig) RtlFreeHeap( GetProcessHeap(), 0, cmdline );
++    TRACE( "ember cef args: %s\n", debugstr_w(out) );
++    return out;
++}
++
+ /**********************************************************************
+  *           CreateProcessInternalW   (kernelbase.@)
+  */
+@@ -541,6 +569,8 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR
+         app_name = name;
+     }
+ 
++    tidy_cmdline = ember_append_cef_args( app_name, tidy_cmdline, cmd_line );
++
+     /* Warn if unsupported features are used */
+ 
+     if (flags & (IDLE_PRIORITY_CLASS | HIGH_PRIORITY_CLASS | REALTIME_PRIORITY_CLASS |
