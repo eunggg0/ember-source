@@ -1,0 +1,105 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 27/36] dlls-winspool.drv: Ember changes
+
+Base: Wine 11.18
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/winspool.drv/cups.c b/dlls/winspool.drv/cups.c
+index 89fc968..c363112 100644
+--- a/dlls/winspool.drv/cups.c
++++ b/dlls/winspool.drv/cups.c
+@@ -30,6 +30,8 @@
+ #include <sys/types.h>
+ #include <unistd.h>
+ #include <dlfcn.h>
++#include <pthread.h>
++#include <time.h>
+ #include <fcntl.h>
+ #include <errno.h>
+ #include <signal.h>
+@@ -204,6 +206,66 @@ static http_status_t cupsGetPPD3_wrapper( http_t *http, const char *name, time_t
+ }
+ #endif /* SONAME_LIBCUPS */
+ 
++#ifdef SONAME_LIBCUPS
++/* Ember (2026-10-08 fexcompat1): cupsGetDests 는 맥에서 Bonjour(네트워크 프린터) 찾기까지 하는데, 가끔 2분 넘게 안 돌아온다
++ * (실측: lpstat -e 2:29, 같은 맥에서 평소 0.07초). winspool 은 DLL_PROCESS_ATTACH(로더 잠금 안)에서 이걸 불러 프린터를 등록하므로
++ * winspool 을 싣는 프로그램 전체가 그동안 멈췄다 — 스팀 MachineIDInfoThread(wbemprox→winspool)가 로더 잠금을 쥐고 2분+,
++ * 메인 루프 "stalled > 15 seconds", 업데이트 확인 "http error 0", 창 안 뜸. 따로 도는 스레드에서 한 번만 부르고 최대 EMBER_CUPS_WAIT_MS
++ * (기본 1500)만 기다린다. 늦으면 이번엔 프린터 0개(다음 프로세스부터는 보통 바로 됨). 0 이면 예전처럼 끝까지 기다린다. */
++static pthread_mutex_t dests_mutex = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t dests_cond = PTHREAD_COND_INITIALIZER;
++static int dests_state;             /* 0 아직, 1 찾는 중, 2 끝 */
++static int dests_num;
++static cups_dest_t *dests_list;
++
++static void *dests_thread( void *arg )
++{
++    cups_dest_t *d = NULL;
++    int n = pcupsGetDests( &d );
++
++    pthread_mutex_lock( &dests_mutex );
++    dests_list = d;
++    dests_num = n;
++    dests_state = 2;
++    pthread_cond_broadcast( &dests_cond );
++    pthread_mutex_unlock( &dests_mutex );
++    return NULL;
++}
++
++static int get_dests_bounded( cups_dest_t **dests )
++{
++    const char *e = getenv( "EMBER_CUPS_WAIT_MS" );
++    long wait_ms = e ? atol( e ) : 1500;
++    struct timespec ts;
++    pthread_t th;
++    int num = 0;
++
++    if (wait_ms <= 0) return pcupsGetDests( dests );
++    pthread_mutex_lock( &dests_mutex );
++    if (dests_state == 0)
++    {
++        dests_state = 1;
++        if (pthread_create( &th, NULL, dests_thread, NULL )) dests_state = 0;
++        else pthread_detach( th );
++    }
++    if (dests_state == 0)
++    {
++        pthread_mutex_unlock( &dests_mutex );
++        return pcupsGetDests( dests );
++    }
++    clock_gettime( CLOCK_REALTIME, &ts );
++    ts.tv_sec += wait_ms / 1000;
++    ts.tv_nsec += (wait_ms % 1000) * 1000000;
++    if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
++    while (dests_state == 1)
++        if (pthread_cond_timedwait( &dests_cond, &dests_mutex, &ts )) break;
++    if (dests_state == 2) { *dests = dests_list; num = dests_num; }
++    else { *dests = NULL; WARN( "cupsGetDests did not return in %ld ms, listing no printers for now\n", wait_ms ); }
++    pthread_mutex_unlock( &dests_mutex );
++    return num;
++}
++#endif /* SONAME_LIBCUPS */
++
+ static NTSTATUS enum_printers( void *args )
+ {
+     const struct enum_printers_params *params = args;
+@@ -216,7 +278,7 @@ static NTSTATUS enum_printers( void *args )
+     *params->num = 0;
+     if (!pcupsGetDests) return STATUS_NOT_SUPPORTED;
+ 
+-    num = pcupsGetDests( &dests );
++    num = get_dests_bounded( &dests );
+ 
+     for (i = 0; i < num; i++)
+     {
+@@ -260,7 +322,8 @@ static NTSTATUS enum_printers( void *args )
+         free( comment );
+         free( location );
+     }
+-    pcupsFreeDests( num, dests );
++    /* 찾은 목록은 다음 호출(크기 재시도)에도 쓰니 여기서 풀지 않는다 — 기다리지 않는 판(EMBER_CUPS_WAIT_MS=0)만 푼다 */
++    if (dests && dests != dests_list) pcupsFreeDests( num, dests );
+ 
+     if (needed > *params->size)
+     {

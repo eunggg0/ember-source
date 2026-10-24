@@ -1,10 +1,13 @@
-# dxmt-d3d12 — base: 3Shain/dxmt 7c8dee1 (+ submodules)
-# d3d12.dll (x86_64, arm64ec)
-# changed 94 files (new 37)
+# dxmt-d3d12 — base: DXMT 7c8dee1 with submodules
+#
+# changed 118 files (new 44)
+M src/d3d10/d3d10_device.cpp
 M src/d3d11/d3d11_context_def.cpp
 M src/d3d11/d3d11_context_imm.cpp
 M src/d3d11/d3d11_context_impl.cpp
 M src/d3d11/d3d11_context_state.hpp
+M src/d3d11/d3d11_device.cpp
+M src/d3d11/d3d11_multithread.hpp
 M src/d3d11/d3d11_pipeline.cpp
 M src/d3d11/d3d11_pipeline_gs.cpp
 M src/d3d11/d3d11_pipeline_ts.cpp
@@ -14,6 +17,7 @@ M src/d3d11/d3d11_resource_view_helper.cpp
 M src/d3d11/d3d11_shader.cpp
 M src/d3d11/d3d11_shader.hpp
 M src/d3d11/d3d11_swapchain.cpp
+M src/d3d11/meson.build
 M src/d3d12/d3d12_buffer.cpp
 M src/d3d12/d3d12_command_allocator.cpp
 M src/d3d12/d3d12_command_allocator.hpp
@@ -26,14 +30,24 @@ M src/d3d12/d3d12_descriptor_heap.hpp
 M src/d3d12/d3d12_device.cpp
 M src/d3d12/d3d12_device.hpp
 A src/d3d12/d3d12_ember_opts.hpp
+A src/d3d12/d3d12_ember_sparse.hpp
+A src/d3d12/d3d12_ember_trace.cpp
+A src/d3d12/d3d12_ember_trace.hpp
+A src/d3d12/d3d12_ember_trace_ring.hpp
+M src/d3d12/d3d12_fence.cpp
 M src/d3d12/d3d12_heap.cpp
 M src/d3d12/d3d12_pipeline_compute.cpp
 M src/d3d12/d3d12_pipeline_graphics.cpp
 M src/d3d12/d3d12_root_signature.cpp
 M src/d3d12/d3d12_swapchain.cpp
 M src/d3d12/d3d12_texture.cpp
+M src/d3d12/meson.build
 M src/dxgi/dxgi.cpp
 M src/dxgi/dxgi_resource.hpp
+M src/dxgi/meson.build
+M src/dxmt/dxmt_allocation.cpp
+M src/dxmt/dxmt_allocation.hpp
+M src/dxmt/dxmt_buffer.cpp
 M src/dxmt/dxmt_buffer.hpp
 M src/dxmt/dxmt_command.metal
 M src/dxmt/dxmt_command_constants.hpp
@@ -42,11 +56,15 @@ M src/dxmt/dxmt_command_queue.hpp
 M src/dxmt/dxmt_context.cpp
 M src/dxmt/dxmt_context.hpp
 A src/dxmt/dxmt_ember_d11.hpp
+M src/dxmt/dxmt_fence.cpp
+M src/dxmt/dxmt_fence.hpp
 M src/dxmt/dxmt_format.cpp
 M src/dxmt/dxmt_format.hpp
 M src/dxmt/dxmt_presenter.cpp
 M src/dxmt/dxmt_presenter.hpp
 M src/dxmt/dxmt_tasks.hpp
+M src/dxmt/dxmt_texture.cpp
+M src/dxmt/dxmt_texture.hpp
 A src/dxmt/ember_autohdr.cpp
 A src/dxmt/ember_autohdr.hpp
 A src/dxmt/ember_fg_hook.cpp
@@ -54,11 +72,15 @@ A src/dxmt/ember_fg_hook.hpp
 A src/dxmt/ember_hud_font.h
 A src/dxmt/ember_neural.cpp
 A src/dxmt/ember_neural.hpp
+A src/dxmt/ember_spark.hpp
 M src/dxmt/meson.build
+M src/nvapi/nvapi.cpp
 M src/nvngx/nvngx.cpp
 M src/nvngx/nvngx.hpp
 M src/nvngx/nvngx_feature.hpp
 M src/nvngx/nvngx_parameter.hpp
+A src/util/ec_thunk_order.cpp
+M src/util/thread.hpp
 M src/winemetal/Metal.hpp
 A src/winemetal/ember_dxil_thunks.c
 A src/winemetal/ember_dxil_thunks.h
@@ -66,7 +88,9 @@ A src/winemetal/ember_fg_thunks.c
 A src/winemetal/ember_fg_thunks.h
 A src/winemetal/ember_neural_thunks.c
 A src/winemetal/ember_neural_thunks.h
+A src/winemetal/ember_tessellation.h
 M src/winemetal/meson.build
+M src/winemetal/unix/cache.c
 A src/winemetal/unix/ember_dxil_unix.m
 A src/winemetal/unix/ember_fg_unix.c
 A src/winemetal/unix/ember_neural_unix.m

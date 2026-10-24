@@ -1,7 +1,10 @@
-0001-src-d3d11.patch
-0002-src-d3d12.patch
-0003-src-dxgi.patch
-0004-src-dxmt.patch
-0005-src-nvngx.patch
-0006-src-winemetal.patch
-0007-tests.patch
+0001-src-d3d10.patch
+0002-src-d3d11.patch
+0003-src-d3d12.patch
+0004-src-dxgi.patch
+0005-src-dxmt.patch
+0006-src-nvapi.patch
+0007-src-nvngx.patch
+0008-src-util.patch
+0009-src-winemetal.patch
+0010-tests.patch

@@ -1,0 +1,208 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 34/36] programs-winedbg: Ember changes
+
+Base: Wine 11.18
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/programs/winedbg/be_arm64.c b/programs/winedbg/be_arm64.c
+index 20e76fd..8633114 100644
+--- a/programs/winedbg/be_arm64.c
++++ b/programs/winedbg/be_arm64.c
+@@ -53,8 +53,27 @@ static BOOL be_arm64_get_register_info(int regno, enum be_cpu_addr* kind)
+     return FALSE;
+ }
+ 
++/* Ember: 디버깅 대상이 x64 프로세스(ARM64EC + FEX)인가. 실행 파일 머신이 AMD64 면 그렇다(프로세스마다 한 번 묻는다). */
++static BOOL be_arm64_is_x64_process(void)
++{
++    static DWORD cached_pid;
++    static USHORT cached_machine;
++    SECTION_IMAGE_INFORMATION sii;
++
++    if (!dbg_curr_process) return FALSE;
++    if (cached_pid != dbg_curr_process->pid)
++    {
++        cached_pid = dbg_curr_process->pid;
++        cached_machine = 0;
++        if (!NtQueryInformationProcess( dbg_curr_process->handle, ProcessImageInformation, &sii, sizeof(sii), NULL ))
++            cached_machine = sii.Machine;
++    }
++    return cached_machine == IMAGE_FILE_MACHINE_AMD64;
++}
++
+ static void be_arm64_single_step(dbg_ctx_t *ctx, BOOL enable)
+ {
++    if (be_arm64_is_x64_process()) return;  /* Ember: x64 프로세스는 단계 실행을 안 한다(알림 줄도 뺀다) */
+     dbg_printf("be_arm64_single_step: not done\n");
+ }
+ 
+@@ -232,6 +251,29 @@ static int be_arm64_adjust_pc_for_break(dbg_ctx_t *ctx, BOOL way)
+     return 4;
+ }
+ 
++/* Ember: ARM64 winedbg 가 x64 프로세스(ARM64EC + FEX)를 볼 때 x64 코드는 x86 디스어셈블러로 푼다.
++ * ARM64 로 풀면 cs_disasm 이 0개를 돌려주고 insn[0] 을 읽다 winedbg 가 죽었다(0x2A 읽기) — 그러면 디버거가 사라져
++ * 프로그램이 STATUS_DEBUGGER_INACTIVE 로 끝나고 충돌 덤프도 남지 않았다(2026-10-02 fexcrash).
++ * 판정: 프로세스 실행 파일이 AMD64 이고, 주소가 이미지면 그 이미지 머리의 머신이 AMD64(ARM64X 는 EC 쪽에서 AMD64 로
++ * 보일 수 있어 겉모습만 틀릴 뿐 죽지는 않는다), 이미지가 아니면(JIT 등) x64 로 본다. */
++static BOOL be_arm64_is_x64_code(const ADDRESS64 *addr)
++{
++    MEMORY_BASIC_INFORMATION mbi;
++    IMAGE_DOS_HEADER dos;
++    IMAGE_FILE_HEADER fh;
++    SIZE_T len;
++
++    if (!be_arm64_is_x64_process()) return FALSE;
++    if (!VirtualQueryEx( dbg_curr_process->handle, memory_to_linear_addr(addr), &mbi, sizeof(mbi) )) return TRUE;
++    if (mbi.Type != MEM_IMAGE || !mbi.AllocationBase) return TRUE;
++    if (!dbg_curr_process->process_io->read( dbg_curr_process->handle, mbi.AllocationBase, &dos, sizeof(dos), &len ) ||
++        len != sizeof(dos) || dos.e_magic != IMAGE_DOS_SIGNATURE) return TRUE;
++    if (!dbg_curr_process->process_io->read( dbg_curr_process->handle,
++                                             (char *)mbi.AllocationBase + dos.e_lfanew + sizeof(DWORD),
++                                             &fh, sizeof(fh), &len ) || len != sizeof(fh)) return TRUE;
++    return fh.Machine == IMAGE_FILE_MACHINE_AMD64;
++}
++
+ void be_arm64_disasm_one_insn(ADDRESS64 *addr, int display)
+ {
+     static csh handle;
+@@ -239,6 +281,11 @@ void be_arm64_disasm_one_insn(ADDRESS64 *addr, int display)
+     unsigned char buffer[4];
+     SIZE_T count, len;
+ 
++    if (display && be_arm64_is_x64_code( addr ))
++    {
++        memory_disasm_one_x86_insn( addr, display );
++        return;
++    }
+     if (display)
+     {
+         if (!dbg_curr_process->process_io->read( dbg_curr_process->handle, memory_to_linear_addr(addr),
+@@ -251,6 +298,13 @@ void be_arm64_disasm_one_insn(ADDRESS64 *addr, int display)
+         }
+         cs_option( handle, CS_OPT_DETAIL, CS_OPT_ON );
+         count = cs_disasm( handle, buffer, len, addr->Offset, 0, &insn );
++        if (!count)
++        {
++            /* Ember: 풀 수 없는 바이트 — insn 은 비어 있다(읽으면 winedbg 가 죽는다) */
++            dbg_printf( "(bad)" );
++            addr->Offset += 4;
++            return;
++        }
+         dbg_printf( "%s %s", insn[0].mnemonic, insn[0].op_str );
+         if (insn[0].id == ARM64_INS_B || insn[0].id == ARM64_INS_BL)
+         {
+@@ -270,6 +324,10 @@ static BOOL be_arm64_get_context(HANDLE thread, dbg_ctx_t *ctx)
+ 
+ static BOOL be_arm64_set_context(HANDLE thread, const dbg_ctx_t *ctx)
+ {
++    /* Ember: x64 프로세스(ARM64EC + FEX)의 스레드에 ARM64 모양 문맥을 되써 넣으면 x64 상태 일부가 바뀌어
++     * 떼어 낸 뒤 이어 달리던 프로그램이 엉뚱한 곳에서 다시 죽었다(int3 뒤 계속 → 접근 위반, 2026-10-02 fexcrash).
++     * 이 디버거는 x64 문맥을 고칠 일이 없으니(덤프·역추적만) 그대로 둔다. */
++    if (be_arm64_is_x64_process()) return TRUE;
+     return SetThreadContext(thread, &ctx->ctx);
+ }
+ 
+diff --git a/programs/winedbg/memory.c b/programs/winedbg/memory.c
+index 3da70e1..d43532e 100644
+--- a/programs/winedbg/memory.c
++++ b/programs/winedbg/memory.c
+@@ -791,6 +791,13 @@ void memory_disasm_one_x86_insn(ADDRESS64 *addr, int display)
+     cs_option( handle, CS_OPT_SYNTAX, CS_OPT_SYNTAX_ATT );
+     cs_option( handle, CS_OPT_DETAIL, CS_OPT_ON );
+     count = cs_disasm( handle, buffer, len, addr->Offset, 0, &insn );
++    if (!count)
++    {
++        /* Ember: 풀 수 없는 바이트면 insn 이 비어 있다 — 읽으면 winedbg 가 죽는다 */
++        if (display) dbg_printf( "(bad)" );
++        addr->Offset += 1;
++        return;
++    }
+ 
+     if (display)
+     {
+diff --git a/programs/winedbg/tgt_active.c b/programs/winedbg/tgt_active.c
+index f3041e3..947dc8d 100644
+--- a/programs/winedbg/tgt_active.c
++++ b/programs/winedbg/tgt_active.c
+@@ -64,8 +64,38 @@ static unsigned dbg_handle_debug_event(DEBUG_EVENT* de);
+  *
+  * Sets the debuggee to <pid>
+  */
++/* Ember: 처리 안 된 예외로 불려 온(JIT, <pid> <evt>) ARM64 winedbg 가 x64 프로세스(ARM64EC + FEX)에 붙을 때는
++ * 원격 중단 스레드(DbgUiIssueRemoteBreakin)를 만들지 않는다. 그 스레드는 이 winedbg 쪽 ntdll 의 ARM64 원형
++ * DbgUiRemoteBreakin 주소에서 시작하는데, EC 프로세스에선 그 코드가 EC 코드가 아니라 FEX 가 x64 로 흉내 내
++ * 엉뚱한 곳을 쓰다 죽었다(ntdll+0x69540 쓰기 위반). 그 가짜 예외가 덤프에 대신 담기거나, 떼어 낸 뒤 프로세스를
++ * 다른 코드로 끝나게 했다(2026-10-02 fexcrash). 대신 붙자마자 이벤트를 켜 주면 멈춰 있던 스레드가 예외를
++ * 다시 던져(두 번째 기회) 디버거로 바로 온다. */
++static BOOL attach_jit_no_breakin;
++
++static BOOL dbg_attach_no_breakin(HANDLE process)
++{
++#ifdef __aarch64__
++    SECTION_IMAGE_INFORMATION sii;
++    NTSTATUS status;
++
++    if (!attach_jit_no_breakin) return FALSE;
++    if (NtQueryInformationProcess( process, ProcessImageInformation, &sii, sizeof(sii), NULL ) ||
++        sii.Machine != IMAGE_FILE_MACHINE_AMD64) return FALSE;
++    if ((status = DbgUiConnectToDbg()) || (status = NtDebugActiveProcess( process, DbgUiGetThreadDebugObject() )))
++    {
++        SetLastError( RtlNtStatusToDosError( status ) );
++        return -1;
++    }
++    return TRUE;
++#else
++    return FALSE;
++#endif
++}
++
+ BOOL dbg_attach_debuggee(DWORD pid, BOOL verbose)
+ {
++    int no_breakin;
++
+     if (pid == GetCurrentProcessId())
+     {
+         dbg_printf("WineDbg can't debug its own process. Please use another process ID.\n");
+@@ -78,7 +108,8 @@ BOOL dbg_attach_debuggee(DWORD pid, BOOL verbose)
+     }
+     if (!(dbg_curr_process = dbg_add_process(&be_process_active_io, pid, 0))) return FALSE;
+ 
+-    if (!DebugActiveProcess(pid))
++    no_breakin = dbg_attach_no_breakin(dbg_curr_process->handle);
++    if (no_breakin < 0 || (!no_breakin && !DebugActiveProcess(pid)))
+     {
+         dbg_printf("Can't attach process %04lx: error %lu\n", pid, GetLastError());
+         dbg_del_process(dbg_curr_process);
+@@ -86,6 +117,7 @@ BOOL dbg_attach_debuggee(DWORD pid, BOOL verbose)
+     }
+ 
+     SetEnvironmentVariableA("DBGHELP_NOLIVE", NULL);
++    attach_jit_no_breakin = no_breakin > 0;
+ 
+     dbg_curr_process->active_debuggee = TRUE;
+     if (verbose)
+@@ -868,13 +900,22 @@ enum dbg_start  dbg_active_attach(int argc, char* argv[])
+     else if (argc == 2 && str2int(argv[0], &pid) && pid != 0 &&
+              str2int(argv[1], &evt) && evt != 0)
+     {
++        attach_jit_no_breakin = TRUE;
+         if (!dbg_attach_debuggee(pid, TRUE))
+         {
++            attach_jit_no_breakin = FALSE;
+             /* don't care about result */
+             SetEvent((HANDLE)evt);
+             return start_error_init;
+         }
+-        dbg_curr_process->event_on_first_exception = (HANDLE)evt;
++        if (attach_jit_no_breakin)
++        {
++            /* Ember: 중단 스레드가 없으니 첫 예외를 기다리지 않고 바로 깨운다(dbg_attach_no_breakin) */
++            attach_jit_no_breakin = FALSE;
++            SetEvent((HANDLE)evt);
++            CloseHandle((HANDLE)evt);
++        }
++        else dbg_curr_process->event_on_first_exception = (HANDLE)evt;
+     }
+     else return start_error_parse;
+ 

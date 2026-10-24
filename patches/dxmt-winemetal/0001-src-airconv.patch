@@ -1,0 +1,62 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 1/10] src-airconv: Ember changes
+
+Base: DXMT 7c8dee1 with submodules
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/src/airconv/dxbc_converter.cpp b/src/airconv/dxbc_converter.cpp
+index 369a775..b0704ac 100644
+--- a/src/airconv/dxbc_converter.cpp
++++ b/src/airconv/dxbc_converter.cpp
+@@ -1295,14 +1295,11 @@ AIRCONV_API int SM50Initialize(
+       pRefl->PostTessellator = {.MaxPotentialTessFactor = max_potential_tess_factor};
+     }
+     if (sm50_shader->shader_type == microsoft::D3D10_SB_GEOMETRY_SHADER) {
+-      if (binding_cbuffer_mask || binding_sampler_mask || binding_uav_mask ||
+-          binding_srv_hi_mask || binding_srv_lo_mask ||
+-          !CheckGSBBIsPassThrough(sm50_shader->entry())) {
++      if (binding_cbuffer_mask || binding_sampler_mask || binding_uav_mask || binding_srv_hi_mask ||
++          binding_srv_lo_mask ||
++          !(CheckGSBBIsPassThrough(sm50_shader->entry()) &&
++            CheckGSSignatureIsPassThrough(inputParser, outputParser, pRefl->GeometryShader.Data))) {
+         pRefl->GeometryShader.GSPassThrough = ~0u;
+-      } else {
+-        CheckGSSignatureIsPassThrough(
+-          inputParser, outputParser, pRefl->GeometryShader.Data
+-        );
+       }
+       pRefl->GeometryShader.Primitive = sm50_shader->gs_input_primitive;
+     }
+diff --git a/src/airconv/dxbc_instructions.cpp b/src/airconv/dxbc_instructions.cpp
+index 0bb439b..e2b7f86 100644
+--- a/src/airconv/dxbc_instructions.cpp
++++ b/src/airconv/dxbc_instructions.cpp
+@@ -2098,6 +2098,7 @@ Instruction readInstruction(
+   default: {
+     llvm::outs() << "unhandled dxbc instruction " << Inst.OpCode() << "\n";
+     assert(0 && "unhandled dxbc instruction");
++    return InstNop {};
+   }
+   }
+ };
+diff --git a/src/airconv/nt/air_builder.cpp b/src/airconv/nt/air_builder.cpp
+index d318c70..44e7e9f 100644
+--- a/src/airconv/nt/air_builder.cpp
++++ b/src/airconv/nt/air_builder.cpp
+@@ -1483,7 +1483,7 @@ AIRBuilder::CreateInterpolateAtOffset(Value *Interpoant, Value *Offset, bool Per
+ 
+   auto Fn = getModule()->getOrInsertFunction(
+       Perspective ? "air.interpolate_offset_perspective.v4f32" : "air.interpolate_offset_no_perspective.v4f32",
+-      FunctionType::get(getFloatTy(4), {Interpoant->getType(), getIntTy(2)}, false), Attrs
++      FunctionType::get(getFloatTy(4), {Interpoant->getType(), getFloatTy(2)}, false), Attrs
+   );
+ 
+   return builder.CreateCall(Fn, {Interpoant, Offset});
+@@ -1780,6 +1780,7 @@ AIRBuilder::CreateIntBinOp(IntBinOp Op, Value *LHS, Value *RHS, bool Signed) {
+   static char const *FnNames[] = {
+       "max",
+       "min",
++      "mul_hi",
+   };
+ 
+   if (uint32_t(Op) >= std::size(FnNames)) {

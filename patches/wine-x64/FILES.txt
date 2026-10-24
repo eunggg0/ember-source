@@ -1,5 +1,5 @@
-# wine-x64 — base: wine-11.0.tar.xz
-# 
+# wine-x64 — base: Wine 11.0
+#
 # changed 34 files (new 1)
 M dlls/bcrypt/gnutls.c
 M dlls/dwrite/opentype.c

@@ -1,0 +1,7 @@
+# Current r3 dcb-build.sh recipe; run separately for each triple after applying patches/fex.
+# Requires llvm-mingw-20250920-ucrt-macos-universal on PATH.
+# FEX_SOURCE and BUILD are caller-selected source/output directories.
+# arm64ec-w64-mingw32 -> Bin/libarm64ecfex.dll
+# aarch64-w64-mingw32 -> Bin/libwow64fex.dll
+cmake -S "$FEX_SOURCE" -B "$BUILD" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$FEX_SOURCE/Data/CMake/toolchain_mingw.cmake" -DMINGW_TRIPLE="$TRIPLE" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DTUNE_CPU=none -DTUNE_ARCH=generic -DENABLE_LTO=False -DENABLE_ASSERTIONS=False -DBUILD_FEXCONFIG=ON -DBUILD_THUNKS=OFF -DENABLE_CCACHE=OFF -DENABLE_JEMALLOC_GLIBC_ALLOC=ON -DOVERRIDE_HASH=48d71752e2a363d5535181f803b0b0e9666c1825
+ninja -C "$BUILD" -j1 "$TARGET"

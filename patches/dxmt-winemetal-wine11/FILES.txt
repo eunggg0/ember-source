@@ -1,0 +1,30 @@
+# dxmt-winemetal-wine11 — base: DXMT 7c8dee1 with submodules; Wine 11.0 native candidate
+#
+# changed 27 files (new 22)
+M src/winemetal/Metal.hpp
+A src/winemetal/ember_dxil_thunks.h
+A src/winemetal/ember_fg_thunks.h
+A src/winemetal/ember_neural_thunks.h
+A src/winemetal/unix/ember_dxil_unix.m
+A src/winemetal/unix/ember_neural_unix.m
+A src/winemetal/unix/ir/metal_irconverter/LICENSE.txt
+A src/winemetal/unix/ir/metal_irconverter/ir_comparison_function.h
+A src/winemetal/unix/ir/metal_irconverter/ir_descriptor_range_flags.h
+A src/winemetal/unix/ir/metal_irconverter/ir_filter.h
+A src/winemetal/unix/ir/metal_irconverter/ir_format.h
+A src/winemetal/unix/ir/metal_irconverter/ir_input_classification.h
+A src/winemetal/unix/ir/metal_irconverter/ir_input_primitive.h
+A src/winemetal/unix/ir/metal_irconverter/ir_input_topology.h
+A src/winemetal/unix/ir/metal_irconverter/ir_root_descriptor_flags.h
+A src/winemetal/unix/ir/metal_irconverter/ir_root_signature_flags.h
+A src/winemetal/unix/ir/metal_irconverter/ir_shader_visibility.h
+A src/winemetal/unix/ir/metal_irconverter/ir_tessellator_domain.h
+A src/winemetal/unix/ir/metal_irconverter/ir_tessellator_output_primitive.h
+A src/winemetal/unix/ir/metal_irconverter/ir_tessellator_partitioning.h
+A src/winemetal/unix/ir/metal_irconverter/ir_texture_address_mode.h
+A src/winemetal/unix/ir/metal_irconverter/ir_version.h
+A src/winemetal/unix/ir/metal_irconverter/metal_irconverter.h
+M src/winemetal/unix/meson.build
+M src/winemetal/unix/winemetal_unix.c
+M src/winemetal/winemetal.h
+M src/winemetal/winemetal_thunks.h

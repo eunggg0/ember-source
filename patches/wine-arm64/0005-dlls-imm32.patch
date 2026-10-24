@@ -1,0 +1,80 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 5/36] dlls-imm32: Ember changes
+
+Base: Wine 11.18
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/imm32/ime.c b/dlls/imm32/ime.c
+index 37c4d07..c797908 100644
+--- a/dlls/imm32/ime.c
++++ b/dlls/imm32/ime.c
+@@ -560,7 +560,10 @@ BOOL WINAPI ImeProcessKey( HIMC himc, UINT vkey, LPARAM lparam, BYTE *state )
+     if (!is_ime_hkl( GetKeyboardLayout( 0 ) )) return FALSE;
+ 
+     if (!(ctx = ImmLockIMC( himc ))) return FALSE;
+-    ret = TRUE; /* TODO: should be ctx->fOpen */
++    ret = ctx->fOpen;
++    /* MS Korean IME leaves key-up unconsumed; macdrv does not compose on key-up. */
++    if (HIWORD(GetKeyboardLayout(0)) == MAKELANGID(LANG_KOREAN, SUBLANG_DEFAULT) && (HIWORD(lparam) & KF_UP))
++        ret = FALSE;
+     switch (LOWORD(vkey))
+     {
+         case VK_SHIFT:
+@@ -637,6 +640,11 @@ UINT WINAPI ImeToAsciiEx( UINT vkey, UINT vsc, BYTE *state, TRANSMSGLIST *msgs,
+             if (compstr->dwCompAttrOffset) msg.lParam |= GCS_COMPATTR;
+             if (compstr->dwCompClauseOffset) msg.lParam |= GCS_COMPCLAUSE;
+             else msg.lParam |= CS_INSERTCHAR|CS_NOMOVECARET;
++            /* MS Korean IME single-character preedit flags: see test_ga_na_da().
++             * Preserve the backing composition data and all other message paths. */
++            if (HIWORD(GetKeyboardLayout(0)) == MAKELANGID(LANG_KOREAN, SUBLANG_DEFAULT) &&
++                compstr->dwCompStrLen == 1)
++                msg.lParam = GCS_COMPSTR | GCS_COMPATTR | CS_INSERTCHAR | CS_NOMOVECARET;
+             msgs->TransMsg[count++] = msg;
+         }
+ 
+diff --git a/dlls/imm32/imm.c b/dlls/imm32/imm.c
+index b7aeb47..71eec44 100644
+--- a/dlls/imm32/imm.c
++++ b/dlls/imm32/imm.c
+@@ -1028,6 +1028,31 @@ static BOOL CALLBACK enum_associate_context( HWND hwnd, LPARAM lparam )
+ /***********************************************************************
+  *              ImmAssociateContextEx (IMM32.@)
+  */
++
++/* Lost Ark compatibility: its IACE_CHILDREN calls also select the game window's
++ * IMC when entering/leaving chat. Do not change the global API contract here. */
++static BOOL use_lostark_parent_ime_association(void)
++{
++    static LONG cached;
++    LONG value = InterlockedCompareExchange(&cached, 0, 0);
++    WCHAR path[1024], *base;
++    DWORD error, size;
++    BOOL enabled = FALSE;
++
++    if (value) return value == 2;
++    error = GetLastError();
++    size = GetModuleFileNameW(NULL, path, ARRAY_SIZE(path));
++    if (size && size < ARRAY_SIZE(path))
++    {
++        base = wcsrchr(path, '\\');
++        base = base ? base + 1 : path;
++        enabled = !wcsicmp(base, L"LostArk.exe");
++    }
++    InterlockedCompareExchange(&cached, enabled ? 2 : 1, 0);
++    SetLastError(error);
++    return enabled;
++}
++
+ BOOL WINAPI ImmAssociateContextEx( HWND hwnd, HIMC new_himc, DWORD flags )
+ {
+     HIMC old_himc;
+@@ -1040,7 +1065,8 @@ BOOL WINAPI ImmAssociateContextEx( HWND hwnd, HIMC new_himc, DWORD flags )
+     if (flags == IACE_CHILDREN)
+     {
+         EnumChildWindows( hwnd, enum_associate_context, (LPARAM)new_himc );
+-        return TRUE;
++        if (!use_lostark_parent_ime_association()) return TRUE;
++        flags = 0;
+     }
+ 
+     old_himc = NtUserGetWindowInputContext( hwnd );

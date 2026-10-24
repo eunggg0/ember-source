@@ -1,0 +1,355 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 10/10] tests: Ember changes
+
+Base: DXMT 7c8dee1 with submodules
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/tests/meson.build b/tests/meson.build
+index 1e19e25..966f1bf 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -1 +1,2 @@
+-subdir('dx11')
+\ No newline at end of file
++subdir('dx11')
++subdir('nvngx')
+diff --git a/tests/nvngx/meson.build b/tests/nvngx/meson.build
+new file mode 100644
+index 0000000..34a9b22
+--- /dev/null
++++ b/tests/nvngx/meson.build
+@@ -0,0 +1,5 @@
++# Headless DLSS(NGX) -> MetalFX shim test. Run inside the prefix with DXMT_ENABLE_NVEXT=1:
++#   nvngx_test.exe <path\to\nvngx.dll> <result.txt> [frames]
++executable('nvngx_test', ['nvngx_test.cpp'],
++  dependencies: [ lib_d3d11 ]
++)
+diff --git a/tests/nvngx/nvngx_test.cpp b/tests/nvngx/nvngx_test.cpp
+new file mode 100644
+index 0000000..6e8e5ce
+--- /dev/null
++++ b/tests/nvngx/nvngx_test.cpp
+@@ -0,0 +1,323 @@
++// Headless test for DXMT's nvngx.dll (DLSS SR -> MetalFX temporal scaler).
++// Acts like a game that statically links the NGX SDK: loads nvngx.dll, calls the driver-side
++// entry points and talks to NVSDK_NGX_Parameter through raw vtable slots in MSVC order
++// (MSVC slots from the NGX SDK helpers in NVUnityPlugin.dll: SetVoidPointer=0 SetD3d12=1 SetD3d11=2 SetI=3 SetUI=4
++//  SetD=5 SetF=6 SetULL=7 GetVoidPointer=8 GetD3d12=9 GetD3d11=10 GetI=11 GetUI=12 GetD=13 GetF=14 GetULL=15 Reset=16).
++//
++// usage: nvngx_test.exe <path-to-nvngx.dll> <result-file> [frames]
++// Renders a synthetic 1080p scene with Halton jitter on the CPU (sample = pixel center + jitter),
++// upscales to 4K and compares with the analytic ground truth at 4K.
++#include <windows.h>
++#include <d3d11.h>
++#include <cmath>
++#include <cstdio>
++#include <cstdint>
++#include <cstring>
++#include <vector>
++
++static FILE *g_out = nullptr;
++#define LOG(...) do { fprintf(g_out, __VA_ARGS__); fflush(g_out); printf(__VA_ARGS__); fflush(stdout); } while (0)
++
++typedef unsigned int NGXRes;
++static bool ngx_ok(NGXRes r) { return (r & 0xFFF00000u) != 0xBAD00000u; }
++
++// ---- NVSDK_NGX_Parameter through raw vtable (MSVC layout) ----
++struct Param { void **vtbl; };
++static void P_SetD3D11(Param *p, const char *n, ID3D11Resource *v) { ((void (*)(Param *, const char *, ID3D11Resource *))p->vtbl[2])(p, n, v); }
++static void P_SetI(Param *p, const char *n, int v) { ((void (*)(Param *, const char *, int))p->vtbl[3])(p, n, v); }
++static void P_SetUI(Param *p, const char *n, unsigned v) { ((void (*)(Param *, const char *, unsigned))p->vtbl[4])(p, n, v); }
++static void P_SetF(Param *p, const char *n, float v) { ((void (*)(Param *, const char *, float))p->vtbl[6])(p, n, v); }
++static NGXRes P_GetVoid(Param *p, const char *n, void **v) { return ((NGXRes (*)(Param *, const char *, void **))p->vtbl[8])(p, n, v); }
++static NGXRes P_GetD3D11(Param *p, const char *n, ID3D11Resource **v) { return ((NGXRes (*)(Param *, const char *, ID3D11Resource **))p->vtbl[10])(p, n, v); }
++static NGXRes P_GetI(Param *p, const char *n, int *v) { return ((NGXRes (*)(Param *, const char *, int *))p->vtbl[11])(p, n, v); }
++static NGXRes P_GetUI(Param *p, const char *n, unsigned *v) { return ((NGXRes (*)(Param *, const char *, unsigned *))p->vtbl[12])(p, n, v); }
++static NGXRes P_GetD(Param *p, const char *n, double *v) { return ((NGXRes (*)(Param *, const char *, double *))p->vtbl[13])(p, n, v); }
++static NGXRes P_GetULL(Param *p, const char *n, unsigned long long *v) { return ((NGXRes (*)(Param *, const char *, unsigned long long *))p->vtbl[15])(p, n, v); }
++static void P_SetD(Param *p, const char *n, double v) { ((void (*)(Param *, const char *, double))p->vtbl[5])(p, n, v); }
++static void P_SetULL(Param *p, const char *n, unsigned long long v) { ((void (*)(Param *, const char *, unsigned long long))p->vtbl[7])(p, n, v); }
++static NGXRes P_GetF(Param *p, const char *n, float *v) { return ((NGXRes (*)(Param *, const char *, float *))p->vtbl[14])(p, n, v); }
++static void P_Reset(Param *p) { ((void (*)(Param *))p->vtbl[16])(p); }
++
++typedef NGXRes (*PFN_Init)(unsigned long long, const wchar_t *, ID3D11Device *, unsigned, const void *);
++typedef NGXRes (*PFN_GetCap)(Param **);
++typedef NGXRes (*PFN_Alloc)(Param **);
++typedef NGXRes (*PFN_Destroy)(Param *);
++typedef NGXRes (*PFN_Create)(ID3D11DeviceContext *, unsigned, Param *, unsigned **);
++typedef NGXRes (*PFN_Eval)(ID3D11DeviceContext *, const unsigned *, Param *, void *);
++typedef NGXRes (*PFN_Release)(unsigned *);
++typedef NGXRes (*PFN_Shutdown1)(ID3D11Device *);
++typedef NGXRes (*PFN_OptimalCb)(Param *);
++
++// ---- half floats ----
++static uint16_t f2h(float f) {
++  uint32_t x; memcpy(&x, &f, 4);
++  uint32_t sign = (x >> 16) & 0x8000; int32_t e = ((x >> 23) & 0xff) - 127 + 15; uint32_t m = x & 0x7fffff;
++  if (e <= 0) return (uint16_t)sign;
++  if (e >= 31) return (uint16_t)(sign | 0x7c00);
++  uint32_t h = sign | (e << 10) | (m >> 13);
++  if (m & 0x1000) h++; // round
++  return (uint16_t)h;
++}
++static float h2f(uint16_t h) {
++  uint32_t sign = (h & 0x8000) << 16, e = (h >> 10) & 0x1f, m = h & 0x3ff, x;
++  if (e == 0) { float f = std::ldexp((float)m, -24); return sign ? -f : f; }
++  if (e == 31) x = sign | 0x7f800000 | (m << 13); else x = sign | ((e - 15 + 127) << 23) | (m << 13);
++  float f; memcpy(&f, &x, 4); return f;
++}
++
++// Ground truth scene in normalized coords [0,1]^2: soft sine detail + hard-edged squares + a thin diagonal line.
++static float scene(float u, float v, int ch) {
++  const float PI = 3.14159265f;
++  float s = 0.5f + 0.25f * std::sin(2 * PI * u * 3840 / 7.0f) * std::cos(2 * PI * v * 2160 / 9.0f);
++  int cx = (int)std::floor(u * 3840 / 48), cy = (int)std::floor(v * 2160 / 48);
++  float sq = ((cx + cy) & 1) ? 0.25f : 0.0f;
++  float d = std::fabs((u * 3840) - (v * 2160) * 1.5f);
++  float line = d < 1.5f ? 0.5f : 0.0f;
++  float base = s * 0.6f + sq + line;
++  return ch == 0 ? base : ch == 1 ? base * 0.8f + 0.1f : 1.0f - base * 0.5f;
++}
++
++static float halton(int i, int b) { float f = 1, r = 0; while (i > 0) { f /= b; r += f * (i % b); i /= b; } return r; }
++
++struct Ctx {
++  ID3D11Device *dev; ID3D11DeviceContext *ctx;
++  PFN_Alloc alloc; PFN_Destroy destroy; PFN_Create create; PFN_Eval eval; PFN_Release release;
++};
++
++struct Run { double mae; double nonzero; int nans; double ms_per_eval; bool ok; };
++
++// jitter_pass_sign: sign applied to the jitter we report to NGX (+1 = DLSS convention: sample = pixel center - jitter)
++static Run run_upscale(Ctx &c, UINT inW, UINT inH, UINT outW, UINT outH, int frames, float jitter_pass_sign, bool set_subrect,
++                       bool jitter_enabled, DXGI_FORMAT depth_fmt_typeless, DXGI_FORMAT depth_fmt_dsv, int perf_quality,
++                       float pan_px = 0.0f, float mv_sign = 1.0f) {
++  Run res{}; HRESULT hr;
++  D3D11_TEXTURE2D_DESC td = {};
++  td.MipLevels = 1; td.ArraySize = 1; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
++  td.Width = inW; td.Height = inH; td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
++  ID3D11Texture2D *color = nullptr; hr = c.dev->CreateTexture2D(&td, nullptr, &color); if (FAILED(hr)) { LOG("color tex fail %lx\n", hr); return res; }
++  td.Format = DXGI_FORMAT_R16G16_FLOAT;
++  ID3D11Texture2D *mv = nullptr; hr = c.dev->CreateTexture2D(&td, nullptr, &mv); if (FAILED(hr)) { LOG("mv tex fail\n"); return res; }
++  td.Format = depth_fmt_typeless; td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DEPTH_STENCIL;
++  ID3D11Texture2D *depth = nullptr; hr = c.dev->CreateTexture2D(&td, nullptr, &depth); if (FAILED(hr)) { LOG("depth tex fail %lx\n", hr); return res; }
++  td.Width = outW; td.Height = outH; td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
++  ID3D11Texture2D *out = nullptr; hr = c.dev->CreateTexture2D(&td, nullptr, &out); if (FAILED(hr)) { LOG("out tex fail\n"); return res; }
++  td.BindFlags = 0; td.Usage = D3D11_USAGE_STAGING; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
++  ID3D11Texture2D *stage = nullptr; c.dev->CreateTexture2D(&td, nullptr, &stage);
++  td.Width = 1; td.Height = 1;
++  ID3D11Texture2D *stage1 = nullptr; c.dev->CreateTexture2D(&td, nullptr, &stage1);
++
++  ID3D11RenderTargetView *mvRtv = nullptr; c.dev->CreateRenderTargetView(mv, nullptr, &mvRtv);
++  D3D11_DEPTH_STENCIL_VIEW_DESC dd = {}; dd.Format = depth_fmt_dsv; dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
++  ID3D11DepthStencilView *dsv = nullptr; hr = c.dev->CreateDepthStencilView(depth, &dd, &dsv); if (FAILED(hr)) { LOG("dsv fail %lx\n", hr); return res; }
++  // DLSS convention: MV = previous position - current position, in render pixels (MV.Scale = 1).
++  // The scene pans right by pan_px per frame, so a pixel came from x - pan_px: MV.x = -pan_px.
++  float mvv[4] = {-pan_px * mv_sign, 0, 0, 0};
++  c.ctx->ClearRenderTargetView(mvRtv, mvv);
++  c.ctx->ClearDepthStencilView(dsv, D3D11_CLEAR_DEPTH, 0.5f, 0);
++
++  Param *p = nullptr; c.alloc(&p);
++  P_SetUI(p, "Width", inW); P_SetUI(p, "Height", inH); P_SetUI(p, "OutWidth", outW); P_SetUI(p, "OutHeight", outH);
++  P_SetI(p, "PerfQualityValue", perf_quality);
++  P_SetI(p, "DLSS.Feature.Create.Flags", (1 << 0) /*IsHDR*/ | (1 << 1) /*MVLowRes*/);
++  unsigned *handle = nullptr;
++  NGXRes r = c.create(c.ctx, 1 /*SuperSampling*/, p, &handle);
++  if (!ngx_ok(r) || !handle) { LOG("CreateFeature failed 0x%x\n", r); return res; }
++
++  std::vector<uint16_t> pix((size_t)inW * inH * 4);
++  double sync_ms = 0;
++  {
++    LARGE_INTEGER a, b, q; QueryPerformanceFrequency(&q);
++    D3D11_MAPPED_SUBRESOURCE m; D3D11_BOX bx = {0, 0, 0, 1, 1, 1};
++    for (int i = 0; i < 6; i++) {
++      QueryPerformanceCounter(&a);
++      c.ctx->CopySubresourceRegion(stage1, 0, 0, 0, 0, out, 0, &bx);
++      c.ctx->Map(stage1, 0, D3D11_MAP_READ, 0, &m); c.ctx->Unmap(stage1, 0);
++      QueryPerformanceCounter(&b);
++      if (i >= 2) sync_ms += (b.QuadPart - a.QuadPart) * 1000.0 / q.QuadPart / 4;
++    }
++  }
++  LARGE_INTEGER f0, f1, fq; QueryPerformanceFrequency(&fq);
++  double eval_ms = 0; int timed = 0;
++  for (int fr = 0; fr < frames; fr++) {
++    float jx = jitter_enabled ? halton(fr + 1, 2) - 0.5f : 0.0f;
++    float jy = jitter_enabled ? halton(fr + 1, 3) - 0.5f : 0.0f;
++    for (UINT y = 0; y < inH; y++)
++      for (UINT x = 0; x < inW; x++) {
++        // DLSS/FSR2 convention: projection is offset by (+2J.x/W, -2J.y/H), so pixel centers see the scene at center - J.
++        float u = (x + 0.5f - jx - pan_px * fr) / inW, v = (y + 0.5f - jy) / inH;
++        uint16_t *px = &pix[((size_t)y * inW + x) * 4];
++        px[0] = f2h(scene(u, v, 0)); px[1] = f2h(scene(u, v, 1)); px[2] = f2h(scene(u, v, 2)); px[3] = f2h(1.0f);
++      }
++    c.ctx->UpdateSubresource(color, 0, nullptr, pix.data(), inW * 8, 0);
++    P_Reset(p);
++    P_SetD3D11(p, "Color", color); P_SetD3D11(p, "Output", out); P_SetD3D11(p, "Depth", depth); P_SetD3D11(p, "MotionVectors", mv);
++    P_SetF(p, "Jitter.Offset.X", jx * jitter_pass_sign); P_SetF(p, "Jitter.Offset.Y", jy * jitter_pass_sign);
++    P_SetF(p, "MV.Scale.X", 1.0f); P_SetF(p, "MV.Scale.Y", 1.0f);
++    P_SetI(p, "Reset", fr == 0 ? 1 : 0);
++    if (set_subrect) { P_SetUI(p, "DLSS.Render.Subrect.Dimensions.Width", inW); P_SetUI(p, "DLSS.Render.Subrect.Dimensions.Height", inH); }
++    P_SetF(p, "DLSS.Pre.Exposure", 0.0f); // like apps that memset their eval params
++    // time only the evaluate (upload is already queued before t0; sync before and after)
++    D3D11_MAPPED_SUBRESOURCE m;
++    c.ctx->CopySubresourceRegion(stage1, 0, 0, 0, 0, color, 0, nullptr);
++    c.ctx->Map(stage1, 0, D3D11_MAP_READ, 0, &m); c.ctx->Unmap(stage1, 0);
++    QueryPerformanceCounter(&f0);
++    r = c.eval(c.ctx, handle, p, nullptr);
++    if (!ngx_ok(r)) { LOG("EvaluateFeature failed 0x%x at frame %d\n", r, fr); return res; }
++    D3D11_BOX b = {0, 0, 0, 1, 1, 1};
++    c.ctx->CopySubresourceRegion(stage1, 0, 0, 0, 0, out, 0, &b);
++    c.ctx->Map(stage1, 0, D3D11_MAP_READ, 0, &m); c.ctx->Unmap(stage1, 0);
++    QueryPerformanceCounter(&f1);
++    if (fr >= 4) { eval_ms += (f1.QuadPart - f0.QuadPart) * 1000.0 / fq.QuadPart; timed++; }
++  }
++  (void)eval_ms; (void)timed; (void)sync_ms;
++
++  c.ctx->CopyResource(stage, out);
++  D3D11_MAPPED_SUBRESOURCE m;
++  hr = c.ctx->Map(stage, 0, D3D11_MAP_READ, 0, &m);
++  if (FAILED(hr)) { LOG("map fail\n"); return res; }
++  double err = 0; size_t nz = 0, n = 0;
++  for (UINT y = 0; y < outH; y++) {
++    const uint16_t *row = (const uint16_t *)((const char *)m.pData + (size_t)y * m.RowPitch);
++    for (UINT x = 0; x < outW; x++) {
++      float u = (x + 0.5f) / outW - pan_px * (frames - 1) / inW, v = (y + 0.5f) / outH;
++      for (int ch = 0; ch < 3; ch++) {
++        float o = h2f(row[x * 4 + ch]);
++        if (std::isnan(o) || std::isinf(o)) { res.nans++; continue; }
++        if (o != 0.0f) nz++;
++        err += std::fabs(o - scene(u, v, ch)); n++;
++      }
++    }
++  }
++  c.ctx->Unmap(stage, 0);
++  // GPU throughput: 30 evaluations back to back on the last inputs, one sync at the end.
++  {
++    D3D11_MAPPED_SUBRESOURCE m; D3D11_BOX bx = {0, 0, 0, 1, 1, 1};
++    P_SetI(p, "Reset", 0);
++    c.ctx->CopySubresourceRegion(stage1, 0, 0, 0, 0, out, 0, &bx);
++    c.ctx->Map(stage1, 0, D3D11_MAP_READ, 0, &m); c.ctx->Unmap(stage1, 0);
++    QueryPerformanceCounter(&f0);
++    for (int i = 0; i < 30; i++) { c.eval(c.ctx, handle, p, nullptr); if ((i & 3) == 3) c.ctx->Flush(); }
++    c.ctx->CopySubresourceRegion(stage1, 0, 0, 0, 0, out, 0, &bx);
++    c.ctx->Map(stage1, 0, D3D11_MAP_READ, 0, &m); c.ctx->Unmap(stage1, 0);
++    QueryPerformanceCounter(&f1);
++    res.ms_per_eval = (f1.QuadPart - f0.QuadPart) * 1000.0 / fq.QuadPart / 30;
++  }
++  res.mae = n ? err / n : 1e9; res.nonzero = (double)nz / ((double)outW * outH * 3); res.ok = true;
++  c.release(handle); c.destroy(p);
++  mvRtv->Release(); dsv->Release(); color->Release(); mv->Release(); depth->Release(); out->Release(); stage->Release(); stage1->Release();
++  return res;
++}
++
++// Error of a plain bilinear upscale of an unjittered render, as a reference point.
++static double bilinear_baseline(UINT inW, UINT inH, UINT outW, UINT outH) {
++  std::vector<float> img((size_t)inW * inH * 3);
++  for (UINT y = 0; y < inH; y++) for (UINT x = 0; x < inW; x++) for (int ch = 0; ch < 3; ch++)
++    img[((size_t)y * inW + x) * 3 + ch] = scene((x + 0.5f) / inW, (y + 0.5f) / inH, ch);
++  double err = 0; size_t n = 0;
++  for (UINT y = 0; y < outH; y += 2) for (UINT x = 0; x < outW; x += 2) {
++    float sx = (x + 0.5f) * inW / outW - 0.5f, sy = (y + 0.5f) * inH / outH - 0.5f;
++    int x0 = (int)std::floor(sx), y0 = (int)std::floor(sy); float fx = sx - x0, fy = sy - y0;
++    auto at = [&](int xx, int yy, int ch) { xx = xx < 0 ? 0 : xx >= (int)inW ? inW - 1 : xx; yy = yy < 0 ? 0 : yy >= (int)inH ? inH - 1 : yy; return img[((size_t)yy * inW + xx) * 3 + ch]; };
++    for (int ch = 0; ch < 3; ch++) {
++      float v = (at(x0, y0, ch) * (1 - fx) + at(x0 + 1, y0, ch) * fx) * (1 - fy) + (at(x0, y0 + 1, ch) * (1 - fx) + at(x0 + 1, y0 + 1, ch) * fx) * fy;
++      err += std::fabs(v - scene((x + 0.5f) / outW, (y + 0.5f) / outH, ch)); n++;
++    }
++  }
++  return err / n;
++}
++
++int main(int argc, char **argv) {
++  if (argc < 3) { printf("usage: nvngx_test <nvngx.dll> <result.txt> [frames]\n"); return 2; }
++  g_out = fopen(argv[2], "w"); if (!g_out) g_out = stdout;
++  int frames = argc > 3 ? atoi(argv[3]) : 32;
++  LOG("nvngx_test start frames=%d\n", frames);
++
++  ID3D11Device *dev = nullptr; ID3D11DeviceContext *ctx = nullptr; D3D_FEATURE_LEVEL fl;
++  D3D_FEATURE_LEVEL want[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
++  HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, want, 2, D3D11_SDK_VERSION, &dev, &fl, &ctx);
++  if (FAILED(hr)) { LOG("D3D11CreateDevice failed %lx\n", hr); return 1; }
++  LOG("device ok FL=0x%x\n", fl);
++
++  HMODULE h = LoadLibraryA(argv[1]);
++  if (!h) { LOG("LoadLibrary(%s) failed err=%lu (DXMT_ENABLE_NVEXT=1 needed)\n", argv[1], GetLastError()); return 1; }
++  auto init = (PFN_Init)GetProcAddress(h, "NVSDK_NGX_D3D11_Init_Ext");
++  auto getcap = (PFN_GetCap)GetProcAddress(h, "NVSDK_NGX_D3D11_GetCapabilityParameters");
++  Ctx c{dev, ctx};
++  c.alloc = (PFN_Alloc)GetProcAddress(h, "NVSDK_NGX_D3D11_AllocateParameters");
++  c.destroy = (PFN_Destroy)GetProcAddress(h, "NVSDK_NGX_D3D11_DestroyParameters");
++  c.create = (PFN_Create)GetProcAddress(h, "NVSDK_NGX_D3D11_CreateFeature");
++  c.eval = (PFN_Eval)GetProcAddress(h, "NVSDK_NGX_D3D11_EvaluateFeature");
++  c.release = (PFN_Release)GetProcAddress(h, "NVSDK_NGX_D3D11_ReleaseFeature");
++  auto shutdown1 = (PFN_Shutdown1)GetProcAddress(h, "NVSDK_NGX_D3D11_Shutdown1");
++  if (!init || !getcap || !c.alloc || !c.destroy || !c.create || !c.eval || !c.release || !shutdown1) { LOG("missing export\n"); return 1; }
++
++  NGXRes r = init(0x1234, L"C:\\users\\Public", dev, 0x15, nullptr);
++  LOG("Init_Ext -> 0x%x\n", r);
++
++  Param *cap = nullptr; r = getcap(&cap);
++  unsigned avail = 0; P_GetUI(cap, "SuperSampling.Available", &avail);
++  void *cb = nullptr; P_GetVoid(cap, "DLSSOptimalSettingsCallback", &cb);
++  LOG("GetCapabilityParameters -> 0x%x Available=%u OptimalCb=%p\n", r, avail, cb);
++  int fails = 0;
++  if (!avail || !cb) fails++;
++  // quality modes: 0 Perf, 1 Balanced, 2 Quality, 3 UltraPerf, 4 UltraQuality, 5 DLAA
++  const char *qn[] = {"Performance", "Balanced", "Quality", "UltraPerformance", "UltraQuality", "DLAA"};
++  for (int q = 0; q < 6 && cb; q++) {
++    P_SetUI(cap, "Width", 3840); P_SetUI(cap, "Height", 2160); P_SetI(cap, "PerfQualityValue", q);
++    NGXRes rr = ((PFN_OptimalCb)cb)(cap);
++    unsigned ow = 0, oh = 0; float sharp = -1; P_GetUI(cap, "OutWidth", &ow); P_GetUI(cap, "OutHeight", &oh); P_GetF(cap, "Sharpness", &sharp);
++    LOG("  optimal %-16s 3840x2160 -> render %ux%u (0x%x) sharp=%.2f\n", qn[q], ow, oh, rr, sharp);
++  }
++  c.destroy(cap);
++
++  // vtable layout round trip (each typed getter must land on the matching overload)
++  {
++    Param *t = nullptr; c.alloc(&t);
++    ID3D11Resource *fake = (ID3D11Resource *)(uintptr_t)0x12345678;
++    P_SetD3D11(t, "Color", fake); P_SetI(t, "I", -7); P_SetUI(t, "UI", 4000000000u); P_SetD(t, "D", 2.5); P_SetF(t, "F", 1.25f);
++    P_SetULL(t, "ULL", 0x1122334455667788ull);
++    ID3D11Resource *gr = nullptr; int gi = 0; unsigned gu = 0; double gd = 0; float gf = 0; unsigned long long gull = 0; void *gv = nullptr;
++    NGXRes a = P_GetD3D11(t, "Color", &gr), b = P_GetI(t, "I", &gi), cc = P_GetUI(t, "UI", &gu), dd = P_GetD(t, "D", &gd),
++           e = P_GetF(t, "F", &gf), f = P_GetULL(t, "ULL", &gull), g = P_GetVoid(t, "Color", &gv);
++    bool okv = ngx_ok(a) && gr == fake && ngx_ok(b) && gi == -7 && ngx_ok(cc) && gu == 4000000000u && ngx_ok(dd) && gd == 2.5 &&
++               ngx_ok(e) && gf == 1.25f && ngx_ok(f) && gull == 0x1122334455667788ull && ngx_ok(g) && gv == (void *)fake;
++    unsigned miss = 0; NGXRes m = P_GetUI(t, "Missing", &miss);
++    LOG("param vtable round trip: %s (res=%p i=%d ui=%u d=%g f=%g ull=%llx void=%p missing->0x%x)\n", okv ? "OK" : "WRONG", (void *)gr, gi, gu, gd, gf, gull, gv, m);
++    if (!okv || ngx_ok(m)) fails++;
++    c.destroy(t);
++  }
++
++  // bad handle / bad params must come back as NGX failures (0xBAD0xxxx), not success
++  Param *bad = nullptr; c.alloc(&bad);
++  unsigned *hbad = nullptr; r = c.create(ctx, 1, bad, &hbad);
++  LOG("CreateFeature without sizes -> 0x%x (%s)\n", r, ngx_ok(r) ? "WRONG: success" : "failure as expected");
++  if (ngx_ok(r)) fails++;
++  c.destroy(bad);
++
++  struct Case { const char *name; UINT iw, ih, ow, oh; float jsign; bool subrect; bool jitter; DXGI_FORMAT dt, dv; int q; float pan, mvsign; bool must_pass; };
++  const DXGI_FORMAT RT = DXGI_FORMAT_R32_TYPELESS, DV = DXGI_FORMAT_D32_FLOAT;
++  Case cases[] = {
++    {"1080p->4K Perf, jitter DLSS conv", 1920, 1080, 3840, 2160, 1.0f, true, true, RT, DV, 0, 0, 1, true},
++    {"1080p->4K Perf, jitter flipped", 1920, 1080, 3840, 2160, -1.0f, true, true, RT, DV, 0, 0, 1, false},
++    {"1080p->4K Perf, no jitter", 1920, 1080, 3840, 2160, 1.0f, true, false, RT, DV, 0, 0, 1, true},
++    {"1080p->4K Perf, pan 3.25px, MV prev-cur", 1920, 1080, 3840, 2160, 1.0f, true, true, RT, DV, 0, 3.25f, 1, true},
++    {"1080p->4K Perf, pan 3.25px, MV flipped", 1920, 1080, 3840, 2160, 1.0f, true, true, RT, DV, 0, 3.25f, -1, false},
++    {"1080p->4K no subrect param, D24S8", 1920, 1080, 3840, 2160, 1.0f, false, true, DXGI_FORMAT_R24G8_TYPELESS, DXGI_FORMAT_D24_UNORM_S8_UINT, 0, 0, 1, true},
++    {"720p->4K UltraPerf (3x)", 1280, 720, 3840, 2160, 1.0f, true, true, RT, DV, 3, 0, 1, true},
++    {"1440p->4K Quality", 2560, 1440, 3840, 2160, 1.0f, true, true, RT, DV, 2, 0, 1, true},
++    {"720p->1440p Perf", 1280, 720, 2560, 1440, 1.0f, true, true, RT, DV, 0, 0, 1, true},
++    {"960p->1440p Quality", 1707, 960, 2560, 1440, 1.0f, true, true, RT, DV, 2, 0, 1, true},
++    {"1440p->1440p DLAA", 2560, 1440, 2560, 1440, 1.0f, true, true, RT, DV, 5, 0, 1, true},
++  };
++  for (auto &cs : cases) {
++    Run rr = run_upscale(c, cs.iw, cs.ih, cs.ow, cs.oh, frames, cs.jsign, cs.subrect, cs.jitter, cs.dt, cs.dv, cs.q, cs.pan, cs.mvsign);
++    double bl = bilinear_baseline(cs.iw, cs.ih, cs.ow, cs.oh);
++    LOG("[%s] ok=%d MAE=%.5f (bilinear %.5f) nonzero=%.3f nan/inf=%d gpu=%.2f ms/eval\n", cs.name, rr.ok, rr.mae, bl, rr.nonzero, rr.nans, rr.ms_per_eval);
++    if (cs.must_pass && (!rr.ok || rr.nonzero < 0.5 || rr.nans)) fails++;
++  }
++  r = shutdown1(dev);
++  LOG("Shutdown1 -> 0x%x\nRESULT %s (fails=%d)\n", r, fails ? "FAIL" : "PASS", fails);
++  if (g_out != stdout) fclose(g_out);
++  ctx->Release(); dev->Release();
++  return fails ? 1 : 0;
++}

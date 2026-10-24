@@ -1,0 +1,29 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 16/36] dlls-rpcrt4: Ember changes
+
+Base: Wine 11.18
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/rpcrt4/ndr_stubless.c b/dlls/rpcrt4/ndr_stubless.c
+index ec09fef..6e07564 100644
+--- a/dlls/rpcrt4/ndr_stubless.c
++++ b/dlls/rpcrt4/ndr_stubless.c
+@@ -45,6 +45,8 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(rpc);
+ 
++unsigned long long ndr_diag_x4[2];
++
+ #define NDR_TABLE_MASK 127
+ 
+ static inline BOOL is_oicf_stubdesc(const PMIDL_STUB_DESC pStubDesc)
+@@ -1004,6 +1006,9 @@ CLIENT_CALL_RETURN __attribute__((naked)) NdrClientCall2( PMIDL_STUB_DESC desc,
+          "stp x29, x30, [sp, #-0x20]!\n\t"
+          ".seh_save_fplr_x 0x20\n\t"
+          ".seh_endprologue\n\t"
++         "adrp x16, ndr_diag_x4\n\t"
++         "add x16, x16, :lo12:ndr_diag_x4\n\t"
++         "stp x4, x30, [x16]\n\t"
+          "stp x2, x3, [x4, #-0x10]!\n\t"
+          "mov x2, x4\n\t"          /* stack */
+          "mov x3, #0\n\t"          /* fpu_stack */

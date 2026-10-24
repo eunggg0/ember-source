@@ -1,11 +1,151 @@
 From: Ember <ember@users.noreply.github.com>
 Subject: [PATCH 60/74] dlls-winecoreaudio.drv: Ember changes
 
-Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+Base: CrossOver 26.3.0 FOSS sources/wine
 License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
 ---
+diff --git a/dlls/winecoreaudio.drv/authorization.m b/dlls/winecoreaudio.drv/authorization.m
+index bcdb5a3..3ecbb05 100644
+--- a/dlls/winecoreaudio.drv/authorization.m
++++ b/dlls/winecoreaudio.drv/authorization.m
+@@ -1,116 +1,25 @@
+-/*
+- * CoreAudio audio capture authorization functions
+- *
+- * Copyright 2020 Brendan Shanks for CodeWeavers
+- *
+- * This library is free software; you can redistribute it and/or
+- * modify it under the terms of the GNU Lesser General Public
+- * License as published by the Free Software Foundation; either
+- * version 2.1 of the License, or (at your option) any later version.
+- *
+- * This library is distributed in the hope that it will be useful,
+- * but WITHOUT ANY WARRANTY; without even the implied warranty of
+- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+- * Lesser General Public License for more details.
+- *
+- * You should have received a copy of the GNU Lesser General Public
+- * License along with this library; if not, write to the Free Software
+- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+- */
+-
+-#if 0
+-#pragma makedep unix
+-#endif
+-
+-#include "config.h"
+-
+-#ifdef HAVE_AVFOUNDATION_AVFOUNDATION_H
++/* LGPL-2.1-or-later. Nonblocking capture permission preflight.
++ * Status queries do not request TCC access. Only a real CreateStream may ask;
++ * it returns unavailable immediately and can be retried after user consent. */
+ #import <AVFoundation/AVFoundation.h>
+-#endif
+-
+-#include "coreaudio_cocoa.h"
+-
+-#ifdef HAVE_AVFOUNDATION_AVFOUNDATION_H
+-
+-#if !defined(MAC_OS_X_VERSION_10_14) || MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_14
+-
+-@interface AVCaptureDevice (WineCaptureAuthorizationExtensions)
+-    + (NSInteger)authorizationStatusForMediaType:(AVMediaType)mediaType;
+-    + (void)requestAccessForMediaType:(AVMediaType)mediaType completionHandler:(void (^)(BOOL granted))handler;
+-@end
++#import <Foundation/Foundation.h>
+ 
+-#endif
+-
+-static NSString* const WineWillShowPermissionDialogNotification = @"WineWillShowPermissionDialogNotification";
+-static NSString* const WineDidShowPermissionDialogNotification = @"WineDidShowPermissionDialogNotification";
+-
+-/***********************************************************************
+- *              CoreAudio_get_capture_authorization_status
+- *
+- * Returns the authorization status for audio capture as an
+- * AVAuthorizationStatus enum value.
+- * On pre-10.14 OS versions that don't support authorization, always
+- * returns AUTHORIZED.
+- */
+-int CoreAudio_get_capture_authorization_status(void)
++int ember_capture_authorized(int request)
+ {
+-    int ret = AUTHORIZED;
+-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+-
+-    if ([AVCaptureDevice respondsToSelector:@selector(authorizationStatusForMediaType:)])
+-        ret = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+-
+-    [pool release];
+-    return ret;
+-}
+-
+-/***********************************************************************
+- *              CoreAudio_request_capture_authorization
+- *
+- * Requests audio capture/microphone permissions from the user, and posts
+- * in-process NSNotifications before/after the request.
+- *
+- * Returns: 1 if access was granted
+- *          0 if access was denied
+- *         -1 if requesting permission is unsupported (older macOS)
+- */
+-int CoreAudio_request_capture_authorization(void)
+-{
+-    __block int ret = -1;
+-    dispatch_semaphore_t semaphore;
+-    NSAutoreleasePool* pool = [[NSAutoreleasePool alloc] init];
+-
+-    if ([AVCaptureDevice respondsToSelector:@selector(requestAccessForMediaType:completionHandler:)])
++    static int pending;
++    @autoreleasepool
+     {
+-        [[NSNotificationCenter defaultCenter] postNotificationName:WineWillShowPermissionDialogNotification
+-                                                            object:nil];
+-        semaphore = dispatch_semaphore_create(0);
+-        [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio
+-                                 completionHandler:^(BOOL granted){
+-            dispatch_semaphore_signal(semaphore);
+-            ret = granted ? 1 : 0;
+-        }];
+-
+-        dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+-        dispatch_release(semaphore);
+-        [[NSNotificationCenter defaultCenter] postNotificationName:WineDidShowPermissionDialogNotification
+-                                                            object:nil];
++        AVAuthorizationStatus status = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
++        if (status == AVAuthorizationStatusAuthorized) return 1;
++        if (request && status == AVAuthorizationStatusNotDetermined &&
++            !__atomic_exchange_n(&pending, 1, __ATOMIC_ACQ_REL))
++        {
++            [[NSNotificationCenter defaultCenter] postNotificationName:@"WineWillShowPermissionDialogNotification" object:nil];
++            [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {
++                __atomic_store_n(&pending, 0, __ATOMIC_RELEASE);
++                [[NSNotificationCenter defaultCenter] postNotificationName:@"WineDidShowPermissionDialogNotification" object:nil];
++            }];
++        }
++        return 0;
+     }
+-
+-    [pool release];
+-    return ret;
+-}
+-
+-#else
+-
+-int CoreAudio_get_capture_authorization_status(void)
+-{
+-    return AUTHORIZED;
+-}
+-
+-int CoreAudio_request_capture_authorization(void)
+-{
+-    return -1;
+ }
+-
+-#endif
 diff --git a/dlls/winecoreaudio.drv/coreaudio.c b/dlls/winecoreaudio.drv/coreaudio.c
-index 3199887..d353d84 100644
+index 3199887..b16e391 100644
 --- a/dlls/winecoreaudio.drv/coreaudio.c
 +++ b/dlls/winecoreaudio.drv/coreaudio.c
 @@ -48,6 +48,7 @@
@@ -16,96 +156,34 @@ index 3199887..d353d84 100644
  
  #undef LoadResource
  #undef CompareString
-@@ -500,6 +501,88 @@ static OSStatus ca_capture_cb(void *user, AudioUnitRenderActionFlags *flags,
-     return noErr;
+@@ -76,6 +77,17 @@
+ #endif
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(coreaudio);
++/* GCD threads have no Wine TEB. Never enter Wine's debug runtime from them. */
++static _Thread_local int ember_capture_native_thread;
++#undef TRACE
++#undef WARN
++#undef ERR
++#undef FIXME
++#define TRACE(...) do { if (!ember_capture_native_thread) WINE_TRACE(__VA_ARGS__); } while (0)
++#define WARN(...) do { if (!ember_capture_native_thread) WINE_WARN(__VA_ARGS__); } while (0)
++#define ERR(...) do { if (!ember_capture_native_thread) WINE_ERR(__VA_ARGS__); } while (0)
++#define FIXME(...) do { if (!ember_capture_native_thread) WINE_FIXME(__VA_ARGS__); } while (0)
++
+ WINE_DECLARE_DEBUG_CHANNEL(winediag);
+ 
+ struct coreaudio_stream
+@@ -223,7 +235,7 @@ static NTSTATUS unix_main_loop(void *args)
+     return STATUS_SUCCESS;
  }
  
-+/* Ember: 입력(마이크) 장치를 AudioUnit 에 거는 호출에 시간 제한을 둔다.
-+ * 다른 앱의 마이크 권한 창이 답 없이 떠 있으면(예: 게임 번들이 마이크를 요청한 채 꺼짐) coreaudiod 가 그 마이크 장치의
-+ * 작업을 붙잡아, 이 맥의 모든 프로세스에서 입력 장치에 kAudioOutputUnitProperty_CurrentDevice 를 거는 호출이 끝없이 멈춘다
-+ * (2026-10-03 실측: 네이티브 시험 프로그램도 30초+). 스팀은 시작 때 모든 엔드포인트의 IsFormatSupported 를 물어서
-+ * IPC 스레드가 여기서 멈추고 "BMainLoop stalled → fatal stalled cross-thread pipe" 로 꺼졌다.
-+ * 제한 시간 안에 안 끝나면 그 장치는 지금 못 쓰는 것으로 돌려준다. 멈춘 호출은 작업 스레드에 남기고, 끝나면 그쪽이 정리한다. */
-+struct ember_capdev_job
-+{
-+    AudioComponentInstance unit;
-+    AudioDeviceID dev;
-+    OSStatus sc;
-+    dispatch_semaphore_t done;
-+    int state; /* 0 진행 중, 1 끝남, 2 기다리던 쪽이 포기 */
-+};
-+
-+static void ember_capdev_work(void *ctx)
-+{
-+    struct ember_capdev_job *job = ctx;
-+    job->sc = AudioUnitSetProperty(job->unit, kAudioOutputUnitProperty_CurrentDevice,
-+                                   kAudioUnitScope_Global, 0, &job->dev, sizeof(job->dev));
-+    if (__atomic_exchange_n(&job->state, 1, __ATOMIC_ACQ_REL) == 2)
-+    {
-+        AudioComponentInstanceDispose(job->unit);
-+        dispatch_release(job->done);
-+        free(job);
-+        return;
-+    }
-+    dispatch_semaphore_signal(job->done);
-+}
-+
-+static OSStatus ember_set_capture_device(AudioComponentInstance unit, AudioDeviceID dev, BOOL *abandoned)
-+{
-+    static int timeout_ms = -1;
-+    struct ember_capdev_job *job;
-+    OSStatus sc;
-+
-+    *abandoned = FALSE;
-+    if (timeout_ms < 0)
-+    {
-+        const char *e = getenv("EMBER_CAPTURE_DEV_TIMEOUT_MS");
-+        timeout_ms = e ? atoi(e) : 3000;
-+    }
-+    if (timeout_ms == 0)
-+        return AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
-+                                    kAudioUnitScope_Global, 0, &dev, sizeof(dev));
-+
-+    /* 한 번 멈춘 장치는 30초 동안 곧바로 '못 씀'으로 — 같은 장치를 여러 형식으로 물을 때마다 3초씩 쌓이지 않게 */
-+    {
-+        static AudioDeviceID wedged_dev;
-+        static uint64_t wedged_until;
-+        uint64_t now = dispatch_time(DISPATCH_TIME_NOW, 0);
-+        if (__atomic_load_n(&wedged_dev, __ATOMIC_ACQUIRE) == dev && now < __atomic_load_n(&wedged_until, __ATOMIC_ACQUIRE))
-+        {
-+            *abandoned = TRUE;
-+            AudioComponentInstanceDispose(unit);
-+            return kAudioHardwareNotRunningError;
-+        }
-+        if (!(job = calloc(1, sizeof(*job))))
-+            return AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
-+                                        kAudioUnitScope_Global, 0, &dev, sizeof(dev));
-+        job->unit = unit;
-+        job->dev = dev;
-+        job->done = dispatch_semaphore_create(0);
-+        dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), job, ember_capdev_work);
-+        if (dispatch_semaphore_wait(job->done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)timeout_ms * 1000000)) != 0 &&
-+            __atomic_exchange_n(&job->state, 2, __ATOMIC_ACQ_REL) == 0)
-+        {
-+            /* 작업 스레드가 끝나면 유닛·작업을 치운다 */
-+            __atomic_store_n(&wedged_until, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC), __ATOMIC_RELEASE);
-+            __atomic_store_n(&wedged_dev, dev, __ATOMIC_RELEASE);
-+            ERR_(winediag)("Capture device %u did not respond in %d ms (a microphone permission prompt may be pending); "
-+                           "treating it as unavailable.\n", (unsigned int)dev, timeout_ms);
-+            *abandoned = TRUE;
-+            return kAudioHardwareNotRunningError;
-+        }
-+        sc = job->sc;
-+        dispatch_release(job->done);
-+        free(job);
-+        return sc;
-+    }
-+}
-+
- static AudioComponentInstance get_audiounit(EDataFlow dataflow, AudioDeviceID adevid)
+-static NTSTATUS unix_get_endpoint_ids(void *args)
++static NTSTATUS unix_get_endpoint_ids_native(void *args)
  {
-     AudioComponentInstance unit;
-@@ -507,9 +590,24 @@ static AudioComponentInstance get_audiounit(EDataFlow dataflow, AudioDeviceID ad
+     struct get_endpoint_ids_params *params = args;
+     unsigned int num_devices, i, needed, offset;
+@@ -507,9 +519,24 @@ static AudioComponentInstance get_audiounit(EDataFlow dataflow, AudioDeviceID ad
      AudioComponentDescription desc;
      OSStatus sc;
  
@@ -131,25 +209,28 @@ index 3199887..d353d84 100644
      desc.componentManufacturer = kAudioUnitManufacturer_Apple;
  
      if(!(comp = AudioComponentFindNext(NULL, &desc))){
-@@ -545,8 +643,15 @@ static AudioComponentInstance get_audiounit(EDataFlow dataflow, AudioDeviceID ad
+@@ -545,8 +572,10 @@ static AudioComponentInstance get_audiounit(EDataFlow dataflow, AudioDeviceID ad
          }
      }
  
--    sc = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
--            kAudioUnitScope_Global, 0, &adevid, sizeof(adevid));
 +    if(follow_default) return unit;   /* DefaultOutput 유닛에는 장치를 지정하지 않는다 */
 +
-+    if(dataflow == eCapture){
-+        BOOL abandoned;
-+        sc = ember_set_capture_device(unit, adevid, &abandoned);
-+        if(abandoned) return NULL;   /* 멈춘 호출이 끝나면 작업 스레드가 unit 을 치운다 */
-+    }else
-+        sc = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
+     sc = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
+-            kAudioUnitScope_Global, 0, &adevid, sizeof(adevid));
 +                kAudioUnitScope_Global, 0, &adevid, sizeof(adevid));
      if(sc != noErr){
          WARN("Couldn't set audio unit device\n");
          AudioComponentInstanceDispose(unit);
-@@ -742,6 +847,13 @@ static NTSTATUS unix_create_stream(void *args)
+@@ -721,7 +750,7 @@ static AudioDeviceID dev_id_from_device(const char *device)
+     return id;
+ }
+ 
+-static NTSTATUS unix_create_stream(void *args)
++static NTSTATUS unix_create_stream_render(void *args)
+ {
+     struct create_stream_params *params = args;
+     struct coreaudio_stream *stream;
+@@ -742,6 +771,13 @@ static NTSTATUS unix_create_stream(void *args)
          goto end;
      }
  
@@ -163,7 +244,7 @@ index 3199887..d353d84 100644
      stream->period = params->period;
      stream->period_frames = muldiv(params->period, stream->fmt->nSamplesPerSec, 10000000);
      stream->dev_id = dev_id_from_device(params->device);
-@@ -750,7 +862,7 @@ static NTSTATUS unix_create_stream(void *args)
+@@ -750,7 +786,7 @@ static NTSTATUS unix_create_stream(void *args)
      stream->share = params->share;
  
      stream->bufsize_frames = muldiv(params->duration, stream->fmt->nSamplesPerSec, 10000000);
@@ -172,7 +253,162 @@ index 3199887..d353d84 100644
          stream->bufsize_frames -= stream->bufsize_frames % stream->period_frames;
  
      if(!(stream->unit = get_audiounit(stream->flow, stream->dev_id))){
-@@ -1130,6 +1242,10 @@ static NTSTATUS unix_is_format_supported(void *args)
+@@ -777,22 +813,6 @@ static NTSTATUS unix_create_stream(void *args)
+         goto end;
+     }
+ 
+-    if (stream->flow == eCapture) {
+-        /* On 10.14 and later:
+-         * Check the audio capture/microphone authorization status, and explicitly
+-         * request it if the user hasn't previously granted or denied permission.
+-         */
+-        int authstatus = CoreAudio_get_capture_authorization_status();
+-        TRACE("Audio capture authorization status: %d\n", authstatus);
+-
+-        if (authstatus == NOT_DETERMINED)
+-            authstatus = CoreAudio_request_capture_authorization();
+-
+-        if (authstatus == 0)
+-            ERR_(winediag)("Microphone/audio capture permission was denied. "
+-                           "This can be enabled under Security & Privacy in System Preferences.\n");
+-    }
+-
+     sc = AudioUnitInitialize(stream->unit);
+     if(sc != noErr){
+         WARN("Couldn't initialize: %x\n", (int)sc);
+@@ -837,6 +857,113 @@ end:
+     return STATUS_SUCCESS;
+ }
+ 
++static NTSTATUS ember_create_capture_native(void *args)
++{
++    struct create_stream_params *params = args;
++    struct coreaudio_stream *stream;
++    AURenderCallbackStruct input;
++    OSStatus sc;
++
++    params->result = S_OK;
++
++    if (!(stream = calloc(1, sizeof(*stream)))) {
++        params->result = E_OUTOFMEMORY;
++        return STATUS_SUCCESS;
++    }
++
++    stream->fmt = clone_format(params->fmt);
++    if(!stream->fmt){
++        params->result = E_OUTOFMEMORY;
++        goto end;
++    }
++
++    /* Ember: 표본율·블록 정렬·채널 0 은 지원 안 하는 형식. 전에는 독점 모드에서 period_frames 0 으로 나눠
++     * 유닉스 쪽 0나누기로 프로세스가 통째로 죽었다(예외를 게임에 돌려줄 수 없는 자리). */
++    if(!stream->fmt->nSamplesPerSec || !stream->fmt->nBlockAlign || !stream->fmt->nChannels){
++        params->result = AUDCLNT_E_UNSUPPORTED_FORMAT;
++        goto end;
++    }
++
++    stream->period = params->period;
++    stream->period_frames = muldiv(params->period, stream->fmt->nSamplesPerSec, 10000000);
++    stream->dev_id = dev_id_from_device(params->device);
++    stream->flow = params->flow;
++    stream->flags = params->flags;
++    stream->share = params->share;
++
++    stream->bufsize_frames = muldiv(params->duration, stream->fmt->nSamplesPerSec, 10000000);
++    if(params->share == AUDCLNT_SHAREMODE_EXCLUSIVE && stream->period_frames)
++        stream->bufsize_frames -= stream->bufsize_frames % stream->period_frames;
++
++    if(!(stream->unit = get_audiounit(stream->flow, stream->dev_id))){
++        params->result = AUDCLNT_E_DEVICE_INVALIDATED;
++        goto end;
++    }
++
++    params->result = ca_setup_audiounit(stream->flow, stream->unit, stream->fmt, &stream->dev_desc, &stream->converter);
++    if(FAILED(params->result)) goto end;
++
++    input.inputProcRefCon = stream;
++    if(stream->flow == eCapture){
++        input.inputProc = ca_capture_cb;
++        sc = AudioUnitSetProperty(stream->unit, kAudioOutputUnitProperty_SetInputCallback,
++                                  kAudioUnitScope_Output, 1, &input, sizeof(input));
++    }else{
++        input.inputProc = ca_render_cb;
++        sc = AudioUnitSetProperty(stream->unit, kAudioUnitProperty_SetRenderCallback,
++                                  kAudioUnitScope_Input, 0, &input, sizeof(input));
++    }
++    if(sc != noErr){
++        WARN("Couldn't set callback: %x\n", (int)sc);
++        params->result = osstatus_to_hresult(sc);
++        goto end;
++    }
++
++    sc = AudioUnitInitialize(stream->unit);
++    if(sc != noErr){
++        WARN("Couldn't initialize: %x\n", (int)sc);
++        params->result = osstatus_to_hresult(sc);
++        goto end;
++    }
++
++    stream->cap_bufsize_frames = muldiv(params->duration, stream->dev_desc.mSampleRate, 10000000);
++    if (!stream->cap_bufsize_frames || !stream->bufsize_frames) {
++        params->result = E_INVALIDARG;
++        goto end;
++    }
++    stream->cap_buffer = malloc((size_t)stream->cap_bufsize_frames * stream->fmt->nBlockAlign);
++    if (!stream->cap_buffer) { params->result = E_OUTOFMEMORY; goto end; }
++
++    /* we play audio continuously because AudioOutputUnitStart sometimes takes
++     * a while to return */
++    sc = AudioOutputUnitStart(stream->unit);
++    if(sc != noErr){
++        WARN("Unit failed to start: %x\n", (int)sc);
++        params->result = osstatus_to_hresult(sc);
++        goto end;
++    }
++
++    params->result = S_OK;
++
++end:
++    if(FAILED(params->result)){
++        if(stream->unit) {
++            AudioOutputUnitStop(stream->unit);
++            AudioComponentInstanceDispose(stream->unit);
++        }
++        if(stream->converter) AudioConverterDispose(stream->converter);
++        free(stream->cap_buffer);
++        free(stream->wrap_buffer);
++        free(stream->fmt);
++        free(stream);
++    } else {
++        *params->channel_count = params->fmt->nChannels;
++        *params->stream = (stream_handle)(UINT_PTR)stream;
++    }
++
++    return STATUS_SUCCESS;
++}
++
+ static NTSTATUS unix_release_stream( void *args )
+ {
+     struct release_stream_params *params = args;
+@@ -1018,7 +1145,7 @@ static DWORD get_channel_mask(unsigned int channels)
+     return 0;
+ }
+ 
+-static NTSTATUS unix_get_mix_format(void *args)
++static NTSTATUS unix_get_mix_format_native(void *args)
+ {
+     struct get_mix_format_params *params = args;
+     AudioObjectPropertyAddress addr;
+@@ -1121,7 +1248,7 @@ static NTSTATUS unix_get_mix_format(void *args)
+     return STATUS_SUCCESS;
+ }
+ 
+-static NTSTATUS unix_is_format_supported(void *args)
++static NTSTATUS unix_is_format_supported_native(void *args)
+ {
+     struct is_format_supported_params *params = args;
+     AudioStreamBasicDescription dev_desc;
+@@ -1130,6 +1257,10 @@ static NTSTATUS unix_is_format_supported(void *args)
      const AudioDeviceID dev_id = dev_id_from_device(params->device);
  
      unit = get_audiounit(params->flow, dev_id);
@@ -183,3 +419,345 @@ index 3199887..d353d84 100644
  
      converter = NULL;
      params->result = ca_setup_audiounit(params->flow, unit, params->fmt_in, &dev_desc, &converter);
+@@ -1139,7 +1270,7 @@ static NTSTATUS unix_is_format_supported(void *args)
+     return STATUS_SUCCESS;
+ }
+ 
+-static NTSTATUS unix_get_device_period(void *args)
++static NTSTATUS unix_get_device_period_native(void *args)
+ {
+     struct get_device_period_params *params = args;
+ 
+@@ -1153,6 +1284,8 @@ static NTSTATUS unix_get_device_period(void *args)
+     return STATUS_SUCCESS;
+ }
+ 
++#include "ember_capture_adapter.h"
++
+ static UINT buf_ptr_diff(UINT left, UINT right, UINT bufsize)
+ {
+     if(left <= right)
+diff --git a/dlls/winecoreaudio.drv/ember_capture_adapter.h b/dlls/winecoreaudio.drv/ember_capture_adapter.h
+new file mode 100644
+index 0000000..1ae58d1
+--- /dev/null
++++ b/dlls/winecoreaudio.drv/ember_capture_adapter.h
+@@ -0,0 +1,221 @@
++/* LGPL-2.1-or-later. Included after capture-facing native functions.
++ * Every pointer crossing a timeout belongs to the job; no caller/guest buffer
++ * is accessed after return. The render entry points retain their old path. */
++#include "ember_capture_job.h"
++extern int ember_capture_authorized(int request);
++
++enum ember_capture_op { EMBER_ENDPOINTS, EMBER_FORMAT, EMBER_MIX, EMBER_PERIOD, EMBER_CREATE };
++struct ember_capture_call
++{
++    struct ember_capture_job job;
++    enum ember_capture_op op;
++    char *device;
++    WAVEFORMATEX *format;
++    WAVEFORMATEXTENSIBLE mix;
++    REFERENCE_TIME def_period, min_period;
++    UINT32 channels;
++    stream_handle stream;
++    union
++    {
++        struct get_endpoint_ids_params endpoints;
++        struct is_format_supported_params format;
++        struct get_mix_format_params mix;
++        struct get_device_period_params period;
++        struct create_stream_params create;
++    } p;
++};
++
++static void ember_capture_free_stream(void *ctx)
++{
++    struct coreaudio_stream *stream = ctx;
++    /* This stream was never handed to Wine: no timer, local/guest buffer or
++     * playing=true. Stop/dispose finishes callbacks before freeing their user. */
++    if (stream->unit)
++    {
++        AudioOutputUnitStop(stream->unit);
++        AudioComponentInstanceDispose(stream->unit);
++    }
++    if (stream->converter) AudioConverterDispose(stream->converter);
++    free(stream->cap_buffer);
++    free(stream->wrap_buffer);
++    free(stream->fmt);
++    free(stream);
++}
++
++static void ember_capture_call_destroy(struct ember_capture_job *base)
++{
++    struct ember_capture_call *call = (struct ember_capture_call *)base;
++    if (call->op == EMBER_CREATE && call->stream)
++        ember_capture_free_stream(handle_get_stream(call->stream));
++    if (call->op == EMBER_ENDPOINTS) free(call->p.endpoints.endpoints);
++    free(call->format);
++    free(call->device);
++    free(call);
++}
++
++static void ember_capture_call_work(struct ember_capture_job *base)
++{
++    struct ember_capture_call *call = (struct ember_capture_call *)base;
++    /* This preflight itself is inside the deadline. Discovery never prompts. */
++    if ((call->op == EMBER_FORMAT || call->op == EMBER_CREATE) &&
++        !ember_capture_authorized(call->op == EMBER_CREATE))
++    {
++        if (call->op == EMBER_ENDPOINTS) call->p.endpoints.result = S_OK;
++        return;
++    }
++    switch (call->op)
++    {
++    case EMBER_ENDPOINTS: unix_get_endpoint_ids_native(&call->p.endpoints); break;
++    case EMBER_FORMAT: unix_is_format_supported_native(&call->p.format); break;
++    case EMBER_MIX: unix_get_mix_format_native(&call->p.mix); break;
++    case EMBER_PERIOD: unix_get_device_period_native(&call->p.period); break;
++    case EMBER_CREATE: ember_create_capture_native(&call->p.create); break;
++    }
++}
++
++static struct ember_capture_call *ember_capture_call_new(enum ember_capture_op op, const char *device)
++{
++    struct ember_capture_call *call = calloc(1, sizeof(*call));
++    if (!call) return NULL;
++    call->op = op;
++    call->job.work = ember_capture_call_work;
++    call->job.destroy = ember_capture_call_destroy;
++    if (device && !(call->device = strdup(device))) { free(call); return NULL; }
++    return call;
++}
++
++static NTSTATUS unix_get_endpoint_ids(void *args)
++{
++    struct get_endpoint_ids_params *p = args;
++    struct ember_capture_call *call;
++    if (p->flow != eCapture) return unix_get_endpoint_ids_native(args);
++    p->num = p->default_idx = 0;
++    if (!(call = ember_capture_call_new(EMBER_ENDPOINTS, NULL))) { p->result = E_OUTOFMEMORY; return STATUS_SUCCESS; }
++    call->p.endpoints = *p;
++    call->p.endpoints.result = AUDCLNT_E_DEVICE_INVALIDATED;
++    call->p.endpoints.endpoints = calloc(1, p->size ? p->size : 1);
++    if (!call->p.endpoints.endpoints) { free(call); p->result = E_OUTOFMEMORY; return STATUS_SUCCESS; }
++    if (ember_capture_run(&call->job))
++    {
++        p->result = call->p.endpoints.result;
++        p->num = call->p.endpoints.num;
++        p->default_idx = call->p.endpoints.default_idx;
++        if (SUCCEEDED(p->result) && p->size) memcpy(p->endpoints, call->p.endpoints.endpoints, p->size);
++        p->size = call->p.endpoints.size;
++        ember_capture_claim(&call->job);
++    }
++    else p->result = AUDCLNT_E_DEVICE_INVALIDATED;
++    ember_capture_release(&call->job);
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS unix_is_format_supported(void *args)
++{
++    struct is_format_supported_params *p = args;
++    struct ember_capture_call *call;
++    if (p->flow != eCapture) return unix_is_format_supported_native(args);
++    if (!(call = ember_capture_call_new(EMBER_FORMAT, p->device))) { p->result = E_OUTOFMEMORY; return STATUS_SUCCESS; }
++    if (!(call->format = clone_format(p->fmt_in))) { free(call->device); free(call); p->result = E_OUTOFMEMORY; return STATUS_SUCCESS; }
++    call->p.format = *p;
++    call->p.format.device = call->device;
++    call->p.format.fmt_in = call->format;
++    call->p.format.result = AUDCLNT_E_DEVICE_INVALIDATED;
++    if (ember_capture_run(&call->job))
++    {
++        p->result = call->p.format.result;
++        ember_capture_claim(&call->job);
++    }
++    else p->result = AUDCLNT_E_DEVICE_INVALIDATED;
++    ember_capture_release(&call->job);
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS unix_get_mix_format(void *args)
++{
++    struct get_mix_format_params *p = args;
++    struct ember_capture_call *call;
++    if (p->flow != eCapture) return unix_get_mix_format_native(args);
++    if (!(call = ember_capture_call_new(EMBER_MIX, p->device))) { p->result = E_OUTOFMEMORY; return STATUS_SUCCESS; }
++    call->p.mix = *p;
++    call->p.mix.device = call->device;
++    call->p.mix.fmt = &call->mix;
++    call->p.mix.result = AUDCLNT_E_DEVICE_INVALIDATED;
++    if (ember_capture_run(&call->job))
++    {
++        p->result = call->p.mix.result;
++        if (SUCCEEDED(p->result)) *p->fmt = call->mix;
++        ember_capture_claim(&call->job);
++    }
++    else p->result = AUDCLNT_E_DEVICE_INVALIDATED;
++    ember_capture_release(&call->job);
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS unix_get_device_period(void *args)
++{
++    struct get_device_period_params *p = args;
++    struct ember_capture_call *call;
++    if (p->flow != eCapture) return unix_get_device_period_native(args);
++    if (!(call = ember_capture_call_new(EMBER_PERIOD, p->device))) { p->result = E_OUTOFMEMORY; return STATUS_SUCCESS; }
++    call->p.period = *p;
++    call->p.period.device = call->device;
++    call->p.period.def_period = p->def_period ? &call->def_period : NULL;
++    call->p.period.min_period = p->min_period ? &call->min_period : NULL;
++    call->p.period.result = AUDCLNT_E_DEVICE_INVALIDATED;
++    if (ember_capture_run(&call->job))
++    {
++        p->result = call->p.period.result;
++        if (SUCCEEDED(p->result))
++        {
++            if (p->def_period) *p->def_period = call->def_period;
++            if (p->min_period) *p->min_period = call->min_period;
++        }
++        ember_capture_claim(&call->job);
++    }
++    else p->result = AUDCLNT_E_DEVICE_INVALIDATED;
++    ember_capture_release(&call->job);
++    return STATUS_SUCCESS;
++}
++
++static NTSTATUS unix_create_stream(void *args)
++{
++    struct create_stream_params *p = args;
++    struct ember_capture_call *call;
++    struct coreaudio_stream *stream;
++    SIZE_T size;
++    if (p->flow != eCapture) return unix_create_stream_render(args);
++    if (!(call = ember_capture_call_new(EMBER_CREATE, p->device))) { p->result = E_OUTOFMEMORY; return STATUS_SUCCESS; }
++    if (!(call->format = clone_format(p->fmt))) { free(call->device); free(call); p->result = E_OUTOFMEMORY; return STATUS_SUCCESS; }
++    call->p.create = *p;
++    call->p.create.name = NULL; /* Not used by the native preparation. */
++    call->p.create.device = call->device;
++    call->p.create.fmt = call->format;
++    call->p.create.stream = &call->stream;
++    call->p.create.channel_count = &call->channels;
++    call->p.create.result = AUDCLNT_E_DEVICE_INVALIDATED;
++    if (ember_capture_run(&call->job))
++    {
++        p->result = call->p.create.result;
++        if (SUCCEEDED(p->result))
++        {
++            stream = handle_get_stream(call->stream);
++            /* Wine VM operations remain on the Wine caller thread, never GCD.
++             * Until handover playing is false, so callbacks do not use local_buffer. */
++            size = stream->bufsize_frames * stream->fmt->nBlockAlign;
++            if (NtAllocateVirtualMemory(GetCurrentProcess(), (void **)&stream->local_buffer, zero_bits,
++                                        &size, MEM_COMMIT, PAGE_READWRITE)) p->result = E_OUTOFMEMORY;
++            else
++            {
++                silence_buffer(stream, stream->local_buffer, stream->bufsize_frames);
++                *p->channel_count = call->channels;
++                *p->stream = call->stream;
++                call->stream = 0; /* Native resources now belong to Wine. */
++            }
++        }
++        /* An allocation failure keeps ownership in the asynchronous destructor. */
++        if (!call->stream) ember_capture_claim(&call->job);
++    }
++    else p->result = AUDCLNT_E_DEVICE_INVALIDATED;
++    ember_capture_release(&call->job);
++    return STATUS_SUCCESS;
++}
+diff --git a/dlls/winecoreaudio.drv/ember_capture_job.h b/dlls/winecoreaudio.drv/ember_capture_job.h
+new file mode 100644
+index 0000000..02cdccf
+--- /dev/null
++++ b/dlls/winecoreaudio.drv/ember_capture_job.h
+@@ -0,0 +1,91 @@
++/* LGPL-2.1-or-later. Bounded native capture transactions, micwedge2-1023.
++ * A caller and a worker each own a reference. A completion signal is not a
++ * transfer of the worker reference: it must survive signal() returning.
++ * No cancellation of CoreAudio, no stack/guest pointers in a queued job. */
++#include <dispatch/dispatch.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <time.h>
++
++struct ember_capture_job
++{
++    dispatch_semaphore_t done;
++    void (*work)(struct ember_capture_job *);
++    void (*destroy)(struct ember_capture_job *);
++    unsigned int refs;
++    int holds_gate;
++};
++static int ember_capture_busy;
++static uint64_t ember_capture_retry_ms;
++
++static uint64_t ember_capture_now_ms(void)
++{
++    struct timespec now;
++    clock_gettime(CLOCK_MONOTONIC, &now);
++    return (uint64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
++}
++
++static void ember_capture_destroy(void *ctx)
++{
++    struct ember_capture_job *job = ctx;
++    int holds_gate = job->holds_gate;
++    dispatch_semaphore_t done = job->done;
++    job->destroy(job); /* May block disposing an abandoned unit. Worker only. */
++    if (done) dispatch_release(done);
++    if (holds_gate) __atomic_store_n(&ember_capture_busy, 0, __ATOMIC_RELEASE);
++}
++
++static void ember_capture_release(struct ember_capture_job *job)
++{
++    if (__atomic_sub_fetch(&job->refs, 1, __ATOMIC_ACQ_REL) == 0)
++        dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), job, ember_capture_destroy);
++}
++
++static void ember_capture_work(void *ctx)
++{
++    struct ember_capture_job *job = ctx;
++    ember_capture_native_thread = 1;
++    job->work(job);
++    ember_capture_native_thread = 0;
++    dispatch_semaphore_signal(job->done);
++    ember_capture_release(job);
++}
++
++/* On success the caller owns the outputs until release(). On failure it must
++ * not read them. Always release the initial caller reference, even on failure.
++ * busy remains set through abandoned cleanup, bounding stuck work to one job.
++ * Successful callers detach their outputs before opening the gate. */
++static int ember_capture_run(struct ember_capture_job *job)
++{
++    int expected = 0, timeout_ms = 3000;
++    char *end;
++    const char *env = getenv("EMBER_CAPTURE_DEV_TIMEOUT_MS");
++    long value;
++    job->refs = 1;
++    if (env && *env)
++    {
++        value = strtol(env, &end, 10);
++        if (!*end && value > 0 && value <= 3000) timeout_ms = value;
++    }
++    job->done = dispatch_semaphore_create(0);
++    if (!job->done) return 0;
++    if (ember_capture_now_ms() < __atomic_load_n(&ember_capture_retry_ms, __ATOMIC_ACQUIRE) ||
++        !__atomic_compare_exchange_n(&ember_capture_busy, &expected, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
++        return 0;
++    job->holds_gate = 1;
++    __atomic_add_fetch(&job->refs, 1, __ATOMIC_RELAXED);
++    dispatch_async_f(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), job, ember_capture_work);
++    if (dispatch_semaphore_wait(job->done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)timeout_ms * 1000000)))
++    {
++        __atomic_store_n(&ember_capture_retry_ms, ember_capture_now_ms() + 30000, __ATOMIC_RELEASE);
++        return 0;
++    }
++    return 1;
++}
++
++static void ember_capture_claim(struct ember_capture_job *job)
++{
++    /* The worker has signalled and no longer accesses outputs/holds_gate. */
++    job->holds_gate = 0;
++    __atomic_store_n(&ember_capture_busy, 0, __ATOMIC_RELEASE);
++}

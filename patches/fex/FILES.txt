@@ -1,10 +1,11 @@
-# fex — base: FEX-Emu/FEX 48d7175 (+ submodules)
-# 
-# changed 61 files (new 1)
+# fex — base: FEX 48d7175 with submodules
+#
+# changed 66 files (new 1)
 M CodeEmitter/CodeEmitter/Buffer.h
 M CodeEmitter/CodeEmitter/Emitter.h
 M External/rpmalloc/rpmalloc/rpmalloc.c
 M FEXCore/Source/CMakeLists.txt
+M FEXCore/Source/Interface/Context/Context.h
 M FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
 M FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.h
 M FEXCore/Source/Interface/Core/CPUID.cpp
@@ -22,6 +23,7 @@ M FEXCore/Source/Interface/Core/JIT/JIT.cpp
 M FEXCore/Source/Interface/Core/JIT/JITClass.h
 M FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
 M FEXCore/Source/Interface/Core/JIT/MiscOps.cpp
+M FEXCore/Source/Interface/Core/LookupCache.h
 M FEXCore/Source/Interface/Core/OpcodeDispatcher/Vector.cpp
 M FEXCore/Source/Interface/Core/OpcodeDispatcher.cpp
 M FEXCore/Source/Interface/Core/OpcodeDispatcher.h
@@ -38,7 +40,9 @@ A FEXCore/include/FEXCore/Core/GuestBase.h
 M FEXCore/include/FEXCore/HLE/SyscallHandler.h
 M FEXCore/include/FEXCore/Utils/AllocatorHooks.h
 M FEXCore/include/FEXCore/Utils/LongJump.h
+M FEXCore/include/FEXCore/Utils/ThreadPoolAllocator.h
 M FEXCore/include/FEXCore/Utils/TypeDefines.h
+M FEXCore/include/FEXCore/Utils/WritePriorityMutex.h
 M Source/Windows/ARM64EC/CMakeLists.txt
 M Source/Windows/ARM64EC/Module.S
 M Source/Windows/ARM64EC/Module.cpp
@@ -56,6 +60,7 @@ M Source/Windows/Common/ImageTracker.h
 M Source/Windows/Common/InvalidationTracker.cpp
 M Source/Windows/Common/InvalidationTracker.h
 M Source/Windows/Common/JITGuardPage.h
+M Source/Windows/Common/OvercommitTracker.h
 M Source/Windows/Common/Priv.h
 M Source/Windows/Common/WinAPI/Alloc.cpp
 M Source/Windows/UnixLib/FEXUnixLib.cpp

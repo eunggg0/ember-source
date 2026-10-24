@@ -1,10 +1,16 @@
-# dxmt-winemetal — base: 3Shain/dxmt 7c8dee1 (+ submodules)
-# winemetal.so (x86_64, arm64), winemetal.dll (x86_64, arm64)
-# changed 93 files (new 37)
+# dxmt-winemetal — base: DXMT 7c8dee1 with submodules
+#
+# changed 111 files (new 47)
+M src/airconv/dxbc_converter.cpp
+M src/airconv/dxbc_instructions.cpp
+M src/airconv/nt/air_builder.cpp
+M src/d3d10/d3d10_device.cpp
 M src/d3d11/d3d11_context_def.cpp
 M src/d3d11/d3d11_context_imm.cpp
 M src/d3d11/d3d11_context_impl.cpp
 M src/d3d11/d3d11_context_state.hpp
+M src/d3d11/d3d11_device.cpp
+M src/d3d11/d3d11_multithread.hpp
 M src/d3d11/d3d11_pipeline.cpp
 M src/d3d11/d3d11_pipeline_gs.cpp
 M src/d3d11/d3d11_pipeline_ts.cpp
@@ -54,6 +60,7 @@ A src/dxmt/ember_hud_font.h
 A src/dxmt/ember_neural.cpp
 A src/dxmt/ember_neural.hpp
 M src/dxmt/meson.build
+M src/nvapi/nvapi.cpp
 M src/nvngx/nvngx.cpp
 M src/nvngx/nvngx.hpp
 M src/nvngx/nvngx_feature.hpp
@@ -61,13 +68,22 @@ M src/nvngx/nvngx_parameter.hpp
 M src/winemetal/Metal.hpp
 A src/winemetal/ember_dxil_thunks.c
 A src/winemetal/ember_dxil_thunks.h
+A src/winemetal/ember_dxil_thunks.h.pre-w3t
 A src/winemetal/ember_fg_thunks.c
 A src/winemetal/ember_fg_thunks.h
+A src/winemetal/ember_fg_thunks.h.pre-w3t
 A src/winemetal/ember_neural_thunks.c
 A src/winemetal/ember_neural_thunks.h
+A src/winemetal/ember_tessellation.h
 M src/winemetal/meson.build
+M src/winemetal/unix/cache.c
 A src/winemetal/unix/ember_dxil_unix.m
+A src/winemetal/unix/ember_dxil_unix.m.pre-w3t
 A src/winemetal/unix/ember_fg_unix.c
+A src/winemetal/unix/ember_fg_unix.ec.c
+A src/winemetal/unix/ember_fg_unix.ec.c.pre-w3t
+A src/winemetal/unix/ember_fg_unix.x64.c
+A src/winemetal/unix/ember_fg_unix.x64.c.pre-w3t
 A src/winemetal/unix/ember_neural_unix.m
 A src/winemetal/unix/ir/metal_irconverter/LICENSE.txt
 A src/winemetal/unix/ir/metal_irconverter/ir_comparison_function.h
@@ -86,8 +102,10 @@ A src/winemetal/unix/ir/metal_irconverter/ir_tessellator_partitioning.h
 A src/winemetal/unix/ir/metal_irconverter/ir_texture_address_mode.h
 A src/winemetal/unix/ir/metal_irconverter/ir_version.h
 A src/winemetal/unix/ir/metal_irconverter/metal_irconverter.h
+A src/winemetal/unix/ir/metal_irconverter_runtime/ir_tessellator_tables.h
 M src/winemetal/unix/meson.build
 M src/winemetal/unix/winemetal_unix.c
+A src/winemetal/unix/winemetal_unix.c.pre-w3t
 M src/winemetal/winemetal.h
 M src/winemetal/winemetal_thunks.c
 M src/winemetal/winemetal_thunks.h

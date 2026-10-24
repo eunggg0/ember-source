@@ -1,0 +1,2 @@
+# Patch hunk context contains meaningful space-only lines.
+*.patch -whitespace

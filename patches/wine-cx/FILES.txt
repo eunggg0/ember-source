@@ -1,6 +1,6 @@
-# wine-cx — base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
-# 
-# changed 221 files (new 11)
+# wine-cx — base: CrossOver 26.3.0 FOSS sources/wine
+#
+# changed 242 files (new 31)
 M dlls/advapi32/advapi.c
 M dlls/avifil32/avifile.c
 M dlls/bcrypt/gnutls.c
@@ -166,7 +166,10 @@ M dlls/windowscodecs/ungif.c
 M dlls/windowscodecs/ungif.h
 M dlls/winebus.sys/bus_iohid.c
 A dlls/winebus.sys/forgeplay_xbox_iohid.h
+M dlls/winecoreaudio.drv/authorization.m
 M dlls/winecoreaudio.drv/coreaudio.c
+A dlls/winecoreaudio.drv/ember_capture_adapter.h
+A dlls/winecoreaudio.drv/ember_capture_job.h
 M dlls/wined3d/adapter_vk.c
 M dlls/wined3d/context_vk.c
 M dlls/wined3d/shader_spirv.c
@@ -188,6 +191,9 @@ M dlls/winemac.drv/d3dmetal.c
 M dlls/winemac.drv/d3dmetal_objc.m
 M dlls/winemac.drv/display.c
 A dlls/winemac.drv/ember_autohdr_d3dm.h
+A dlls/winemac.drv/ember_display_link_adapter.h
+A dlls/winemac.drv/ember_fg.h
+A dlls/winemac.drv/ember_fg_display_link.h
 A dlls/winemac.drv/ember_framegen.h
 A dlls/winemac.drv/ember_framegen.m
 A dlls/winemac.drv/ember_hdr_d3dm.h
@@ -197,7 +203,22 @@ A dlls/winemac.drv/ember_neural.m
 A dlls/winemac.drv/ember_tone_load.h
 A dlls/winemac.drv/ember_upscale.h
 A dlls/winemac.drv/ember_upscale.m
+A dlls/winemac.drv/fg_ane_legacy.h
+A dlls/winemac.drv/fg_ane_smooth.h
+A dlls/winemac.drv/fg_ane_smooth_metal.h
+A dlls/winemac.drv/fg_display_link_format.h
+A dlls/winemac.drv/fg_display_link_geometry.h
+A dlls/winemac.drv/fg_display_link_metadata.h
+A dlls/winemac.drv/fg_hdr_policy.h
+A dlls/winemac.drv/fg_llfi_color.h
+A dlls/winemac.drv/fg_llfi_host_pair.h
+A dlls/winemac.drv/fg_presenter.h
+A dlls/winemac.drv/fg_presenter_metal.h
+A dlls/winemac.drv/fg_prism_cfg.h
+A dlls/winemac.drv/fg_stability.h
+A dlls/winemac.drv/fg_transport.h
 M dlls/winemac.drv/gdi.c
+A dlls/winemac.drv/keyboard_layout.h
 M dlls/winemac.drv/macdrv_cocoa.h
 M dlls/winemac.drv/macdrv_main.c
 M dlls/winemac.drv/surface.c

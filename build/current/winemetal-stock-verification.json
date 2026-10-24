@@ -1,0 +1,864 @@
+{
+  "pass": true,
+  "candidate": {
+    "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/winemetal.so",
+    "sha256": "f787852ab0032aa007659cac6c39b14f19bb5fefb3d63eaef46aad00ef2d78a4",
+    "md5": "5a4355e06af866b2a14ae9b0c1cf8d5a"
+  },
+  "exports_removed": [
+    "_ember_ane_begin",
+    "_ember_ane_cancel",
+    "_ember_ane_close",
+    "_ember_ane_height",
+    "_ember_ane_latest",
+    "_ember_ane_layout",
+    "_ember_ane_normalization",
+    "_ember_ane_open",
+    "_ember_ane_stats",
+    "_ember_ane_submit",
+    "_ember_ane_wait",
+    "_ember_ane_width"
+  ],
+  "exports_added": [],
+  "rpaths": [
+    "@loader_path/",
+    "@loader_path/../../"
+  ],
+  "compile_dependencies": [
+    {
+      "translation_unit": "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/unix/winemetal_unix.c",
+      "dependencies": [
+        {
+          "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/unix/winemetal_unix.c",
+          "sha256": "e3d459920343cbf42929e6535ac9119e2aa49efe02c9e25dc9c2a3712514ae58",
+          "in_candidate_snapshot": true
+        },
+        {
+          "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/winemetal_thunks.h",
+          "sha256": "b776803b0855d572b8e620756728c41bb59618b9b1ee931d11d1638451e0456c",
+          "in_candidate_snapshot": true
+        },
+        {
+          "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/winemetal.h",
+          "sha256": "8634865cc9ad188b6a026732cd946b2eaf5ddfc32a76f3fd952f54475622dd81",
+          "in_candidate_snapshot": true
+        },
+        {
+          "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/airconv_thunks.h",
+          "sha256": "4902be82172b93f0508ab512340906a47c276af22139b9b3c549664a5adf8fb0",
+          "in_candidate_snapshot": true
+        },
+        {
+          "path": ".refs/dxmt-src/src/airconv/airconv_public.h",
+          "sha256": "ca52f9880ce385bf3e40d9bc8d34742debe4a84c4a84bd9960275b2c888008db",
+          "in_candidate_snapshot": false
+        }
+      ]
+    },
+    {
+      "translation_unit": "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/unix/cache.c",
+      "dependencies": [
+        {
+          "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/unix/cache.c",
+          "sha256": "02400a160e9c561dfa71e618c3467b186800aacfb3d0d5ae96cfadd3b87ed597",
+          "in_candidate_snapshot": true
+        },
+        {
+          "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/winemetal_thunks.h",
+          "sha256": "b776803b0855d572b8e620756728c41bb59618b9b1ee931d11d1638451e0456c",
+          "in_candidate_snapshot": true
+        },
+        {
+          "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/winemetal.h",
+          "sha256": "8634865cc9ad188b6a026732cd946b2eaf5ddfc32a76f3fd952f54475622dd81",
+          "in_candidate_snapshot": true
+        }
+      ]
+    },
+    {
+      "translation_unit": "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/unix/ember_neural_unix.m",
+      "dependencies": [
+        {
+          "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/unix/ember_neural_unix.m",
+          "sha256": "e2dd9ea4d34335c7e6d81a0044bcf8f9b02652da46ba926e17566bd29042f777",
+          "in_candidate_snapshot": true
+        },
+        {
+          "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/winemetal_thunks.h",
+          "sha256": "b776803b0855d572b8e620756728c41bb59618b9b1ee931d11d1638451e0456c",
+          "in_candidate_snapshot": true
+        },
+        {
+          "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/winemetal.h",
+          "sha256": "8634865cc9ad188b6a026732cd946b2eaf5ddfc32a76f3fd952f54475622dd81",
+          "in_candidate_snapshot": true
+        },
+        {
+          "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/ember_neural_thunks.h",
+          "sha256": "e7672c02363940f0f6fe9c3f7589b13e4aa17c50f3ab85bb2dbb67e3157524b7",
+          "in_candidate_snapshot": true
+        }
+      ]
+    },
+    {
+      "translation_unit": "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/unix/ember_dxil_unix.m",
+      "dependencies": [
+        {
+          "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/unix/ember_dxil_unix.m",
+          "sha256": "8aa27479fe215b8d692d831e1b9201dac77312e4cf2afe51c3ef81b1cf1e2750",
+          "in_candidate_snapshot": true
+        },
+        {
+          "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/winemetal_thunks.h",
+          "sha256": "b776803b0855d572b8e620756728c41bb59618b9b1ee931d11d1638451e0456c",
+          "in_candidate_snapshot": true
+        },
+        {
+          "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/winemetal.h",
+          "sha256": "8634865cc9ad188b6a026732cd946b2eaf5ddfc32a76f3fd952f54475622dd81",
+          "in_candidate_snapshot": true
+        },
+        {
+          "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/ember_dxil_thunks.h",
+          "sha256": "534bd7369b458f830ef1d2ee6ede20174f04862e59832ff015d78f43514d36ac",
+          "in_candidate_snapshot": true
+        },
+        {
+          "path": ".refs/dxmt-src/src/winemetal/unix/ir/metal_irconverter/metal_irconverter.h",
+          "sha256": "9f91c925c216ccdaf1c12f5ffe918875c575f0fd4336d8e61875ff3f57b04e0e",
+          "in_candidate_snapshot": false
+        },
+        {
+          "path": ".refs/dxmt-src/src/winemetal/unix/ir/metal_irconverter/ir_comparison_function.h",
+          "sha256": "4c28be7de78172a636b26950c1d870ff9528008fcb45fddf4c9cfff8e345c382",
+          "in_candidate_snapshot": false
+        },
+        {
+          "path": ".refs/dxmt-src/src/winemetal/unix/ir/metal_irconverter/ir_descriptor_range_flags.h",
+          "sha256": "fb5dd9cb4887efcf0864042294fe0378e1dbca3c2cc75030916ca1d5e09a035c",
+          "in_candidate_snapshot": false
+        },
+        {
+          "path": ".refs/dxmt-src/src/winemetal/unix/ir/metal_irconverter/ir_filter.h",
+          "sha256": "1c49c699b0394b1c30f69e7e968061e7ff8f63f7199aa9937c1a9d36562e8eff",
+          "in_candidate_snapshot": false
+        },
+        {
+          "path": ".refs/dxmt-src/src/winemetal/unix/ir/metal_irconverter/ir_format.h",
+          "sha256": "a5c5dc3b4fb62d50094e249411a84d9292d9f94186942ea31faacaf8c5ea232d",
+          "in_candidate_snapshot": false
+        },
+        {
+          "path": ".refs/dxmt-src/src/winemetal/unix/ir/metal_irconverter/ir_input_classification.h",
+          "sha256": "aaed03daacc97e09e1549e0f4aea2e26c5c1ef2f00b8075bb4c13886dba7f90b",
+          "in_candidate_snapshot": false
+        },
+        {
+          "path": ".refs/dxmt-src/src/winemetal/unix/ir/metal_irconverter/ir_input_primitive.h",
+          "sha256": "5024e02b551c8d7f8e9c29d7c7e95000d46cb36e2699371f5607b390a5fee0e2",
+          "in_candidate_snapshot": false
+        },
+        {
+          "path": ".refs/dxmt-src/src/winemetal/unix/ir/metal_irconverter/ir_input_topology.h",
+          "sha256": "a9e348895d56c28dce102e6a89a44b463f69242e99adda4bcab62f5503ed769c",
+          "in_candidate_snapshot": false
+        },
+        {
+          "path": ".refs/dxmt-src/src/winemetal/unix/ir/metal_irconverter/ir_tessellator_output_primitive.h",
+          "sha256": "8d9a0f5b0bee0432ef7c4c481e6389e762ecb437d47cbf99c9f05c3c8238ae0a",
+          "in_candidate_snapshot": false
+        },
+        {
+          "path": ".refs/dxmt-src/src/winemetal/unix/ir/metal_irconverter/ir_root_descriptor_flags.h",
+          "sha256": "8a12a6978ac40709a25d0d304d3dedc0a2465d2104818ce9ac72aca92ad185ee",
+          "in_candidate_snapshot": false
+        },
+        {
+          "path": ".refs/dxmt-src/src/winemetal/unix/ir/metal_irconverter/ir_root_signature_flags.h",
+          "sha256": "b831373e53a245e6fdc1270b990224d15096c49d4d8090b4858c962efe9392f2",
+          "in_candidate_snapshot": false
+        },
+        {
+          "path": ".refs/dxmt-src/src/winemetal/unix/ir/metal_irconverter/ir_shader_visibility.h",
+          "sha256": "afc564b04bce32b2ef8784acaf08a9b5a79e2f70ad883f7d368c4fa695e7501e",
+          "in_candidate_snapshot": false
+        },
+        {
+          "path": ".refs/dxmt-src/src/winemetal/unix/ir/metal_irconverter/ir_tessellator_domain.h",
+          "sha256": "c92ee473bb141ce882e855aa76446d846317aad81d915401fbdeaca93c633cb1",
+          "in_candidate_snapshot": false
+        },
+        {
+          "path": ".refs/dxmt-src/src/winemetal/unix/ir/metal_irconverter/ir_tessellator_partitioning.h",
+          "sha256": "3dbdf5dcb68a17267e6cdeabda9287d88d0485262831af80b5266dfa379539cc",
+          "in_candidate_snapshot": false
+        },
+        {
+          "path": ".refs/dxmt-src/src/winemetal/unix/ir/metal_irconverter/ir_texture_address_mode.h",
+          "sha256": "7f4539f270127323290d62beda0cea774a37e47de7cc1e6e11f879a955811cdc",
+          "in_candidate_snapshot": false
+        },
+        {
+          "path": ".refs/dxmt-src/src/winemetal/unix/ir/metal_irconverter/ir_version.h",
+          "sha256": "1eee4f4ae4a56b972bef71064cd40283f9484184d864fa70f5b6f16db61875e7",
+          "in_candidate_snapshot": false
+        }
+      ]
+    }
+  ],
+  "explicit_link_inputs": [
+    {
+      "path": "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/obj/winemetal_unix.c.o",
+      "sha256": "c09645bb81a6084352470f2d6627ec7e31ab5f1184d103c85093015fbc7260b2",
+      "bytes": 143800
+    },
+    {
+      "path": "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/obj/cache.c.o",
+      "sha256": "709569824c3c224294771c98aeb28b0c665bf7b0909dab5c15a102148af2a7bd",
+      "bytes": 13944
+    },
+    {
+      "path": "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/obj/ember_neural_unix.m.o",
+      "sha256": "34d9a7b355f913b35015bd9a14facf6be7c199f264cedcb018ce595951814f43",
+      "bytes": 5256
+    },
+    {
+      "path": "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/obj/ember_dxil_unix.m.o",
+      "sha256": "010b5b4574d7770149fb0b0e5539fc112ca4baf079e1f38163272af11c2bd1e7",
+      "bytes": 40344
+    },
+    {
+      "path": "${WORKSPACE}/.refs/dxmt-src/build-x64/src/airconv/darwin/libairconv.a",
+      "sha256": "32c5e5578854d8e1d99c890aa68a89596f2e7715582c9891f4aca843fe780158",
+      "bytes": 3736576
+    },
+    {
+      "path": "${WORKSPACE}/.refs/dxmt-src/build-x64/libs/DXBCParser/libDXBCParserNative.a",
+      "sha256": "d8a83683785d72997a21d74a26cc05436fbf63f58b000017f741eb54997996c6",
+      "bytes": 53600
+    },
+    {
+      "path": "${WORKSPACE}/.refs/wine-11.0-x64/build3/dlls/winemac.drv/winemac.so",
+      "sha256": "8e410ab2680d28a819f7264c23dd2e50b784e444f436c68724539eafc2b3cb71",
+      "bytes": 547248
+    },
+    {
+      "path": "${WORKSPACE}/.refs/wine-11.0-x64/build3/dlls/ntdll/ntdll.so",
+      "sha256": "0fdd4b7d9397514dfd9c2bbaa44152e2c35073b25c639da04d2536ed4dab8807",
+      "bytes": 663568
+    }
+  ],
+  "non_system_link_libraries": [
+    {
+      "link_flag": "-lsqlite3",
+      "resolved_non_system": []
+    },
+    {
+      "link_flag": "-lm",
+      "resolved_non_system": []
+    },
+    {
+      "link_flag": "-lz",
+      "resolved_non_system": []
+    },
+    {
+      "link_flag": "-lcurses",
+      "resolved_non_system": []
+    },
+    {
+      "link_flag": "-lxml2",
+      "resolved_non_system": []
+    },
+    {
+      "link_flag": "-lLLVMPasses",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMPasses.a",
+          "sha256": "c0bd799db79c1d761d9f1ac596aa609aac060b9db1cb39b0481b5891d0de2581",
+          "bytes": 4619520
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMTarget",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMTarget.a",
+          "sha256": "0802d077bf00f40003fcd48b1304a2af49f5df1a880967ae6a1f69c5fa207cb4",
+          "bytes": 91936
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMObjCARCOpts",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMObjCARCOpts.a",
+          "sha256": "1aa233024959b84611e0aadce1f39d7d36aa559e427874b7424413b9f42cd080",
+          "bytes": 531896
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMCoroutines",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMCoroutines.a",
+          "sha256": "93cc2fe17fceabaafd454ccc4ca9404f1e1338ed9282f83fa9afe899e45d814d",
+          "bytes": 918840
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMipo",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMipo.a",
+          "sha256": "f5154ecee35dfb9d1a711805a2a405c96fadb1597555a10ee8abb9486cdd934f",
+          "bytes": 8439256
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMInstrumentation",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMInstrumentation.a",
+          "sha256": "385aebf93cea7e7b0e2b8f14fbab70aeff1dd4beacb771b94ded4883387209c9",
+          "bytes": 3127568
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMVectorize",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMVectorize.a",
+          "sha256": "7e6e7319c91a98a75564eb6d94b425982ca9748650c2ff65fa39ef93ecf82f96",
+          "bytes": 4927504
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMLinker",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMLinker.a",
+          "sha256": "4f79c34b7eb5a0dd3c84407a94bd55011da5a233fee9667e2f83063de5a6765b",
+          "bytes": 312464
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMIRReader",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMIRReader.a",
+          "sha256": "1d3cf5d858c08dceea351823ed29b3718c86af1d9fea80ee4d48ec1d174f56d0",
+          "bytes": 27584
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMAsmParser",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMAsmParser.a",
+          "sha256": "28e97048fb9ab5e124899d0fd46d6aad072e1fa9fd29c89b2c1746bec2604383",
+          "bytes": 773216
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMFrontendOpenMP",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMFrontendOpenMP.a",
+          "sha256": "f1fa7c86ec6cbcb934c044629a6e6974cc2d6bd9cf5eb95e63c7d6f884e8be80",
+          "bytes": 854344
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMScalarOpts",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMScalarOpts.a",
+          "sha256": "a04476cb0a93f9fe80944e063be220c45908be41783cf1f34f1cda9c2c9195ef",
+          "bytes": 13035376
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMInstCombine",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMInstCombine.a",
+          "sha256": "dd6f7088c968c59d3e57112f94c0a59d4c07b8f78c156b07ac874f1beeb4eb98",
+          "bytes": 6790504
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMAggressiveInstCombine",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMAggressiveInstCombine.a",
+          "sha256": "e129757a80c410706a3a121fb434bb251267045ae2ea02d616f6644ef9dc8052",
+          "bytes": 305792
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMTransformUtils",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMTransformUtils.a",
+          "sha256": "2cbcd6034ce6a436b2f8ce65be7ca96709f83a65e680e43c1b07090d99a1fbf0",
+          "bytes": 8191320
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMBitWriter",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMBitWriter.a",
+          "sha256": "32f8bd54c408156cb87b0af0e1f09c4d794798e9641deafbee0fa0c9ebbdeaba",
+          "bytes": 975232
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMAnalysis",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMAnalysis.a",
+          "sha256": "d5dae1ad380b2f774118a63513580ee47be9ad49f13aa69cc56e16aa63f558bb",
+          "bytes": 14682376
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMProfileData",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMProfileData.a",
+          "sha256": "e57e796759650d6e9f4ac91774c00d67eaf27faee1686830325caf5687494e7b",
+          "bytes": 1433528
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMSymbolize",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMSymbolize.a",
+          "sha256": "fcea00eab4efe07d052e5357bc9a2bc794d85ba071071c242a13e1e4ecbd758a",
+          "bytes": 395576
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMDebugInfoPDB",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMDebugInfoPDB.a",
+          "sha256": "dd9766cc00d29ec95a99a322a6061ee6c9ad35d482f88098b26ce07f937347b4",
+          "bytes": 2301952
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMDebugInfoMSF",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMDebugInfoMSF.a",
+          "sha256": "7b18eb02dee4b7f7444e1723817278f14cc35bf8dc34892f5d252aae58b8a4a0",
+          "bytes": 138576
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMDebugInfoDWARF",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMDebugInfoDWARF.a",
+          "sha256": "e50b3c8193ea98988714debd6f5e21e4315d881f13aa67ce50794dc0de1561fe",
+          "bytes": 1595360
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMObject",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMObject.a",
+          "sha256": "24389eaaa60a699b8e4737f1d6f852a972e2f67ef2ce390cbf5e18fae6e86d69",
+          "bytes": 3435328
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMTextAPI",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMTextAPI.a",
+          "sha256": "3cd1ad05f37956d3d0eeb0b667e9cdce1ef0b9bf9663c363382d3e73ae753f99",
+          "bytes": 293848
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMMCParser",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMMCParser.a",
+          "sha256": "4d06cbe6b89e33914b8a25b258be3f6217805283268d728df5923ef925ec2e42",
+          "bytes": 1070616
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMMC",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMMC.a",
+          "sha256": "c61077639892ab0f197bc2eb5fce549ef467b552e53830070fd4bb75b5331bc3",
+          "bytes": 2329848
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMDebugInfoCodeView",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMDebugInfoCodeView.a",
+          "sha256": "9a5d3e96a9137fa420cff154ccfbbf3e4a9eb89e45da0a5435a38e8907bce0c1",
+          "bytes": 1440256
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMBitReader",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMBitReader.a",
+          "sha256": "063a7da78335559b39827b7ffabd32c57feed0669adac1fcb09b950db36eb00c",
+          "bytes": 1215480
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMCore",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMCore.a",
+          "sha256": "d5be68bebf15c34f9d0824e37087f047374be03df5506debe1345fc4fda90dad",
+          "bytes": 10059128
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMRemarks",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMRemarks.a",
+          "sha256": "a33c93144a02f18204ee2ca902e2ca41ffbfcd7843edacea84a959d57862c240",
+          "bytes": 424624
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMBitstreamReader",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMBitstreamReader.a",
+          "sha256": "323ee4d70192eebc708abdafd625b7eb0d38461d2198bd7339d4c523c87211e1",
+          "bytes": 76192
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMBinaryFormat",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMBinaryFormat.a",
+          "sha256": "3e462ec19b9ed170e1782ceabc588175be833e4632347c1cf430a3c98a385221",
+          "bytes": 255200
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMSupport",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMSupport.a",
+          "sha256": "be1bdcc5fde009f0c590d52f20e9111ac6b460bd9d251a8601946a0c389c3cb0",
+          "bytes": 4721080
+        }
+      ]
+    },
+    {
+      "link_flag": "-lLLVMDemangle",
+      "resolved_non_system": [
+        {
+          "path": "${WORKSPACE}/.toolchains/llvm-darwin/lib/libLLVMDemangle.a",
+          "sha256": "1cb0c6614fbce9a9623b040735191f22a7964f87c859d958c9a63c5b2fe1d065",
+          "bytes": 511104
+        }
+      ]
+    }
+  ],
+  "candidate_source_manifest": [
+    {
+      "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/Metal.hpp",
+      "sha256": "b29ec37015b7ce242b71bf6b4c8ae0774ff5f065f7ad652ebec0a7b09df8c058"
+    },
+    {
+      "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/airconv_thunks.h",
+      "sha256": "4902be82172b93f0508ab512340906a47c276af22139b9b3c549664a5adf8fb0"
+    },
+    {
+      "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/ember_dxil_thunks.h",
+      "sha256": "534bd7369b458f830ef1d2ee6ede20174f04862e59832ff015d78f43514d36ac"
+    },
+    {
+      "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/ember_fg_thunks.h",
+      "sha256": "792964f50053c4a85f1468ced7ac2b714db4aab5f9498e5f47d8236d0246bd6f"
+    },
+    {
+      "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/ember_neural_thunks.h",
+      "sha256": "e7672c02363940f0f6fe9c3f7589b13e4aa17c50f3ab85bb2dbb67e3157524b7"
+    },
+    {
+      "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/unix/cache.c",
+      "sha256": "02400a160e9c561dfa71e618c3467b186800aacfb3d0d5ae96cfadd3b87ed597"
+    },
+    {
+      "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/unix/ember_dxil_unix.m",
+      "sha256": "8aa27479fe215b8d692d831e1b9201dac77312e4cf2afe51c3ef81b1cf1e2750"
+    },
+    {
+      "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/unix/ember_neural_unix.m",
+      "sha256": "e2dd9ea4d34335c7e6d81a0044bcf8f9b02652da46ba926e17566bd29042f777"
+    },
+    {
+      "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/unix/winemetal_unix.c",
+      "sha256": "e3d459920343cbf42929e6535ac9119e2aa49efe02c9e25dc9c2a3712514ae58"
+    },
+    {
+      "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/winemetal.h",
+      "sha256": "8634865cc9ad188b6a026732cd946b2eaf5ddfc32a76f3fd952f54475622dd81"
+    },
+    {
+      "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/winemetal_thunks.h",
+      "sha256": "b776803b0855d572b8e620756728c41bb59618b9b1ee931d11d1638451e0456c"
+    },
+    {
+      "path": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/wineunixlib.h",
+      "sha256": "a2a7403b0347dc7ad329ef6cea08e4c6f52d02dddc8939079904e5ea1eda6a9c"
+    }
+  ],
+  "command_results": [
+    {
+      "command": [
+        "cc",
+        "-Isrc/winemetal/unix/winemetal.so.p",
+        "-Isrc/winemetal/unix",
+        "-I../src/winemetal/unix",
+        "-I../include",
+        "-Ilibs",
+        "-I../libs",
+        "-Isrc/airconv",
+        "-I../src/airconv",
+        "-fdiagnostics-color=always",
+        "-DNDEBUG",
+        "-Wall",
+        "-Winvalid-pch",
+        "-Wextra",
+        "-O3",
+        "-Wimplicit-fallthrough",
+        "-Wno-unused-parameter",
+        "-Wno-unused-private-field",
+        "-Wno-unused-const-variable",
+        "-Wno-missing-braces",
+        "-fblocks",
+        "-arch",
+        "x86_64",
+        "-mmacosx-version-min=10.15",
+        "-ObjC",
+        "-o",
+        "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/tmp/dep-0.out",
+        "-c",
+        "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/unix/winemetal_unix.c",
+        "-M",
+        "-MF",
+        "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/tmp/dep-0.d"
+      ],
+      "exit_status": 0,
+      "stderr": "clang: \u001b[0;1;35mwarning: \u001b[0m\u001b[1margument unused during compilation: '-c' [-Wunused-command-line-argument]\u001b[0m\n"
+    },
+    {
+      "command": [
+        "cc",
+        "-Isrc/winemetal/unix/winemetal.so.p",
+        "-Isrc/winemetal/unix",
+        "-I../src/winemetal/unix",
+        "-I../include",
+        "-Ilibs",
+        "-I../libs",
+        "-Isrc/airconv",
+        "-I../src/airconv",
+        "-fdiagnostics-color=always",
+        "-DNDEBUG",
+        "-Wall",
+        "-Winvalid-pch",
+        "-Wextra",
+        "-O3",
+        "-Wimplicit-fallthrough",
+        "-Wno-unused-parameter",
+        "-Wno-unused-private-field",
+        "-Wno-unused-const-variable",
+        "-Wno-missing-braces",
+        "-fblocks",
+        "-arch",
+        "x86_64",
+        "-mmacosx-version-min=10.15",
+        "-ObjC",
+        "-o",
+        "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/tmp/dep-1.out",
+        "-c",
+        "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/unix/cache.c",
+        "-M",
+        "-MF",
+        "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/tmp/dep-1.d"
+      ],
+      "exit_status": 0,
+      "stderr": "clang: \u001b[0;1;35mwarning: \u001b[0m\u001b[1margument unused during compilation: '-c' [-Wunused-command-line-argument]\u001b[0m\n"
+    },
+    {
+      "command": [
+        "/usr/bin/cc",
+        "-Isrc/winemetal/unix/winemetal.so.p",
+        "-Isrc/winemetal/unix",
+        "-I../src/winemetal/unix",
+        "-I../include",
+        "-Ilibs",
+        "-I../libs",
+        "-Isrc/airconv",
+        "-I../src/airconv",
+        "-fdiagnostics-color=always",
+        "-DNDEBUG",
+        "-Wall",
+        "-Winvalid-pch",
+        "-Wextra",
+        "-O3",
+        "-mmacosx-version-min=10.15",
+        "-arch",
+        "x86_64",
+        "-o",
+        "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/tmp/dep-2.out",
+        "-c",
+        "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/unix/ember_neural_unix.m",
+        "-M",
+        "-MF",
+        "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/tmp/dep-2.d"
+      ],
+      "exit_status": 0,
+      "stderr": "clang: \u001b[0;1;35mwarning: \u001b[0m\u001b[1margument unused during compilation: '-c' [-Wunused-command-line-argument]\u001b[0m\n"
+    },
+    {
+      "command": [
+        "/usr/bin/cc",
+        "-Isrc/winemetal/unix/winemetal.so.p",
+        "-Isrc/winemetal/unix",
+        "-I../src/winemetal/unix",
+        "-I../include",
+        "-Ilibs",
+        "-I../libs",
+        "-Isrc/airconv",
+        "-I../src/airconv",
+        "-fdiagnostics-color=always",
+        "-DNDEBUG",
+        "-Wall",
+        "-Winvalid-pch",
+        "-Wextra",
+        "-O3",
+        "-mmacosx-version-min=10.15",
+        "-arch",
+        "x86_64",
+        "-o",
+        "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/tmp/dep-3.out",
+        "-c",
+        "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal/unix/ember_dxil_unix.m",
+        "-M",
+        "-MF",
+        "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/tmp/dep-3.d"
+      ],
+      "exit_status": 0,
+      "stderr": "clang: \u001b[0;1;35mwarning: \u001b[0m\u001b[1margument unused during compilation: '-c' [-Wunused-command-line-argument]\u001b[0m\n"
+    },
+    {
+      "command": [
+        "nm",
+        "-gU",
+        "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/baseline/winemetal.so"
+      ],
+      "exit_status": 0,
+      "stderr": ""
+    },
+    {
+      "command": [
+        "nm",
+        "-gU",
+        "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/winemetal.so"
+      ],
+      "exit_status": 0,
+      "stderr": ""
+    },
+    {
+      "command": [
+        "otool",
+        "-l",
+        "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/winemetal.so"
+      ],
+      "exit_status": 0,
+      "stderr": ""
+    },
+    {
+      "command": [
+        "codesign",
+        "--verify",
+        "--strict",
+        "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/winemetal.so"
+      ],
+      "exit_status": 0,
+      "stderr": ""
+    },
+    {
+      "command": [
+        "nm",
+        "-U",
+        "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/winemetal.so"
+      ],
+      "exit_status": 0,
+      "stderr": ""
+    },
+    {
+      "command": [
+        "nm",
+        "-u",
+        "${WORKSPACE}/Tools/dev/srcpub-1024/module-audit/winemetal-noane/winemetal.so"
+      ],
+      "exit_status": 0,
+      "stderr": ""
+    }
+  ],
+  "limitations": [
+    "Static archives are reused read-only from original recipe; complete source-to-object replay of those archives was not performed.",
+    "Baseline source recovery replay has different hash from archived/installed baseline; candidate is independently compiled from the recorded source closure and preserves public API except removed worker implementation exports.",
+    "No installed or candidate Wine/winemetal binary is executed. CPU tests use standalone mock bridge harness only."
+  ],
+  "path_convention": "Historical evidence paths use ${WORKSPACE}; not bundled dependencies. System toolchain paths are historical identifiers."
+}

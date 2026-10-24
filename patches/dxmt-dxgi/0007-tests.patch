@@ -1,7 +1,7 @@
 From: Ember <ember@users.noreply.github.com>
 Subject: [PATCH 7/7] tests: Ember changes
 
-Base: 3Shain/dxmt 7c8dee1 (+ submodules)
+Base: DXMT 7c8dee1 with submodules; retained verified DXGI lineage
 License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
 ---
 diff --git a/tests/meson.build b/tests/meson.build

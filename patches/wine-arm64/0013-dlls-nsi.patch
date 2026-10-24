@@ -1,0 +1,186 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 13/36] dlls-nsi: Ember changes
+
+Base: Wine 11.18
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/nsi/nsi.c b/dlls/nsi/nsi.c
+index 14be842..b1a1260 100644
+--- a/dlls/nsi/nsi.c
++++ b/dlls/nsi/nsi.c
+@@ -161,6 +161,102 @@ DWORD WINAPI NsiEnumerateObjectsAllParameters( DWORD unk, DWORD unk2, const NPI_
+     return err;
+ }
+ 
++/* Ember: nsiproxy 조회 결과 짧은 캐시.
++ * 게임은 어댑터·인터페이스 표를 프레임마다 다시 읽곤 한다. 매번 nsiproxy 드라이버(winedevice)로 IRP 를 보내면
++ * wineserver 왕복이 두 번씩 들고, 실측(2026-09-24 로아 FEX)으로 wineserver 시간의 30% 가 이 ioctl 이었다.
++ * 같은 요청(ioctl 코드 + 입력 바이트 + 출력 크기)은 잠깐(기본 250ms, WINE_NSI_CACHE_MS 로 조절, 0 이면 끔)
++ * 이전 답을 돌려준다. */
++#define NSI_CACHE_SLOTS 256   /* 32 칸은 키가 많은 조회(연결별 등)에서 계속 밀려났다: 1초로 늘려도 초당 120회 그대로(실측) */
++static struct nsi_cache_entry
++{
++    DWORD  code;
++    BYTE  *in;
++    DWORD  in_size;
++    BYTE  *out;
++    DWORD  out_size;
++    DWORD  received;
++    DWORD  err;
++    ULONGLONG when;
++} nsi_cache[NSI_CACHE_SLOTS];
++static CRITICAL_SECTION nsi_cache_cs;
++static CRITICAL_SECTION_DEBUG nsi_cache_cs_debug =
++{
++    0, 0, &nsi_cache_cs,
++    { &nsi_cache_cs_debug.ProcessLocksList, &nsi_cache_cs_debug.ProcessLocksList },
++      0, 0, { (DWORD_PTR)(__FILE__ ": nsi_cache_cs") }
++};
++static CRITICAL_SECTION nsi_cache_cs = { &nsi_cache_cs_debug, -1, 0, 0, 0, 0 };
++
++static DWORD nsi_cache_ttl_ms(void)
++{
++    static DWORD ttl = ~0u;
++    if (ttl == ~0u)
++    {
++        WCHAR buf[16];
++        ttl = 250;
++        if (GetEnvironmentVariableW( L"WINE_NSI_CACHE_MS", buf, ARRAY_SIZE(buf) )) ttl = wcstoul( buf, NULL, 10 );
++    }
++    return ttl;
++}
++
++/* 캐시에 있으면 out 을 채우고 1 */
++static int nsi_cache_lookup( DWORD code, const void *in, DWORD in_size, BYTE *out, DWORD out_size,
++                             DWORD *received, DWORD *err )
++{
++    DWORD ttl = nsi_cache_ttl_ms();
++    ULONGLONG now;
++    int i, hit = 0;
++
++    if (!ttl) return 0;
++    now = GetTickCount64();
++    EnterCriticalSection( &nsi_cache_cs );
++    for (i = 0; i < NSI_CACHE_SLOTS; i++)
++    {
++        struct nsi_cache_entry *e = &nsi_cache[i];
++        if (!e->out || e->code != code || now - e->when > ttl) continue;
++        if (e->in_size != in_size || e->out_size != out_size || memcmp( e->in, in, in_size )) continue;
++        memcpy( out, e->out, e->received );
++        *received = e->received;
++        *err = e->err;
++        hit = 1;
++        break;
++    }
++    LeaveCriticalSection( &nsi_cache_cs );
++    return hit;
++}
++
++static void nsi_cache_store( DWORD code, const void *in, DWORD in_size, const BYTE *out, DWORD out_size,
++                             DWORD received, DWORD err )
++{
++    ULONGLONG now = GetTickCount64();
++    struct nsi_cache_entry *victim = &nsi_cache[0];
++    int i;
++
++    if (!nsi_cache_ttl_ms() || received > out_size || in_size > 4096 || out_size > 262144) return;
++    EnterCriticalSection( &nsi_cache_cs );
++    for (i = 0; i < NSI_CACHE_SLOTS; i++)
++    {
++        struct nsi_cache_entry *e = &nsi_cache[i];
++        if (e->out && e->code == code && e->in_size == in_size && e->out_size == out_size &&
++            !memcmp( e->in, in, in_size )) { victim = e; break; }
++        if (!e->out) { victim = e; break; }
++        if (e->when < victim->when) victim = e;
++    }
++    if (!victim->out || victim->out_size != out_size) { free( victim->out ); victim->out = malloc( out_size ); victim->out_size = out_size; }
++    if (!victim->in || victim->in_size != in_size) { free( victim->in ); victim->in = malloc( in_size ); victim->in_size = in_size; }
++    if (victim->out && victim->in)
++    {
++        memcpy( victim->out, out, received );
++        memcpy( victim->in, in, in_size );
++        victim->code = code;
++        victim->received = received;
++        victim->err = err;
++        victim->when = now;
++    }
++    else { free( victim->out ); free( victim->in ); victim->out = victim->in = NULL; }
++    LeaveCriticalSection( &nsi_cache_cs );
++}
++
+ DWORD WINAPI NsiEnumerateObjectsAllParametersEx( struct nsi_enumerate_all_ex *params )
+ {
+     DWORD out_size, received, err = ERROR_SUCCESS;
+@@ -176,6 +272,7 @@ DWORD WINAPI NsiEnumerateObjectsAllParametersEx( struct nsi_enumerate_all_ex *pa
+     out = malloc( out_size );
+     if (!out) return ERROR_OUTOFMEMORY;
+ 
++    memset( &in, 0, sizeof(in) );
+     in.module = *params->module;
+     in.first_arg = params->first_arg;
+     in.second_arg = params->second_arg;
+@@ -186,8 +283,13 @@ DWORD WINAPI NsiEnumerateObjectsAllParametersEx( struct nsi_enumerate_all_ex *pa
+     in.static_size = params->static_size;
+     in.count = params->count;
+ 
+-    if (!DeviceIoControl( device, IOCTL_NSIPROXY_WINE_ENUMERATE_ALL, &in, sizeof(in), out, out_size, &received, NULL ))
+-        err = GetLastError();
++    if (!nsi_cache_lookup( IOCTL_NSIPROXY_WINE_ENUMERATE_ALL, &in, sizeof(in), out, out_size, &received, &err ))
++    {
++        if (!DeviceIoControl( device, IOCTL_NSIPROXY_WINE_ENUMERATE_ALL, &in, sizeof(in), out, out_size, &received, NULL ))
++            err = GetLastError();
++        if (err == ERROR_SUCCESS || err == ERROR_MORE_DATA)
++            nsi_cache_store( IOCTL_NSIPROXY_WINE_ENUMERATE_ALL, &in, sizeof(in), out, out_size, received, err );
++    }
+     if (err == ERROR_SUCCESS || err == ERROR_MORE_DATA)
+     {
+         params->count = *(DWORD *)out;
+@@ -261,6 +363,7 @@ DWORD WINAPI NsiGetAllParametersEx( struct nsi_get_all_parameters_ex *params )
+         goto err;
+     }
+ 
++    memset( in, 0, in_size );
+     in->module = *params->module;
+     in->first_arg = params->first_arg;
+     in->table = params->table;
+@@ -270,8 +373,13 @@ DWORD WINAPI NsiGetAllParametersEx( struct nsi_get_all_parameters_ex *params )
+     in->static_size = params->static_size;
+     memcpy( in->key, params->key, params->key_size );
+ 
+-    if (!DeviceIoControl( device, IOCTL_NSIPROXY_WINE_GET_ALL_PARAMETERS, in, in_size, out, out_size, &received, NULL ))
+-        err = GetLastError();
++    if (!nsi_cache_lookup( IOCTL_NSIPROXY_WINE_GET_ALL_PARAMETERS, in, in_size, out, out_size, &received, &err ))
++    {
++        if (!DeviceIoControl( device, IOCTL_NSIPROXY_WINE_GET_ALL_PARAMETERS, in, in_size, out, out_size, &received, NULL ))
++            err = GetLastError();
++        if (err == ERROR_SUCCESS)
++            nsi_cache_store( IOCTL_NSIPROXY_WINE_GET_ALL_PARAMETERS, in, in_size, out, out_size, received, err );
++    }
+     if (err == ERROR_SUCCESS)
+     {
+         ptr = out;
+@@ -322,6 +430,7 @@ DWORD WINAPI NsiGetParameterEx( struct nsi_get_parameter_ex *params )
+ 
+     in = malloc( in_size );
+     if (!in) return ERROR_OUTOFMEMORY;
++    memset( in, 0, in_size );
+     in->module = *params->module;
+     in->first_arg = params->first_arg;
+     in->table = params->table;
+@@ -330,8 +439,14 @@ DWORD WINAPI NsiGetParameterEx( struct nsi_get_parameter_ex *params )
+     in->data_offset = params->data_offset;
+     memcpy( in->key, params->key, params->key_size );
+ 
+-    if (!DeviceIoControl( device, IOCTL_NSIPROXY_WINE_GET_PARAMETER, in, in_size, params->data, params->data_size, &received, NULL ))
+-        err = GetLastError();
++    /* 실측(2026-09-24 로아 FEX): 이 ioctl 이 5초에 16,261번(초당 3천 번) 나갔다. 같은 캐시로 막는다. */
++    if (!nsi_cache_lookup( IOCTL_NSIPROXY_WINE_GET_PARAMETER, in, in_size, params->data, params->data_size, &received, &err ))
++    {
++        if (!DeviceIoControl( device, IOCTL_NSIPROXY_WINE_GET_PARAMETER, in, in_size, params->data, params->data_size, &received, NULL ))
++            err = GetLastError();
++        if (err == ERROR_SUCCESS)
++            nsi_cache_store( IOCTL_NSIPROXY_WINE_GET_PARAMETER, in, in_size, params->data, params->data_size, received, err );
++    }
+ 
+     free( in );
+     return err;

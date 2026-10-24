@@ -1,0 +1,71 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 33/36] loader: Ember changes
+
+Base: Wine 11.18
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/loader/main.c b/loader/main.c
+index f8b113f..14a1cc6 100644
+--- a/loader/main.c
++++ b/loader/main.c
+@@ -74,6 +74,29 @@ static void init_reserved_areas(void)
+     }
+ }
+ 
++#elif defined(__APPLE__) && defined(__aarch64__)
++
++/* Ember(10-16 fexres): ARM64 macOS 에는 preloader 가 없고 로더가 4GB 위 아무 것도 예약하지 않아, 시동 때 macOS 할당기(xzone
++ * malloc 메타데이터 등)가 0x1_4000_0000 근처에 놓이면 재배치 정보 없는 64비트 exe(기본 0x140000000, 예: 스텔라 블레이드
++ * 0x140000000-0x153a43000)가 "failed to create main module … c0000018" 로 가끔 못 떴다. x86_64 처럼 zero-fill 구역으로
++ * 시스템 프레임워크보다 먼저 자리를 잡는다. PIE 라 로더와 함께 미끄러지므로(수십 MB) 공유 영역(0x180000000) 아래에 들도록
++ * 크기를 0x58000000 으로 둔다 → 대략 0x1_0001_0000+slide … 0x1_5801_0000+slide. */
++__asm__(".zerofill WINE_RESERVE,WINE_RESERVE");
++static char __wine_reserve[0x58000000] __attribute__((section("WINE_RESERVE, WINE_RESERVE"), aligned(0x10000)));
++
++static const struct wine_preload_info preload_info[] =
++{
++    { __wine_reserve, sizeof(__wine_reserve) },
++    { 0, 0 }
++};
++
++const __attribute((visibility("default"))) struct wine_preload_info *wine_main_preload_info = preload_info;
++
++static void init_reserved_areas(void)
++{
++    mmap( __wine_reserve, sizeof(__wine_reserve), PROT_NONE, MAP_FIXED | MAP_NORESERVE | MAP_PRIVATE | MAP_ANON, -1, 0 );
++}
++
+ #else
+ 
+ /* the preloader will set this variable */
+diff --git a/loader/wine.inf.in b/loader/wine.inf.in
+index 965d3b2..08a8c84 100644
+--- a/loader/wine.inf.in
++++ b/loader/wine.inf.in
+@@ -896,6 +896,26 @@ system.ini, drivers32,,"vidc.mrle=msrle32.dll"
+ system.ini, drivers32,,"vidc.msvc=msvidc32.dll"
+ system.ini, drivers32,,"vidc.cvid=iccvid.dll"
+ system.ini, drivers32,,"vidc.IV50=ir50_32.dll"
++system.ini, drivers32,,"vidc.MJPG=ir50_32.dll"
++system.ini, drivers32,,"vidc.AVRN=ir50_32.dll"
++system.ini, drivers32,,"vidc.AVDJ=ir50_32.dll"
++system.ini, drivers32,,"vidc.DMB1=ir50_32.dll"
++system.ini, drivers32,,"vidc.MPG4=ir50_32.dll"
++system.ini, drivers32,,"vidc.MP41=ir50_32.dll"
++system.ini, drivers32,,"vidc.MP42=ir50_32.dll"
++system.ini, drivers32,,"vidc.MP43=ir50_32.dll"
++system.ini, drivers32,,"vidc.DIV3=ir50_32.dll"
++system.ini, drivers32,,"vidc.DIV4=ir50_32.dll"
++system.ini, drivers32,,"vidc.MPG3=ir50_32.dll"
++system.ini, drivers32,,"vidc.DIVX=ir50_32.dll"
++system.ini, drivers32,,"vidc.DX50=ir50_32.dll"
++system.ini, drivers32,,"vidc.XVID=ir50_32.dll"
++system.ini, drivers32,,"vidc.FMP4=ir50_32.dll"
++system.ini, drivers32,,"vidc.MP4V=ir50_32.dll"
++system.ini, drivers32,,"vidc.M4S2=ir50_32.dll"
++system.ini, drivers32,,"vidc.MP4S=ir50_32.dll"
++system.ini, drivers32,,"vidc.3IV2=ir50_32.dll"
++system.ini, drivers32,,"vidc.DIV5=ir50_32.dll"
+ system.ini, drivers32,,"vidc.i420=iyuv_32.dll"
+ system.ini, drivers32,,"vidc.iyuv=iyuv_32.dll"
+ system.ini, drivers32,,"; vidc.IV31=ir32_32.dll"

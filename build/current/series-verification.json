@@ -1,0 +1,82 @@
+[
+  {
+    "name": "wine-cx",
+    "archive_sha256": "ac99c8ca4b3848f3e81784135f023df266b61c2345726ea55a50b3e030dd6872",
+    "patches": 74,
+    "files": 11097,
+    "differences": [],
+    "passed": true
+  },
+  {
+    "name": "wine-arm64",
+    "archive_sha256": "c6282f6d4daecf11f3ab9f9a2b6c598f67be7e28c363ba2cae8a3c44b611e7a4",
+    "patches": 36,
+    "files": 12445,
+    "differences": [],
+    "passed": true
+  },
+  {
+    "name": "wine-x64",
+    "archive_sha256": "c07a6857933c1fc60dff5448d79f39c92481c1e9db5aa628db9d0358446e0701",
+    "patches": 12,
+    "files": 11050,
+    "differences": [],
+    "passed": true
+  },
+  {
+    "name": "dxmt-d3d11",
+    "archive_sha256": "2118ca72c6592cfce8378cf5e671b92321751f588deba33e9368a215c78e57ac",
+    "patches": 12,
+    "files": 517,
+    "differences": [],
+    "passed": true
+  },
+  {
+    "name": "dxmt-d3d12",
+    "archive_sha256": "2118ca72c6592cfce8378cf5e671b92321751f588deba33e9368a215c78e57ac",
+    "patches": 10,
+    "files": 516,
+    "differences": [],
+    "passed": true
+  },
+  {
+    "name": "dxmt-winemetal",
+    "archive_sha256": "2118ca72c6592cfce8378cf5e671b92321751f588deba33e9368a215c78e57ac",
+    "patches": 10,
+    "files": 519,
+    "differences": [],
+    "passed": true
+  },
+  {
+    "name": "dxmt-dxgi",
+    "archive_sha256": "2118ca72c6592cfce8378cf5e671b92321751f588deba33e9368a215c78e57ac",
+    "patches": 7,
+    "files": 509,
+    "differences": [],
+    "passed": true
+  },
+  {
+    "name": "dxvk-cx",
+    "archive_sha256": "ac99c8ca4b3848f3e81784135f023df266b61c2345726ea55a50b3e030dd6872",
+    "patches": 6,
+    "files": 589,
+    "differences": [],
+    "passed": true
+  },
+  {
+    "name": "dxmt-winemetal-wine11",
+    "archive_sha256": "2118ca72c6592cfce8378cf5e671b92321751f588deba33e9368a215c78e57ac",
+    "patches": 1,
+    "files": 494,
+    "differences": [],
+    "passed": true
+  },
+  {
+    "name": "fex",
+    "archive_sha256": "02130743e68c9fdece5575636391ad3079a9c1384d72d403ee50482b22f37f3e",
+    "patches": 5,
+    "files": 13877,
+    "differences": [],
+    "passed": true
+  }
+]

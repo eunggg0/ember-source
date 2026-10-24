@@ -1,7 +1,7 @@
 From: Ember <ember@users.noreply.github.com>
 Subject: [PATCH 6/6] top: Ember changes
 
-Base: CrossOver 26.3.0 FOSS source, sources/dxvk (DXVK 1.10.3)
+Base: CrossOver 26.3.0 sources/dxvk
 License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
 ---
 diff --git a/build-arm64ec.txt b/build-arm64ec.txt

@@ -1,7 +1,7 @@
 From: Ember <ember@users.noreply.github.com>
 Subject: [PATCH 3/5] FEXCore-Source: Ember changes
 
-Base: FEX-Emu/FEX 48d7175 (+ submodules)
+Base: FEX 48d7175 with submodules
 License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
 ---
 diff --git a/FEXCore/Source/CMakeLists.txt b/FEXCore/Source/CMakeLists.txt
@@ -19,6 +19,28 @@ index d292e5c..20d5b09 100644
    target_include_directories(JemallocLibs PRIVATE "${PROJECT_SOURCE_DIR}/include/")
  endif()
  if (ENABLE_JEMALLOC_GLIBC_ALLOC)
+diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
+index ebceec1..172b072 100644
+--- a/FEXCore/Source/Interface/Context/Context.h
++++ b/FEXCore/Source/Interface/Context/Context.h
+@@ -502,7 +502,7 @@ private:
+   bool ExitOnHLT = false;
+   FEX_CONFIG_OPT(AppFilename, APP_FILENAME);
+ 
+-  std::shared_mutex CustomIRMutex;
++  FEXCore::Utils::EmberRobustSharedMutex CustomIRMutex; // Ember fexmtx
+   std::atomic<bool> HasCustomIRHandlers {};
+   struct CustomIRHandlerEntry final {
+     CustomIREntrypointHandler Handler;
+@@ -516,7 +516,7 @@ private:
+   bool MonoDetected = false;
+   std::atomic<uint64_t> MonoBackpatcherBlock;
+ 
+-  std::mutex CodeBufferListLock;
++  FEXCore::Utils::EmberRobustMutex CodeBufferListLock; // Ember fexmtx
+   fextl::vector<std::weak_ptr<CPU::CodeBuffer>> CodeBufferList;
+ };
+ } // namespace FEXCore::Context
 diff --git a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
 index 3ebadb5..5823129 100644
 --- a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
@@ -175,7 +197,7 @@ index ddce98d..6bdcb2a 100644
    FEXCore::CPUID::FunctionResults Res {};
  
 diff --git a/FEXCore/Source/Interface/Core/CodeCache.cpp b/FEXCore/Source/Interface/Core/CodeCache.cpp
-index a9de6c7..5bd42da 100644
+index a9de6c7..80670c7 100644
 --- a/FEXCore/Source/Interface/Core/CodeCache.cpp
 +++ b/FEXCore/Source/Interface/Core/CodeCache.cpp
 @@ -17,6 +17,7 @@
@@ -186,10 +208,11 @@ index a9de6c7..5bd42da 100644
  #include <FEXCore/HLE/SourcecodeResolver.h>
  #include <FEXCore/HLE/SyscallHandler.h>
  
-@@ -184,6 +185,38 @@ void CodeMapWriter::Flush(size_t Offset) {
+@@ -184,7 +185,39 @@ void CodeMapWriter::Flush(size_t Offset) {
    Flush(Offset, Lock);
  }
  
+-void CodeMapWriter::Flush(size_t Offset, std::unique_lock<std::shared_mutex>&) {
 +void CodeMapWriter::EmberNoteLibrary(const ExecutableFileSectionInfo& SectionInfo) {
 +  {
 +    std::shared_lock Lock {Mutex};
@@ -222,9 +245,10 @@ index a9de6c7..5bd42da 100644
 +  Flush(Offset, Lock);
 +}
 +
- void CodeMapWriter::Flush(size_t Offset, std::unique_lock<std::shared_mutex>&) {
++void CodeMapWriter::Flush(size_t Offset, std::unique_lock<FEXCore::Utils::EmberRobustSharedMutex>&) {
    write(*CodeMapFD, Buffer.data(), Offset);
    BufferOffset = 0;
+ }
 @@ -541,7 +574,7 @@ ApplyRIPMoveRelocation(ContextImpl& CTX, uint64_t GuestRIP, uint8_t RegisterInde
  
  static inline int64_t ReadLiveGuestData(uint64_t SiteAddress, uint8_t ValueSize) {
@@ -256,10 +280,19 @@ index a9de6c7..5bd42da 100644
    for (size_t i = StartPage; i < EndPage; ++i) {
      auto PageRelocations = SpanPageRelocations(Code, i);
 diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
-index 8795e83..00b3d2c 100644
+index 8795e83..f1d68ea 100644
 --- a/FEXCore/Source/Interface/Core/Core.cpp
 +++ b/FEXCore/Source/Interface/Core/Core.cpp
-@@ -78,6 +78,11 @@ $end_info$
+@@ -9,6 +9,8 @@ $end_info$
+ */
+ 
+ #include <cstdint>
++#include <cstdlib>
++#include <cstring>
+ #ifdef ZYDIS_DISASSEMBLER
+ #include <Zydis/Zydis.h>
+ #endif
+@@ -78,6 +80,11 @@ $end_info$
  #include <utility>
  #include <xxhash.h>
  
@@ -271,16 +304,73 @@ index 8795e83..00b3d2c 100644
  namespace FEXCore::Context {
  ContextImpl::ContextImpl(const FEXCore::HostFeatures& Features)
    : HostFeatures {Features}
-@@ -515,7 +520,7 @@ static void IRDumper(FEXCore::Core::InternalThreadState* Thread, IR::IREmitter*
+@@ -353,7 +360,14 @@ void ContextImpl::SetFlagsFromCompactedEFLAGS(FEXCore::Core::InternalThreadState
+ }
+ 
+ bool ContextImpl::InitCore() {
+-  if (CodeCache.IsGeneratingCache || FEXCore::Config::Get_ENABLECODECACHINGWIP()) {
++  // Ember cbmax(10-23): 처음부터 최대(128MB) 코드 버퍼로. 16→32→64→128MB 로 늘 때마다 번역 코드를 통째로 버리고(ClearCodeCache)
++  // 디스크 캐시에서 다시 싣던 것을 없앤다(32비트 FEX 는 번역 코드가 2.3배 커서 게임 시작 때 비우기가 몰림). 예약만 크고 실제 메모리는
++  // 쓴 만큼만. 기본 꺼짐이며 EMBER_FEX_CBMAX=1 일 때만 켠다(dcb 전용 후보).
++  const bool EmberCBMax = [] {
++    const char* E = getenv("EMBER_FEX_CBMAX");
++    return E && E[0] == '1' && E[1] == '\0';
++  }();
++  if (CodeCache.IsGeneratingCache || FEXCore::Config::Get_ENABLECODECACHINGWIP() || EmberCBMax) {
+     // Start with a larger code buffer to avoid resizes that would discard code
+     StartMaximalCodeBuffer();
+   }
+@@ -494,6 +508,7 @@ void ContextImpl::OnCodeBufferAllocated(const fextl::shared_ptr<CPU::CodeBuffer>
+ 
+ void ContextImpl::ClearCodeCache(FEXCore::Core::InternalThreadState* Thread, bool NewCodeBuffer) {
+   FEXCORE_PROFILE_INSTANT("ClearCodeCache");
++  DiskCache::EmberCodeClears.fetch_add(1, std::memory_order_relaxed);
+ 
+   if (NewCodeBuffer) {
+     // Allocate new CodeBuffer + L3 LookupCache and clear L1+L2 caches
+@@ -515,7 +530,40 @@ static void IRDumper(FEXCore::Core::InternalThreadState* Thread, IR::IREmitter*
  }
  
  bool ContextImpl::CheckIfBlockIsCacheable(FEXCore::Core::InternalThreadState& Thread, uint64_t GuestRIP, uint64_t MaxInst) {
 -  return Thread.FrontendDecoder->CheckIfCacheable(Thread, reinterpret_cast<const uint8_t*>(GuestRIP), GuestRIP, MaxInst);
 +  return Thread.FrontendDecoder->CheckIfCacheable(Thread, reinterpret_cast<const uint8_t*>(FEXCore::Core::GuestToHost(GuestRIP)), GuestRIP, MaxInst);
++}
++
++// Ember(fexcs2 10-08): 잠금 명령이 든 번역 단위에서는 MSVC 볼라틸 메타데이터를 믿지 않는다.
++// 메타데이터는 "볼라틸 표시된 접근만 TSO" 인데, x86 의 공짜 순서에 기대는 무잠금 코드(CS2 rendersystemdx11 의
++// Michael-Scott 큐: head 다시 읽기 사이의 head->next 평범한 적재)는 표시가 없어 ARM 에서 순서가 뒤집혀 NULL 을 읽었다.
++// LOCK 접두(또는 메모리 XCHG)가 하나라도 있는 멀티블록은 메타데이터 없이 기본 TSO 로 번역한다 — 잠금 코드는 드물어 비용이 작다.
++// 끄기: EMBER_FEX_LOCKTSO=0. 번역이 달라지므로 디스크 캐시 버킷 키에 들어간다(DiskCache.cpp).
++bool EmberLockTSOEnabled() {
++  static const bool Enabled = [] {
++    const char* Env = getenv("EMBER_FEX_LOCKTSO");
++    return !(Env && Env[0] == '0');
++  }();
++  return Enabled;
++}
++
++static bool EmberMultiblockHasLock(const fextl::vector<FEXCore::Frontend::Decoder::DecodedBlocks>& Blocks) {
++  auto IsMem = [](const FEXCore::X86Tables::DecodedOperand& Op) {
++    return !Op.IsNone() && !Op.IsGPR() && !Op.IsLiteral();
++  };
++  for (const auto& B : Blocks) {
++    for (size_t i = 0; i < B.NumInstructions; ++i) {
++      const auto& Inst = B.DecodedInstructions[i];
++      if (Inst.Flags & FEXCore::X86Tables::DecodeFlags::FLAG_LOCK) {
++        return true;
++      }
++      // XCHG 는 메모리 피연산자면 접두 없이도 잠금(_InterlockedExchange).
++      if (Inst.TableInfo && Inst.TableInfo->Name && Inst.TableInfo->Name[0] == 'X' && strcmp(Inst.TableInfo->Name, "XCHG") == 0 &&
++          (IsMem(Inst.Dest) || IsMem(Inst.Src[0]))) {
++        return true;
++      }
++    }
++  }
++  return false;
  }
  
  ContextImpl::GenerateIRResult
-@@ -543,7 +548,7 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+@@ -543,7 +591,7 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
    }
  
    if (!HasCustomIR) {
@@ -289,7 +379,26 @@ index 8795e83..00b3d2c 100644
  
      Thread->FrontendDecoder->DecodeLoop(GuestCode);
  
-@@ -611,7 +616,7 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+@@ -564,6 +612,9 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+     }
+ #endif
+ 
++    // Ember(fexcs2): 잠금 명령이 있는 멀티블록은 볼라틸 메타데이터 무시(위 EmberLockTSOEnabled 설명).
++    const bool EmberIgnoreVolatile = !ForceTSOValidRanges.Empty() && EmberLockTSOEnabled() && EmberMultiblockHasLock(CodeBlocks);
++
+     for (size_t j = 0; j < CodeBlocks.size(); ++j) {
+       const auto& Block = CodeBlocks[j];
+ 
+@@ -581,7 +632,7 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+ 
+       bool BlockInForceTSOValidRange = false;
+       auto InstForceTSOIt = ForceTSOInstructions.end();
+-      if (ForceTSOValidRanges.Contains({Block.Entry, Block.Entry + Block.Size})) {
++      if (!EmberIgnoreVolatile && ForceTSOValidRanges.Contains({Block.Entry, Block.Entry + Block.Size})) {
+         if (auto It = ForceTSOInstructions.lower_bound(Block.Entry); It != ForceTSOInstructions.end() && *It < Block.Entry + Block.Size) {
+           InstForceTSOIt = It;
+           BlockInForceTSOValidRange = true;
+@@ -611,7 +662,7 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
  
  #ifdef ZYDIS_DISASSEMBLER
          if (FEXCore::Config::Get_X86DISASSEMBLE()) {
@@ -298,7 +407,23 @@ index 8795e83..00b3d2c 100644
            ZydisDisassembledInstruction ZydisInst;
            if (ZYAN_SUCCESS(ZydisDisassembleIntel(ZydisMachineMode, InstAddress, InstBytes, DecodedInfo->InstSize, &ZydisInst))) {
              LogMan::Msg::IFmt("    {:#x}: {}", InstAddress, ZydisInst.text);
-@@ -865,6 +870,16 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -849,6 +900,15 @@ ContextImpl::CompileCodeResult ContextImpl::CompileCode(FEXCore::Core::InternalT
+   };
+ }
+ 
++// Ember fexdc(10-17): 디스크 캐시 적중 입구 묶어 넣기(LookupCache::AddBlockMappings). 끄기 EMBER_FEX_DCBATCH=0.
++static bool EmberBatchMappings() {
++  static const bool Enabled = [] {
++    const char* Env = getenv("EMBER_FEX_DCBATCH");
++    return !(Env && *Env == '0');
++  }();
++  return Enabled;
++}
++
+ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_t GuestRIP, uint64_t MaxInst) {
+   if constexpr (BLOCK_DEBUGGING) {
+     // Block debugging logic is hand-written and needs to be handled with care.
+@@ -865,6 +925,26 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
    FEXCORE_PROFILE_SCOPED("CompileBlock");
    FEXCORE_PROFILE_ACCUMULATION(Thread, AccumulatedJITTime);
  
@@ -312,12 +437,43 @@ index 8795e83..00b3d2c 100644
 +  } KeepGuestFPSR;
 +#endif
 +
++  const bool DCProf = DiskCache::EmberDCProfOn;
++  uint64_t DCT = DCProf ? DiskCache::EmberDCNow() : 0;
++  auto DCStamp = [&](int Stage) {
++    if (DCProf) {
++      const uint64_t N = DiskCache::EmberDCNow();
++      DiskCache::EmberDCProfAdd(Stage, N - DCT);
++      DCT = N;
++    }
++  };
++
    static_cast<ContextImpl*>(Thread->CTX)->SyscallHandler->PreCompile();
  
    // Invalidate might take a unique lock on this, to guarantee that during invalidation no code gets compiled
-@@ -887,6 +902,10 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -877,34 +957,56 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+   }
+ 
+   Thread->FrontendDecoder->SetupDecodeInstructionsAtEntry(Thread, GuestRIP, MaxInst);
++  DCStamp(DiskCache::DCS_PRE);
+ 
+   std::optional<ExecutableFileSectionInfo> Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
++  DCStamp(DiskCache::DCS_REGION);
+   std::optional<DiskCache::CodeHitData> Hit;
+   std::optional<uint64_t> DiskCacheGuestCodeKey;
+   {
+     FEXCORE_PROFILE_ACCUMULATION(Thread, AccumulatedDiskCacheLookupTime);
+     Hit = DiskCache.Lookup(Thread, Region, GuestRIP, DiskCacheGuestCodeKey);
++    if (DCProf) {
++      const uint64_t N = DiskCache::EmberDCNow();
++      if (!Hit) {
++        DiskCache::EmberDCProfAdd(DiskCache::DCS_MISS, N - DCT);
++        DiskCache::EmberDCProfMiss();
++      }
++      DCT = N; // 적중이면 Lookup 안 단계는 DiskCache.cpp 가 적었다
++    }
      if (Hit && !DiskCache.IsValidating()) {
        auto LoadedCode = Thread->CPUBackend->LoadCachedCode(Hit->HostCode);
++      DCStamp(DiskCache::DCS_LOAD);
        if (LoadedCode.BlockBegin) {
 +        // Ember 코드 맵: 캐시에서 꺼낸 이미지도 "이 판이 쓰였다"고 한 번 적는다(블록은 안 적음) — 패치된 이미지 찾기용
 +        if (CodeMapWriter && Region && Region->FileStartVA != 0) {
@@ -326,7 +482,37 @@ index 8795e83..00b3d2c 100644
          for (auto& CodePage : Hit->GuestPages) {
            if (Thread->LookupCache->AddBlockExecutableRange(Thread, Hit->EntryPointRIPs, CodePage, FEXCore::Utils::FEX_PAGE_SIZE)) {
              SyscallHandler->MarkGuestExecutableRange(Thread, CodePage, FEXCore::Utils::FEX_PAGE_SIZE);
-@@ -921,6 +940,7 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+           }
+         }
++        DCStamp(DiskCache::DCS_EXEC);
+ 
+         LOGMAN_THROW_A_FMT(Hit->EntryPointRIPs.size() == Hit->EntryPointHostOffsets.size(), "Mismatched Disk Cache entrypoint pairs!");
+ 
+         uintptr_t CachedHostCode = 0;
+-        for (size_t i = 0; i < Hit->EntryPointRIPs.size(); i++) {
+-          void* HostAddr = LoadedCode.BlockBegin + Hit->EntryPointHostOffsets[i];
+-          Thread->LookupCache->AddBlockMapping(Thread, Hit->EntryPointRIPs[i], Hit->GuestPages, HostAddr);
+-          if (Hit->EntryPointRIPs[i] == GuestRIP) {
+-            CachedHostCode = reinterpret_cast<uintptr_t>(HostAddr);
++        if (EmberBatchMappings()) {
++          CachedHostCode = Thread->LookupCache->AddBlockMappings(Thread, Hit->EntryPointRIPs, Hit->EntryPointHostOffsets, LoadedCode.BlockBegin,
++                                                                 Hit->GuestPages, GuestRIP);
++        } else {
++          for (size_t i = 0; i < Hit->EntryPointRIPs.size(); i++) {
++            void* HostAddr = LoadedCode.BlockBegin + Hit->EntryPointHostOffsets[i];
++            Thread->LookupCache->AddBlockMapping(Thread, Hit->EntryPointRIPs[i], Hit->GuestPages, HostAddr);
++            if (Hit->EntryPointRIPs[i] == GuestRIP) {
++              CachedHostCode = reinterpret_cast<uintptr_t>(HostAddr);
++            }
+           }
+         }
+ 
+         LOGMAN_THROW_A_FMT(CachedHostCode != 0, "Couldn't find GuestRIP in Disk Cache entrypoints!");
++        DCStamp(DiskCache::DCS_MAP);
+ 
+         FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedDiskCacheHitCount, 1);
+         Thread->FrontendDecoder->DelayedDisownBuffer();
+@@ -921,6 +1023,7 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
    FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedJITCount, 1);
  
    auto [CompiledCode, DebugData, StartAddr, Length, NeedsAddGuestCodeRanges] = CompileCode(Thread, GuestRIP, MaxInst);
@@ -334,7 +520,7 @@ index 8795e83..00b3d2c 100644
    auto CodePtr = CompiledCode.EntryPoints[GuestRIP];
    if (CodePtr == nullptr) {
      return 0;
-@@ -997,7 +1017,7 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -997,7 +1100,7 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
        if (DebugData && DebugData->Relocations) {
          Relocations = *DebugData->Relocations;
        }
@@ -344,10 +530,17 @@ index 8795e83..00b3d2c 100644
          NeedsAddGuestCodeRanges ? Thread->FrontendDecoder->GetDecodedBlockInfo() : nullptr;
        DiskCache.Store(Thread, Region, GuestRIP, *DiskCacheGuestCodeKey, GuestCode, CompiledCode, Relocations, BlockInfo);
 diff --git a/FEXCore/Source/Interface/Core/DiskCache.cpp b/FEXCore/Source/Interface/Core/DiskCache.cpp
-index fcf3f84..f5ff193 100644
+index fcf3f84..e4f5938 100644
 --- a/FEXCore/Source/Interface/Core/DiskCache.cpp
 +++ b/FEXCore/Source/Interface/Core/DiskCache.cpp
-@@ -13,10 +13,14 @@
+@@ -1,4 +1,6 @@
+ // SPDX-License-Identifier: MIT
++#include <cstdlib>
++#include <cstring>
+ 
+ #define XXH_STATIC_LINKING_ONLY
+ 
+@@ -13,12 +15,22 @@
  #include "Interface/Context/Context.h"
  #include "FEXCore/HLE/SyscallHandler.h"
  #include "FEXCore/Utils/File.h"
@@ -359,10 +552,41 @@ index fcf3f84..f5ff193 100644
 +#include <condition_variable>
 +#include <cstdio>
 +#include <mutex>
++#include <chrono>
++#include <thread>
++#include <ctime>
  
  namespace FEXCore {
++namespace Context {
++bool EmberLockTSOEnabled(); // Core.cpp (fexcs2)
++}
  
-@@ -52,6 +56,17 @@ namespace DiskCache {
+ namespace DiskCache {
+ 
+@@ -43,6 +55,22 @@ namespace DiskCache {
+ 
+   } // namespace MesaFOZ
+ 
++  // Ember dcbatch(10-23): 쓰기 대기 1건
++  struct EmberStoreItem {
++    IndexedDB* DB;
++    MesaFOZ::foz_payload_key UniqueKey;
++    uint64_t LookupKey;
++    std::span<uint8_t> Blob;
++    fextl::vector<uint8_t> IndexBlob;
++    MesaFOZ::mesa_index_db_file_entry IndexHeader;
++    bool Ok;
++  };
++  struct EmberBatchState {
++    std::mutex M;
++    fextl::vector<EmberStoreItem> Items;
++    bool Queued = false;
++  };
++
+   struct __attribute__((packed)) IndexExtraBlobHeader {
+     XXH128_hash_t GuestHash; // StoreCacheBlob will assume it's here, care if moving
+     uint64_t GuestFootprint;
+@@ -52,6 +80,137 @@ namespace DiskCache {
  
    static FileMapperFunc FileMapper = nullptr;
  
@@ -375,12 +599,132 @@ index fcf3f84..f5ff193 100644
 +  // 그 뒤 종료 스레드가 DLL 분리 코드(x64)를 번역하다 Lookup 에서 그 잠금을 영원히 기다렸다
 +  // (실측 2026-10-01: CEF 유틸리티 프로세스가 CrUtilityMain 하나만 남아 DiskCache::Lookup → mutex::lock 에서 멈춤, wineserver 가 안 끝남).
 +  static std::atomic<bool> EmberProcessExiting {false};
++  // Ember dcbatch(10-23): 종료 비우기가 시작되면 새 저장을 받지 않는다(조회는 그대로).
++  static std::atomic<bool> EmberStoreClosed {false};
++  // Ember r3 진단: 코드 버퍼 비우기(ClearCodeCache) 횟수 — dcprof 줄에 같이 찍는다(Core.cpp 가 올림).
++  std::atomic<uint64_t> EmberCodeClears {};
++  static bool EmberBatchOn() {
++    static const bool On = [] {
++      const char* E = getenv("EMBER_FEX_DCBATCH");
++      return !(E && E[0] == '0');
++    }();
++    return On;
++  }
 +  static char EmberBucketPathBuf[512] {};
++
++  // Ember fexdc(10-17): 적중 비용 측정(EMBER_FEX_DCPROF=<파일>). 끄면 분기 하나만 남는다.
++  bool EmberDCProfOn = false;
++  static std::atomic<uint64_t> EmberDCPrefetchTicks {}, EmberDCPrefetchBytes {};
++  static char EmberDCProfPath[512] {};
++  static std::atomic<uint64_t> EmberDCProfT[DCS_COUNT] {};
++  static std::atomic<uint64_t> EmberDCProfHits {}, EmberDCProfMisses {}, EmberDCProfBytes {}, EmberDCProfPages {}, EmberDCProfRelocs {},
++    EmberDCProfEntries {}, EmberDCProfLRUHits {};
++  void EmberDCProfAdd(int Stage, uint64_t Ticks) {
++    EmberDCProfT[Stage].fetch_add(Ticks, std::memory_order_relaxed);
++  }
++  void EmberDCProfHit(uint64_t HostBytes, uint64_t Pages, uint64_t Relocs, uint64_t Entries, bool FromLRU) {
++    EmberDCProfBytes.fetch_add(HostBytes, std::memory_order_relaxed);
++    EmberDCProfPages.fetch_add(Pages, std::memory_order_relaxed);
++    EmberDCProfRelocs.fetch_add(Relocs, std::memory_order_relaxed);
++    EmberDCProfEntries.fetch_add(Entries, std::memory_order_relaxed);
++    if (FromLRU) {
++      EmberDCProfLRUHits.fetch_add(1, std::memory_order_relaxed);
++    }
++    EmberDCProfHits.fetch_add(1, std::memory_order_relaxed);
++  }
++  static std::atomic<uint64_t> EmberDCProfSlow {};
++  uint64_t EmberDCSlowTicks() {
++    static const uint64_t T = [] {
++      uint64_t F;
++      __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(F));
++      return F / 250000; // 4µs
++    }();
++    return T;
++  }
++  void EmberDCProfSlowRead() {
++    EmberDCProfSlow.fetch_add(1, std::memory_order_relaxed);
++  }
++  void EmberDCProfMiss() {
++    EmberDCProfMisses.fetch_add(1, std::memory_order_relaxed);
++  }
++  static uint64_t EmberDCPid() {
++#ifdef ARCHITECTURE_arm64ec
++    uint64_t Teb;
++    __asm__ volatile("mov %0, x18" : "=r"(Teb));
++    return *reinterpret_cast<const uint64_t*>(Teb + 0x40); // TEB.ClientId.UniqueProcess
++#else
++    return 0;
++#endif
++  }
++  // EMBER_FEX_DCPROF_EXE=<이름 조각>(ASCII, 대소문자 무시)이 있으면 그 이미지 경로를 가진 프로세스만 잰다(스팀 본체 등은 건드리지 않게).
++  static bool EmberDCProfExeMatches() {
++    const char* Want = getenv("EMBER_FEX_DCPROF_EXE");
++    if (!Want || !*Want) {
++      return true;
++    }
++#ifdef ARCHITECTURE_arm64ec
++    uint64_t Teb;
++    __asm__ volatile("mov %0, x18" : "=r"(Teb));
++    const uint64_t Peb = *reinterpret_cast<const uint64_t*>(Teb + 0x60);
++    const uint64_t Params = Peb ? *reinterpret_cast<const uint64_t*>(Peb + 0x20) : 0;
++    if (!Params) {
++      return false;
++    }
++    const uint16_t Len = *reinterpret_cast<const uint16_t*>(Params + 0x60) / 2; // ImagePathName.Length(바이트)
++    const uint16_t* Buf = *reinterpret_cast<const uint16_t* const*>(Params + 0x68);
++    const size_t WLen = strlen(Want);
++    auto Lower = [](uint32_t C) { return (C >= 'A' && C <= 'Z') ? C + 32 : C; };
++    for (size_t i = 0; Buf && i + WLen <= Len; i++) {
++      size_t j = 0;
++      while (j < WLen && Lower(Buf[i + j]) == Lower((uint8_t)Want[j])) {
++        j++;
++      }
++      if (j == WLen) {
++        return true;
++      }
++    }
++    return false;
++#else
++    return true;
++#endif
++  }
++
++  void EmberDCProfDump(const char* Why) {
++    if (!EmberDCProfOn) {
++      return;
++    }
++    uint64_t Freq;
++    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(Freq));
++    const double NsPerTick = 1e9 / (double)Freq;
++    const uint64_t H = EmberDCProfHits.load(), M = EmberDCProfMisses.load();
++    static const char* Names[DCS_COUNT] = {"pre", "region", "key", "range", "index", "ghash", "pages", "alloc", "read", "lru", "reloc", "load", "exec", "map", "miss"};
++    fextl::string Line = fextl::fmt::format("dcprof pid={} t={} {} hits={} lruhits={} misses={} bytes/hit={:.0f} pages/hit={:.2f} relocs/hit={:.1f} entries/hit={:.1f} |", EmberDCPid(), (long long)(EmberDCNow() / Freq), Why, H,
++                                            EmberDCProfLRUHits.load(), M, H ? (double)EmberDCProfBytes.load() / H : 0.0,
++                                            H ? (double)EmberDCProfPages.load() / H : 0.0, H ? (double)EmberDCProfRelocs.load() / H : 0.0,
++                                            H ? (double)EmberDCProfEntries.load() / H : 0.0);
++    double Sum = 0;
++    for (int i = 0; i < DCS_COUNT; i++) {
++      const double Total = EmberDCProfT[i].load() * NsPerTick;
++      const uint64_t Div = i == DCS_MISS ? M : (i <= DCS_KEY || i == DCS_RANGE || i == DCS_INDEX) ? (H + M) : H;
++      const double Per = Div ? Total / Div : 0.0;
++      if (i != DCS_MISS) {
++        Sum += H ? Total / H : 0.0;
++      }
++      Line += fextl::fmt::format(" {}={:.0f}ns", Names[i], Per);
++    }
++    Line += fextl::fmt::format(" | slowreads(>4us)={} clears={}", EmberDCProfSlow.load(), EmberCodeClears.load());
++    Line += fextl::fmt::format(" | hit_total~={:.0f}ns prefetch={}KB/{:.1f}ms\n", Sum, EmberDCPrefetchBytes.load() >> 10,
++                               EmberDCPrefetchTicks.load() * NsPerTick / 1e6);
++    if (FILE* F = fopen(EmberDCProfPath, "a")) {
++      fwrite(Line.data(), 1, Line.size(), F);
++      fclose(F);
++    }
++  }
 +
    bool FOZFile::Open(const fextl::string& FOZFileName, bool ReadOnly) {
      FileName = FOZFileName;
      this->ReadOnly = ReadOnly;
-@@ -121,6 +136,8 @@ namespace DiskCache {
+@@ -121,6 +280,8 @@ namespace DiskCache {
      return true;
    }
  
@@ -389,7 +733,7 @@ index fcf3f84..f5ff193 100644
    bool FOZFile::WriteBlob(const MesaFOZ::foz_payload_key& Key, std::span<const std::span<const uint8_t>> BlobChunks, uint64_t& OutBlobOffset) {
      ssize_t FileSize = FD->Size();
      if (FileSize < 0) {
-@@ -128,11 +145,6 @@ namespace DiskCache {
+@@ -128,11 +289,6 @@ namespace DiskCache {
      }
      uint64_t WriteOffset = (uint64_t)FileSize;
  
@@ -401,7 +745,7 @@ index fcf3f84..f5ff193 100644
      uint64_t TotalBlobSize = 0;
      for (const std::span<const uint8_t>& Chunk : BlobChunks) {
        TotalBlobSize += Chunk.size();
-@@ -143,23 +155,26 @@ namespace DiskCache {
+@@ -143,23 +299,26 @@ namespace DiskCache {
                                                 .crc = 0, // todo? maybe
                                                 .uncompressed_size = (uint32_t)TotalBlobSize};
  
@@ -429,17 +773,17 @@ index fcf3f84..f5ff193 100644
 -      WriteOffset += Chunk.size();
 +      memcpy(Record.data() + Pos, Chunk.data(), Chunk.size());
 +      Pos += Chunk.size();
-     }
- 
-+    if (FD->PWrite(Record.data(), Record.size(), WriteOffset) != (ssize_t)Record.size()) {
-+      return false;
 +    }
 +
++    if (FD->PWrite(Record.data(), Record.size(), WriteOffset) != (ssize_t)Record.size()) {
++      return false;
+     }
+ 
 +    OutBlobOffset = WriteOffset + sizeof(Key.bytes) + sizeof(ScratchHeader);
      return true;
    }
  
-@@ -181,6 +196,12 @@ namespace DiskCache {
+@@ -181,6 +340,12 @@ namespace DiskCache {
      return true;
    }
  
@@ -452,7 +796,7 @@ index fcf3f84..f5ff193 100644
    void IndexedDB::PopulateIndex(Index& CacheIndex, bool& FoundMetadata) {
      fextl::vector<uint8_t> Data;
      if (!IndexFOZ.ReadAll(Data)) {
-@@ -194,66 +215,122 @@ namespace DiskCache {
+@@ -194,66 +359,130 @@ namespace DiskCache {
  
      const uint8_t* IndexDataStart = Data.data();
      const size_t IndexDataSize = Data.size();
@@ -485,6 +829,11 @@ index fcf3f84..f5ff193 100644
 +        return 0;
 +      }
 +      if (FOZKey->bytes[39] != 0xFF) {
++        // Code extents need a non-empty list of (start, length) pairs. The
++        // writer may emit a zero length when a data mask reaches a block end.
++        if (IndexBlobExtra->GuestExtentsCount == 0 || (IndexBlobExtra->GuestExtentsCount & 1)) {
++          return 0;
++        }
 +        if (IndexBlobCommon->cache_db_file_offset > (uint64_t)CacheFOZSize ||
 +            IndexBlobCommon->size > (uint64_t)CacheFOZSize - IndexBlobCommon->cache_db_file_offset) {
 +          return 0;
@@ -493,7 +842,7 @@ index fcf3f84..f5ff193 100644
 +          return 0;
 +        }
 +        const auto* GuestExtents = reinterpret_cast<const uint32_t*>(IndexDataStart + Offset + RecordHeadSize + IndexBlobBaseSize);
-+        for (uint32_t i = 0; i + 1 < IndexBlobExtra->GuestExtentsCount; i += 2) {
++        for (uint32_t i = 0; i < IndexBlobExtra->GuestExtentsCount; i += 2) {
 +          if ((uint64_t)GuestExtents[i] + GuestExtents[i + 1] > IndexBlobExtra->GuestSize) {
 +            return 0;
 +          }
@@ -520,13 +869,12 @@ index fcf3f84..f5ff193 100644
 -      ReadOffset += sizeof(MesaFOZ::mesa_index_db_file_entry);
 -      const auto* IndexBlobExtra = reinterpret_cast<const IndexExtraBlobHeader*>(IndexDataStart + ReadOffset);
 -      ReadOffset += sizeof(IndexExtraBlobHeader);
--
++      CacheIndex.reserve(CacheIndex.size() + Count);
++    }
+ 
 -      // skip corrupt (carefully) so we don't have to figure that out in the hot path later
 -      if (IndexBlobCommon->cache_db_file_offset > (uint64_t)CacheFOZSize ||
 -          IndexBlobCommon->size > (uint64_t)CacheFOZSize - IndexBlobCommon->cache_db_file_offset) {
-+      CacheIndex.reserve(CacheIndex.size() + Count);
-+    }
-+
 +    size_t ReadOffset = 0;
 +    size_t Resyncs = 0, Duplicates = 0;
 +    while (ReadOffset + RecordHeadSize <= IndexDataSize) {
@@ -569,16 +917,19 @@ index fcf3f84..f5ff193 100644
 -            ExtentsValid = false;
 -            break;
 +
-+      auto It = CacheIndex.find(IndexBlobCommon->hash);
++      // Records are only 4-byte aligned, while map APIs take uint64_t references.
++      const uint64_t LookupKey = IndexBlobCommon->hash;
++      const uint64_t GuestFootprint = IndexBlobExtra->GuestFootprint;
++      auto It = CacheIndex.find(LookupKey);
 +      if (It != CacheIndex.end()) {
 +        // 같은 블록의 중복 기록(손상 뒤 다시 저장된 것)은 건너뛴다.
 +        auto SameEntry = [&](const IndexEntry& E, uint64_t Footprint) {
-+          return Footprint == IndexBlobExtra->GuestFootprint && E.GuestHash.low64 == IndexBlobExtra->GuestHash.low64 &&
++          return Footprint == GuestFootprint && E.GuestHash.low64 == IndexBlobExtra->GuestHash.low64 &&
 +                 E.GuestHash.high64 == IndexBlobExtra->GuestHash.high64;
 +        };
 +        bool Dup = SameEntry(It->second.MainEntry, It->second.MainEntryFootprint);
 +        if (!Dup && It->second.MoreEntries) {
-+          auto [B, E] = It->second.MoreEntries->equal_range(IndexBlobExtra->GuestFootprint);
++          auto [B, E] = It->second.MoreEntries->equal_range(GuestFootprint);
 +          for (auto I = B; I != E && !Dup; ++I) {
 +            Dup = SameEntry(I->second, I->first);
            }
@@ -604,13 +955,13 @@ index fcf3f84..f5ff193 100644
 +      NewEntry.GuestExtents.resize(IndexBlobExtra->GuestExtentsCount);
 +      memcpy(NewEntry.GuestExtents.data(), GuestExtents, IndexBlobExtra->GuestExtentsCount * sizeof(uint32_t));
 +      if (It == CacheIndex.end()) {
-+        CacheIndex.emplace(IndexBlobCommon->hash, IndexCacheHead {std::move(NewEntry), IndexBlobExtra->GuestFootprint, nullptr});
++        CacheIndex.emplace(LookupKey, IndexCacheHead {std::move(NewEntry), GuestFootprint, nullptr});
        } else {
 -        FoundMetadata = true;
 +        if (!It->second.MoreEntries.get()) {
 +          It->second.MoreEntries = fextl::make_unique<fextl::multimap<uint64_t, IndexEntry>>();
 +        }
-+        It->second.MoreEntries->insert({IndexBlobExtra->GuestFootprint, std::move(NewEntry)});
++        It->second.MoreEntries->insert({GuestFootprint, std::move(NewEntry)});
        }
      }
 -    // could truncate/delete index if we don't end up perfectly at end here
@@ -621,7 +972,311 @@ index fcf3f84..f5ff193 100644
    }
  
    bool IndexedDB::ReadCacheBlob(uint64_t Offset, std::span<uint8_t> OutBlob) {
-@@ -370,6 +447,16 @@ namespace DiskCache {
+@@ -269,6 +498,237 @@ namespace DiskCache {
+     }
+   }
+ 
++  namespace {
++    struct __attribute__((packed)) EmberHotHeader {
++      char Magic[8];
++      uint32_t ChunkShift;
++      uint32_t Words;
++      uint64_t Hash;
++    };
++    constexpr char EmberHotMagic[8] = {'E', 'H', 'O', 'T', '0', '0', '0', '1'};
++  } // namespace
++
++  void IndexedDB::EmberSetupHot(const fextl::string& Path) {
++    if (!CacheFileMapping) {
++      return;
++    }
++    HotPath = Path;
++    // 앞으로 자랄 몫(이번 실행에서 새로 쓰는 블롭)도 조금 담는다.
++    const uint64_t Size = CacheFileSize.load(std::memory_order_relaxed) + (256ULL << 20);
++    HotWords = ((Size >> HOT_CHUNK_SHIFT) + 63) / 64;
++    HotBits.assign(HotWords, 0);
++  }
++
++  bool IndexedDB::EmberWriteHotIfDirty() {
++    if (HotPath.empty() || !HotDirty.exchange(false, std::memory_order_relaxed)) {
++      return false;
++    }
++    fextl::vector<uint8_t> Buf(sizeof(EmberHotHeader) + HotWords * sizeof(uint64_t));
++    auto* Words = reinterpret_cast<uint64_t*>(Buf.data() + sizeof(EmberHotHeader));
++    for (uint64_t i = 0; i < HotWords; i++) {
++      Words[i] = std::atomic_ref<uint64_t>(HotBits[i]).load(std::memory_order_relaxed);
++    }
++    EmberHotHeader H {};
++    memcpy(H.Magic, EmberHotMagic, sizeof(H.Magic));
++    H.ChunkShift = HOT_CHUNK_SHIFT;
++    H.Words = (uint32_t)HotWords;
++    H.Hash = XXH3_64bits(Words, HotWords * sizeof(uint64_t));
++    memcpy(Buf.data(), &H, sizeof(H));
++    File::File F(HotPath.c_str(), File::FileModes::WRITE | File::FileModes::CREATE | File::FileModes::TRUNCATE, false);
++    if (!F.IsValid()) {
++      return false;
++    }
++    return F.PWrite(Buf.data(), Buf.size(), 0) == (ssize_t)Buf.size();
++  }
++
++  uint64_t IndexedDB::EmberPrefetch(uint64_t MaxBytes, bool FullFallback) {
++    if (!CacheFileMapping) {
++      return 0;
++    }
++    // 연 때의 파일 크기까지만(쓰기 DB 는 8GB 를 매핑해 두지만 그 뒤는 파일이 없어 건드리면 SIGBUS).
++    const uint64_t FileEnd = CacheFileSize.load(std::memory_order_relaxed);
++
++    // 지난 실행의 뜨거운 구역을 읽어 이번 비트맵에 합친다(다음에 쓸 때 합집합으로 남는다).
++    fextl::vector<uint64_t> Prev;
++    if (!HotPath.empty()) {
++      File::File F(HotPath.c_str(), File::FileModes::READ, false);
++      if (F.IsValid()) {
++        const ssize_t Size = F.Size();
++        EmberHotHeader H {};
++        if (Size > (ssize_t)sizeof(H) && F.PRead(&H, sizeof(H), 0) == sizeof(H) && memcmp(H.Magic, EmberHotMagic, sizeof(H.Magic)) == 0 &&
++            H.ChunkShift == HOT_CHUNK_SHIFT && (uint64_t)Size == sizeof(H) + uint64_t(H.Words) * sizeof(uint64_t)) {
++          Prev.resize(H.Words);
++          if (F.PRead(Prev.data(), H.Words * sizeof(uint64_t), sizeof(H)) != (ssize_t)(H.Words * sizeof(uint64_t)) ||
++              XXH3_64bits(Prev.data(), H.Words * sizeof(uint64_t)) != H.Hash) {
++            Prev.clear();
++          }
++        }
++      }
++      for (uint64_t i = 0; i < std::min<uint64_t>(Prev.size(), HotWords); i++) {
++        std::atomic_ref<uint64_t>(HotBits[i]).fetch_or(Prev[i], std::memory_order_relaxed);
++      }
++    }
++    if (Prev.empty() && !FullFallback) {
++      return 0;
++    }
++
++    constexpr uint64_t Stride = 16384; // 호스트 페이지
++    constexpr uint64_t ReadMax = 4ULL << 20;
++    fextl::vector<uint8_t> Scratch(ReadMax);
++    uint64_t Done = 0;
++    volatile uint8_t Sink = 0;
++    // [Begin, End) 를 큰 pread 로 읽고(페이지 캐시 채움) 매핑 페이지를 건드린다(페이지 표 채움).
++    auto Fetch = [&](uint64_t Begin, uint64_t End) {
++      End = std::min(End, FileEnd);
++      for (uint64_t Off = Begin; Off < End && Done < MaxBytes; Off += ReadMax) {
++        if (EmberProcessExiting.load(std::memory_order_relaxed)) {
++          return false;
++        }
++        const uint64_t N = std::min(ReadMax, End - Off);
++        CacheFOZ.ReadBlob(Off, {Scratch.data(), N});
++        for (uint64_t P = Off & ~(Stride - 1); P < Off + N; P += Stride) {
++          Sink = Sink + *reinterpret_cast<volatile const uint8_t*>(CacheFileMapping + std::max(P, Off));
++        }
++        Done += N;
++      }
++      return Done < MaxBytes;
++    };
++
++    if (!Prev.empty()) {
++      const uint64_t Chunks = Prev.size() * 64;
++      for (uint64_t C = 0; C < Chunks;) {
++        if (!(Prev[C >> 6] & (1ULL << (C & 63)))) {
++          C++;
++          continue;
++        }
++        uint64_t E = C + 1;
++        while (E < Chunks && (Prev[E >> 6] & (1ULL << (E & 63)))) {
++          E++;
++        }
++        if (!Fetch(C << HOT_CHUNK_SHIFT, E << HOT_CHUNK_SHIFT)) {
++          break;
++        }
++        C = E;
++      }
++    } else {
++      Fetch(0, FileEnd);
++    }
++    return Done;
++  }
++
++  // 측정 기록은 번역 경로(게스트 스레드)에서 파일을 열지 않고 이 스레드가 2초마다 쓴다.
++  struct EmberDCProfTicker final : WorkQueueThread::WorkItem {
++    void Run() override {
++      uint64_t Last = ~0ULL;
++      while (!EmberProcessExiting.load(std::memory_order_relaxed)) {
++        std::this_thread::sleep_for(std::chrono::seconds(2));
++        const uint64_t N = EmberDCProfHits.load() + EmberDCProfMisses.load();
++        if (N != Last) {
++          EmberDCProfDump("tick");
++          Last = N;
++        }
++      }
++    }
++  };
++
++  struct DiskCache::EmberPrefetchWorkItem final : WorkQueueThread::WorkItem {
++    fextl::vector<IndexedDB*> DBs;
++    uint64_t MaxBytes;
++    bool FullFallback;
++    EmberPrefetchWorkItem(fextl::vector<IndexedDB*>&& DBs, uint64_t MaxBytes, bool FullFallback)
++      : DBs(std::move(DBs))
++      , MaxBytes(MaxBytes)
++      , FullFallback(FullFallback) {}
++    void Run() override {
++      const uint64_t T0 = EmberDCNow();
++      uint64_t Bytes = 0;
++      for (auto* DB : DBs) {
++        Bytes += DB->EmberPrefetch(MaxBytes, FullFallback);
++      }
++      EmberDCPrefetchTicks.fetch_add(EmberDCNow() - T0, std::memory_order_relaxed);
++      EmberDCPrefetchBytes.fetch_add(Bytes, std::memory_order_relaxed);
++      // 그 뒤로는 15초마다 이번 실행의 뜨거운 구역을 남긴다(종료 때 쓰지 않는다 — 종료 경로에서 파일을 열면 멈출 수 있다).
++      while (!EmberProcessExiting.load(std::memory_order_relaxed)) {
++        std::this_thread::sleep_for(std::chrono::seconds(15));
++        if (EmberProcessExiting.load(std::memory_order_relaxed)) {
++          break;
++        }
++        for (auto* DB : DBs) {
++          DB->EmberWriteHotIfDirty();
++        }
++      }
++    }
++  };
++
++  bool IndexedDB::EmberStoreBatch(EmberStoreItem* Items, size_t Count) {
++    if (ReadOnly || Count == 0) {
++      return false;
++    }
++    if (!CacheFOZ.Lock(STORE_LOCK_TIMEOUT_MS) || !IndexFOZ.Lock(STORE_LOCK_TIMEOUT_MS)) {
++      CacheFOZ.Unlock();
++      IndexFOZ.Unlock();
++      return false;
++    }
++    const ssize_t CacheSize = CacheFOZ.Size();
++    const ssize_t IndexSize = IndexFOZ.Size();
++    bool Ok = CacheSize >= 0 && IndexSize >= 0;
++    if (Ok) {
++      // 기록 = 키 + 머리 + 내용(FOZFile::WriteBlob 과 같은 배치). 캐시 쪽을 먼저 한 번에 써서 오프셋을 정한다.
++      constexpr size_t RecHead = sizeof(MesaFOZ::foz_payload_key::bytes) + sizeof(MesaFOZ::foz_payload_header);
++      size_t CacheBytes = 0, IndexBytes = 0;
++      for (size_t i = 0; i < Count; i++) {
++        CacheBytes += RecHead + Items[i].Blob.size();
++        IndexBytes += RecHead + sizeof(MesaFOZ::mesa_index_db_file_entry) + Items[i].IndexBlob.size();
++      }
++      fextl::vector<uint8_t> Buf(CacheBytes);
++      size_t Pos = 0;
++      auto Put = [&](const MesaFOZ::foz_payload_key& Key, std::span<const uint8_t> A, std::span<const uint8_t> B) {
++        const uint32_t Size = (uint32_t)(A.size() + B.size());
++        MesaFOZ::foz_payload_header PH {.payload_size = Size, .format = MesaFOZ::FOSSILIZE_COMPRESSION_NONE, .crc = 0, .uncompressed_size = Size};
++        memcpy(Buf.data() + Pos, Key.bytes, sizeof(Key.bytes));
++        Pos += sizeof(Key.bytes);
++        memcpy(Buf.data() + Pos, &PH, sizeof(PH));
++        Pos += sizeof(PH);
++        const size_t PayloadPos = Pos;
++        if (A.size()) {
++          memcpy(Buf.data() + Pos, A.data(), A.size());
++          Pos += A.size();
++        }
++        if (B.size()) {
++          memcpy(Buf.data() + Pos, B.data(), B.size());
++          Pos += B.size();
++        }
++        return PayloadPos;
++      };
++      for (size_t i = 0; i < Count; i++) {
++        const size_t PayloadPos = Put(Items[i].UniqueKey, Items[i].Blob, {});
++        Items[i].IndexHeader = {.hash = Items[i].LookupKey,
++                                .size = (uint32_t)Items[i].Blob.size(),
++                                .last_access_time = 0,
++                                .cache_db_file_offset = (uint64_t)CacheSize + PayloadPos};
++      }
++      Ok = CacheFOZ.EmberPWrite(Buf.data(), Buf.size(), (uint64_t)CacheSize);
++      if (Ok) {
++        Buf.resize(IndexBytes);
++        Pos = 0;
++        for (size_t i = 0; i < Count; i++) {
++          Put(Items[i].UniqueKey, {(const uint8_t*)&Items[i].IndexHeader, sizeof(Items[i].IndexHeader)}, Items[i].IndexBlob);
++        }
++        Ok = IndexFOZ.EmberPWrite(Buf.data(), Buf.size(), (uint64_t)IndexSize);
++      }
++    }
++    CacheFOZ.Unlock();
++    IndexFOZ.Unlock();
++    if (Ok && CacheFileMapping) {
++      // publish new file size for memory-mapped reads
++      CacheFileSize = Items[Count - 1].IndexHeader.cache_db_file_offset + Items[Count - 1].Blob.size();
++    }
++    for (size_t i = 0; i < Count; i++) {
++      Items[i].Ok = Ok;
++    }
++    return Ok;
++  }
++
+   bool IndexedDB::StoreCacheBlob(const MesaFOZ::foz_payload_key& UniqueKey, uint64_t LookupKey, std::span<const uint8_t> Blob,
+                                  MesaFOZ::mesa_index_db_file_entry& IndexEntry, std::span<const uint8_t> IndexBlob) {
+     if (ReadOnly) {
+@@ -351,8 +811,65 @@ namespace DiskCache {
+     FileMapper = Func;
+   }
+ 
++  // 이 프로세스의 실행 파일 이름(ASCII 밖·경로 글자는 '_') — 뜨거운 구역 파일 이름에 쓴다.
++  static const uint16_t* EmberProcessParamString(uint32_t Offset, uint16_t& Len) {
++    Len = 0;
++#ifdef ARCHITECTURE_arm64ec
++    uint64_t Teb;
++    __asm__ volatile("mov %0, x18" : "=r"(Teb));
++    const uint64_t Peb = *reinterpret_cast<const uint64_t*>(Teb + 0x60);
++    const uint64_t Params = Peb ? *reinterpret_cast<const uint64_t*>(Peb + 0x20) : 0;
++    if (!Params) {
++      return nullptr;
++    }
++    Len = *reinterpret_cast<const uint16_t*>(Params + Offset) / 2;
++    return *reinterpret_cast<const uint16_t* const*>(Params + Offset + 8);
++#else
++    return nullptr;
++#endif
++  }
++
++  static fextl::string EmberExeTag() {
++    uint16_t Len;
++    const uint16_t* Buf = EmberProcessParamString(0x60, Len); // ImagePathName
++    size_t Start = 0;
++    for (size_t i = 0; Buf && i < Len; i++) {
++      if (Buf[i] == '\\' || Buf[i] == '/') {
++        Start = i + 1;
++      }
++    }
++    fextl::string Tag;
++    for (size_t i = Start; Buf && i < Len && Tag.size() < 64; i++) {
++      const uint16_t C = Buf[i];
++      const bool Ok = (C >= 'a' && C <= 'z') || (C >= 'A' && C <= 'Z') || (C >= '0' && C <= '9') || C == '.' || C == '-';
++      Tag.push_back(Ok ? (char)((C >= 'A' && C <= 'Z') ? C + 32 : C) : '_');
++    }
++    return Tag.empty() ? fextl::string("unknown") : Tag;
++  }
++
++  static bool EmberIsChromiumChild() {
++    uint16_t Len;
++    const uint16_t* Buf = EmberProcessParamString(0x70, Len); // CommandLine
++    static constexpr char Needle[] = "--type=";
++    const size_t NLen = sizeof(Needle) - 1;
++    for (size_t i = 0; Buf && i + NLen <= Len; i++) {
++      size_t j = 0;
++      while (j < NLen && Buf[i + j] == (uint8_t)Needle[j]) {
++        j++;
++      }
++      if (j == NLen) {
++        return true;
++      }
++    }
++    return false;
++  }
++
+   void DiskCache::Init(FEXCore::Context::ContextImpl* CTX) {
+     this->CTX = CTX;
++    if (const char* P = getenv("EMBER_FEX_DCPROF"); P && *P && *P != '0' && EmberDCProfExeMatches()) {
++      snprintf(EmberDCProfPath, sizeof(EmberDCProfPath), "%s", P);
++      EmberDCProfOn = true;
++    }
+ 
+     if (!EnableDiskCache) {
+       return;
+@@ -370,6 +887,27 @@ namespace DiskCache {
      BucketBytes.resize(sizeof(BucketHeader) + SerializedConfig.size());
      memcpy(BucketBytes.data(), &BucketHeader, sizeof(BucketHeader));
      memcpy(BucketBytes.data() + sizeof(BucketHeader), SerializedConfig.data(), SerializedConfig.size());
@@ -635,10 +1290,21 @@ index fcf3f84..f5ff193 100644
 +      memcpy(BucketBytes.data() + Old, Tag, sizeof(Tag));
 +      memcpy(BucketBytes.data() + Old + sizeof(Tag), &GB, sizeof(GB));
 +    }
++    // Ember(fexcs2 10-08): 잠금 멀티블록 TSO(EmberLockTSOEnabled)·모듈 볼라틸 무시(EMBER_FEX_NOVOLMETA)는 번역을 바꾼다 →
++    // 옛 번역(메타데이터대로 느슨한 적재)이 캐시에서 되살아나지 않게 버킷을 가른다. EMBER_FEX_LOCKTSO=0 이면 옛 버킷 그대로.
++    if (FEXCore::Context::EmberLockTSOEnabled()) {
++      static constexpr char Tag[8] = {'l', 'o', 'c', 'k', 't', 's', 'o', '1'};
++      BucketBytes.insert(BucketBytes.end(), Tag, Tag + sizeof(Tag));
++    }
++    if (const char* NoVol = getenv("EMBER_FEX_NOVOLMETA"); NoVol && *NoVol) {
++      static constexpr char Tag[8] = {'n', 'o', 'v', 'o', 'l', 'm', 'd', '1'};
++      BucketBytes.insert(BucketBytes.end(), Tag, Tag + sizeof(Tag));
++      BucketBytes.insert(BucketBytes.end(), NoVol, NoVol + strlen(NoVol));
++    }
      BucketHash = XXH3_128bits(BucketBytes.data(), BucketBytes.size());
  
      fextl::string BasePath = BasePathOverride();
-@@ -378,6 +465,7 @@ namespace DiskCache {
+@@ -378,6 +916,7 @@ namespace DiskCache {
        BasePath += fextl::fmt::format("{:016x}{:016x}", BucketHash.high64, BucketHash.low64) + "/";
      }
      FHU::Filesystem::CreateDirectories(BasePath);
@@ -646,7 +1312,162 @@ index fcf3f84..f5ff193 100644
  
      if (!MapDiskCacheFiles) {
        FileMapper = nullptr;
-@@ -490,7 +578,7 @@ namespace DiskCache {
+@@ -419,9 +958,154 @@ namespace DiskCache {
+     if (IsWritingDiskCache()) {
+       FEXCore::Threads::Flags WriterThreadFlags = {.LowPriority = true, .Internal = true};
+       Writer = fextl::make_unique<WorkQueueThread>(WriterThreadFlags, "FEX:DiskCache");
++      if (EmberBatchOn()) {
++        EmberBatch = fextl::make_unique<EmberBatchState>().release();
++      }
++    }
++
++    if (EmberDCProfOn) {
++      FEXCore::Threads::Flags Flags = {.LowPriority = true, .Internal = true};
++      ProfTicker = fextl::make_unique<WorkQueueThread>(Flags, "FEX:DCProf");
++      ProfTicker->QueueWork(fextl::make_unique<EmberDCProfTicker>());
++    }
++
++    // Ember fexdc(10-17): 적중 1건 비용의 대부분(게임 실측 10~40µs 중 대부분)이 매핑된 캐시 파일 첫 접근 때의 디스크 읽기였다
++    // (블롭이 수 GB 파일에 흩어져 건마다 16KB 무작위 읽기). 시작 때 전용 스레드가 큰 pread 로 미리 읽어 둔다.
++    // 지난 실행에서 적중한 64KB 구역만 읽는다(뜨거운 구역 파일 EmberHot-<실행 파일>.bin, 버킷 폴더, 15초마다 갱신·합집합).
++    // 끄기 EMBER_FEX_DCPREFETCH=0, 숫자면 MB 상한(기본 4096).
++    if (ReadingDiskCache && FileMapper) {
++      uint64_t MaxMB = 4096;
++      if (const char* P = getenv("EMBER_FEX_DCPREFETCH"); P && *P) {
++        MaxMB = strtoull(P, nullptr, 10);
++        if (*P != '0' && MaxMB == 0) {
++          MaxMB = 4096;
++        }
++      }
++      if (MaxMB) {
++        const fextl::string Tag = EmberExeTag();
++        fextl::vector<IndexedDB*> DBs;
++        if (RWCacheDB) {
++          RWCacheDB->EmberSetupHot(BasePath + "EmberHot-" + Tag + ".bin");
++          DBs.push_back(RWCacheDB.get());
++        }
++        for (auto& DB : ROCacheDBs) {
++          DBs.push_back(DB.get());
++        }
++        FEXCore::Threads::Flags Flags = {.LowPriority = false, .Internal = true};
++        Prefetcher = fextl::make_unique<WorkQueueThread>(Flags, "FEX:DCPrefetch");
++        // 뜨거운 구역 파일이 없을 때(첫 실행) 파일 전체를 읽는 것은 EMBER_FEX_DCPREFETCH_FULL=1 일 때만 — 게임 캐시는 수 GB 라
++        // 메모리가 빠듯하면 다른 페이지 캐시를 밀어낸다(실측 CS2 3.2GB). 기본은 첫 실행에 구역만 적고 다음 실행부터 읽는다.
++        const char* Full = getenv("EMBER_FEX_DCPREFETCH_FULL");
++        const bool FullFallback = Full && *Full == '1' && !EmberIsChromiumChild();
++        Prefetcher->QueueWork(fextl::make_unique<EmberPrefetchWorkItem>(std::move(DBs), MaxMB << 20, FullFallback));
++      }
+     }
+   }
+ 
++  // Ember fexstall: 모노 핵이 켜진 프로세스에서만 쓰기 가능(RWX) 코드도 캐시한다. 끄기 EMBER_FEX_MONOCACHE=0.
++  bool DiskCache::EmberCacheWritableMono() const {
++    static const bool Enabled = [] {
++      const char* Env = getenv("EMBER_FEX_MONOCACHE");
++      return !(Env && *Env == '0');
++    }();
++    return Enabled && CTX->AreMonoHacksActive();
++  }
++
++  // Ember xpcache(10-18): 실행 파일 이미지(PE 섹션) 안의 쓰기 가능(RWX) 코드도 캐시한다. 보호된 실행 파일(스텔라 블레이드 .xpdata 192MB)은
++  // 코드가 RWX 섹션에서 돌아 매 실행 약 30만 블록(번역 ~100초)을 다시 번역했다. 안전 조건(전부 만족해야 함):
++  //  1) 이미지 안: PE 헤더에 쓰기+실행으로 선언된 이미지 섹션(.xpdata 등, ImageRWX) — 익명 VirtualAlloc 코드(안티치트·JIT)와
++  //     실행 중 VirtualProtect 로 RWX 가 된 .text(후킹)는 제외(이전 3.8GB 비대 원인은 익명 코드).
++  //  2) 내용 검증: 캐시 키는 (파일 오프셋, 파일 ID), 조회 때 블록의 게스트 바이트 128비트 해시가 맞아야 쓴다 — 바뀌면 자동 무효.
++  //  3) 고정됨: 블록이 걸친 모든 호스트 페이지에서 '번역된 코드가 쓰기로 무효화된 횟수'(SMC 폴트+ICache 비우기+외부 쓰기)가
++  //     EMBER_FEX_IMGCACHE_WRITES(기본 2) 이하, 트랩 포기(전체 검증) 페이지 아님. 처음 실행 전 풀림은 0 회, 한 번 풀린 뒤 고정은 1~2 회.
++  //  4) 비대 방지: 같은 키 변형 4개까지, 프로세스당 저장 EMBER_FEX_IMGCACHE_MB(기본 1024MB)까지, 키는 맞는데 해시가 다른 '낡은 조회'가
++  //     4096 번 넘게 쌓이고 절반을 넘으면(실행마다 바뀌는 코드) 이 프로세스에선 끈다.
++  // 적재 뒤 SMC 감시는 새로 번역한 블록과 같다(MarkGuestExecutableRange 로 트랩). 끄기 EMBER_FEX_IMGCACHE=0.
++  namespace {
++  struct EmberImgConfig {
++    bool Enabled = true;
++    uint32_t MaxWrites = 2;
++    uint64_t BudgetBytes = 1024ULL << 20;
++    uint32_t MaxVariants = 4;
++    bool Log = false;
++    EmberImgConfig() {
++      if (const char* E = getenv("EMBER_FEX_IMGCACHE_LOG"); E && *E && *E != '0') {
++        Log = true;
++      }
++      if (const char* E = getenv("EMBER_FEX_IMGCACHE"); E && *E == '0') {
++        Enabled = false;
++      }
++      if (const char* E = getenv("EMBER_FEX_IMGCACHE_WRITES"); E && *E) {
++        MaxWrites = (uint32_t)strtoul(E, nullptr, 10);
++      }
++      if (const char* E = getenv("EMBER_FEX_IMGCACHE_MB"); E && *E) {
++        BudgetBytes = strtoull(E, nullptr, 10) << 20;
++      }
++    }
++  };
++  const EmberImgConfig& ImgConfig() {
++    static const EmberImgConfig C;
++    return C;
++  }
++  } // namespace
++
++  bool DiskCache::EmberCacheWritableImage(const std::optional<ExecutableFileSectionInfo>& Region, const HLE::ExecutableRangeInfo& RangeInfo) {
++    const auto& C = ImgConfig();
++    if (!C.Enabled || EmberImgTripped.load(std::memory_order_relaxed)) {
++      return false;
++    }
++    if (!Region || !Region->FileStartVA || !RangeInfo.ImageRWX) {
++      if (C.Log) {
++        static std::atomic<int> N {};
++        if (N++ < 8) {
++          LogMan::Msg::IFmt("Ember 이미지 RWX 캐시: 이미지 밖 RWX {:X}+{:X}", RangeInfo.Base, RangeInfo.Size);
++        }
++      }
++      return false;
++    }
++    if (RangeInfo.FullSMC || RangeInfo.SMCWrites > C.MaxWrites) {
++      if (C.Log) {
++        static std::atomic<int> N {};
++        if (N++ < 16) {
++          LogMan::Msg::IFmt("Ember 이미지 RWX 캐시: 고정 아님 {:X} full={} writes={}", RangeInfo.Base, RangeInfo.FullSMC, RangeInfo.SMCWrites);
++        }
++      }
++      return false;
++    }
++    return true;
++  }
++
++  template<typename PageList>
++  bool DiskCache::EmberImagePagesStable(Core::InternalThreadState* Thread, const PageList& Pages) {
++    const auto& C = ImgConfig();
++    uint64_t LastHostPage = ~0ULL;
++    for (uint64_t Page : Pages) {
++      if ((Page & ~16383ULL) == LastHostPage) {
++        continue;
++      }
++      LastHostPage = Page & ~16383ULL;
++      auto RI = CTX->SyscallHandler->QueryGuestExecutableRange(Thread, Page);
++      if (RI.Size == 0) {
++        return false;
++      }
++      if (RI.Writable && (!RI.ImageRWX || RI.FullSMC || RI.SMCWrites > C.MaxWrites)) {
++        if (C.Log) {
++          static std::atomic<int> N {};
++          if (N++ < 16) {
++            LogMan::Msg::IFmt("Ember 이미지 RWX 캐시: 걸친 페이지 고정 아님 {:X} full={} writes={}", Page, RI.FullSMC, RI.SMCWrites);
++          }
++        }
++        return false;
++      }
++    }
++    return true;
++  }
++
++  void DiskCache::EmberImgNote(const char* What, uint64_t Count) {
++    LogMan::Msg::IFmt("Ember 이미지 RWX 캐시: {} {} (적중 {} 낡음 {} 저장 {} {}MB 거절 {})", What, Count, EmberImgHits.load(), EmberImgStale.load(),
++                      EmberImgStores.load(), EmberImgStoreBytes.load() >> 20, EmberImgRejects.load());
++  }
++
+   uint64_t DiskCache::MakeLookupKey(Core::InternalThreadState* Thread, const uint64_t CodeKey, bool Writable, bool MonoBackpatcher) {
+     struct __attribute__((packed)) {
+       uint64_t CodeKey;
+@@ -490,9 +1174,18 @@ namespace DiskCache {
  
    std::optional<CodeHitData> DiskCache::Lookup(Core::InternalThreadState* Thread, std::optional<ExecutableFileSectionInfo> Region,
                                                 uint64_t GuestRIP, std::optional<uint64_t>& GuestCodeKey) {
@@ -654,8 +1475,19 @@ index fcf3f84..f5ff193 100644
 +    if (!IsReadingDiskCache() || EmberProcessExiting.load(std::memory_order_relaxed)) {
        return std::nullopt;
      }
++    const bool Prof = EmberDCProfOn;
++    uint64_t PT = Prof ? EmberDCNow() : 0;
++    auto Stamp = [&](int Stage) {
++      if (Prof) {
++        const uint64_t N = EmberDCNow();
++        EmberDCProfAdd(Stage, N - PT);
++        PT = N;
++      }
++    };
      if (Region && Region->FileStartVA) {
-@@ -503,7 +591,7 @@ namespace DiskCache {
+       struct __attribute__((packed)) {
+         uint64_t GuestOffset;
+@@ -503,7 +1196,7 @@ namespace DiskCache {
        if (!AnonCaching) {
          return std::nullopt;
        }
@@ -664,7 +1496,7 @@ index fcf3f84..f5ff193 100644
        const auto* BlockInfo = Thread->FrontendDecoder->GetDecodedBlockInfo();
  
        XXH3_state_t HashState;
-@@ -515,11 +603,11 @@ namespace DiskCache {
+@@ -515,11 +1208,11 @@ namespace DiskCache {
          uint64_t HashStart = SubBlock.Entry;
          // skip over masked in-block data and data/etc gaps between blocks
          for (auto& DataMask : SubBlock.DataMasks) {
@@ -678,36 +1510,54 @@ index fcf3f84..f5ff193 100644
          }
        }
        GuestCodeKey = XXH3_64bits_digest(&HashState);
-@@ -531,10 +619,17 @@ namespace DiskCache {
+@@ -530,11 +1223,26 @@ namespace DiskCache {
+       // LogMan::Msg::IFmt("anon lookup! length {:d} {}", GuestCodeKey, TotalSize);
      }
  
++    Stamp(DCS_KEY);
      auto RangeInfo = CTX->SyscallHandler->QueryGuestExecutableRange(Thread, GuestRIP);
 -    if (RangeInfo.Size == 0 || RangeInfo.Base > GuestRIP) {
++    Stamp(DCS_RANGE);
 +    // fex32b: 실행 범위 표는 호스트(창) 주소다 — 비교도 호스트 주소로
 +    const uint64_t HostRIP = FEXCore::Core::NormalizeToHost(GuestRIP);
 +    if (RangeInfo.Size == 0 || RangeInfo.Base > HostRIP) {
-+      return std::nullopt;
-+    }
-+    // 쓰기 가능한(RWX) 코드는 캐시하지 않는다: 자기수정코드(안티치트·JIT)의 변형이 끝없이 쌓여
-+    // 캐시가 수 GB 로 비대해지고(실측 3.8GB) 조회가 디스크 I/O 에 묶여 시작이 몇 분씩 걸렸다.
-+    if (RangeInfo.Writable) {
        return std::nullopt;
      }
 -    uint64_t Available = RangeInfo.Base + RangeInfo.Size - GuestRIP;
++    // 쓰기 가능한(RWX) 코드는 캐시하지 않는다: 자기수정코드(안티치트·JIT)의 변형이 끝없이 쌓여
++    // 캐시가 수 GB 로 비대해지고(실측 3.8GB) 조회가 디스크 I/O 에 묶여 시작이 몇 분씩 걸렸다.
++    // Ember fexstall(10-16): 단, 유니티 Mono 프로세스(모노 핵 켬)의 JIT 코드는 예외 — 모노 핵이 SMC 감시를 끄고, 블록 진입 때
++    // 게스트 해시로 확인하므로 안전하다. 안 하면 매 실행 새 메서드마다 번역(발헤임 로딩 7.9만 블록).
++    bool ImgWritable = false;
++    if (RangeInfo.Writable && !EmberCacheWritableMono()) {
++      if (!EmberCacheWritableImage(Region, RangeInfo)) {
++        return std::nullopt;
++      }
++      ImgWritable = true;
++    }
 +    uint64_t Available = RangeInfo.Base + RangeInfo.Size - HostRIP;
  
      uint64_t LookupKey =
        MakeLookupKey(Thread, *GuestCodeKey, RangeInfo.Writable, GuestRIP == CTX->GetMonoBackPatcherBlock().load(std::memory_order_relaxed));
-@@ -637,7 +732,7 @@ namespace DiskCache {
+@@ -578,6 +1286,7 @@ namespace DiskCache {
+         TriedMainEntry = true;
+       }
+     }
++    Stamp(DCS_INDEX);
+     // found a lookup key match, check for guest hash match now
+     bool FoundMatchingHash = false;
+     bool Advance = false;
+@@ -637,7 +1346,8 @@ namespace DiskCache {
            XXH3_state_t HashState;
            XXH3_128bits_reset(&HashState);
            for (uint32_t i = 0; i < Entry.GuestExtents.size(); i += 2) {
 -            XXH3_128bits_update(&HashState, reinterpret_cast<uint8_t*>(GuestRIP) + Entry.GuestExtents[i], Entry.GuestExtents[i + 1]);
++            // Match Store, including its zero-length updates (no bytes read).
 +            XXH3_128bits_update(&HashState, reinterpret_cast<uint8_t*>(HostRIP) + Entry.GuestExtents[i], Entry.GuestExtents[i + 1]);
            }
            LiveGuestHash = XXH3_128bits_digest(&HashState);
            LastFootprintHashed = CurrentFootprint;
-@@ -651,7 +746,7 @@ namespace DiskCache {
+@@ -651,10 +1361,13 @@ namespace DiskCache {
            fextl::vector<uint8_t> GuestCode(Entry.GuestSize);
            if (Entry.Size >= Entry.GuestSize && Entry.DB->ReadCacheBlob(Entry.Offset + Entry.Size - Entry.GuestSize, GuestCode)) {
              const uint8_t* CachedGuest = GuestCode.data();
@@ -716,15 +1566,140 @@ index fcf3f84..f5ff193 100644
              uint64_t DiffCount = 0;
              uint64_t DiffOffset = 0;
              for (uint32_t i = 0; i < Entry.GuestExtents.size(); i += 2) {
-@@ -790,6 +885,7 @@ namespace DiskCache {
++              if (Entry.GuestExtents[i + 1] == 0) {
++                continue;
++              }
+               uint32_t Begin = Entry.GuestExtents[i];
+               uint32_t End = Begin + Entry.GuestExtents[i + 1];
+               bool PreviousByteDiff = false;
+@@ -691,13 +1404,25 @@ namespace DiskCache {
+     }
+ 
+     if (!FoundMatchingHash || !EntryUnderReview) {
++      if (ImgWritable) {
++        // 키(파일 오프셋)는 있는데 내용이 다르다 = 지난 실행과 코드가 바뀜. 대부분 이러면 실행마다 바뀌는 코드다 → 이 프로세스에선 끔.
++        const uint64_t Stale = EmberImgStale.fetch_add(1, std::memory_order_relaxed) + 1;
++        const uint64_t Hits = EmberImgHits.load(std::memory_order_relaxed);
++        if (Stale + Hits >= 4096 && Stale * 2 > Stale + Hits && !EmberImgTripped.exchange(true)) {
++          EmberImgNote("낡은 조회가 절반 넘음 — 이 프로세스에서 끔", Stale);
++        }
++      }
        return std::nullopt;
      }
  
+     IndexEntry& Entry = *EntryUnderReview;
++    Stamp(DCS_GHASH);
+ 
+     fextl::vector<uint64_t> GuestPages;
+     for (uint32_t i = 0; i < Entry.GuestExtents.size(); i += 2) {
++      if (Entry.GuestExtents[i + 1] == 0) {
++        continue;
++      }
+       uint64_t FirstPage = (Entry.GuestExtents[i] + GuestRIP) & Utils::FEX_PAGE_MASK;
+       uint64_t LastPage = (Entry.GuestExtents[i] + GuestRIP + Entry.GuestExtents[i + 1] - 1) & Utils::FEX_PAGE_MASK;
+       for (uint64_t Page = FirstPage; Page <= LastPage; Page += Utils::FEX_PAGE_SIZE) {
+@@ -707,13 +1432,23 @@ namespace DiskCache {
+       }
+     }
+ 
++    // Ember xpcache: 블록이 걸친 다른 페이지도 고정돼 있어야 한다(트랩 포기 페이지에 검증 없는 번역을 올리면 SMC 를 놓친다)
++    if (ImgWritable && !EmberImagePagesStable(Thread, GuestPages)) {
++      EmberImgRejects.fetch_add(1, std::memory_order_relaxed);
++      return std::nullopt;
++    }
++
++    Stamp(DCS_PAGES);
+     // this seems to be a full hit, pull from disk and check the entry is big enough to have everything (except GuestCode)
+     CodeHitData HitData;
+     uint32_t EntrySizeWithoutGuestCode = Entry.Size - Entry.GuestSize;
+     HitData.Blob.resize(GuestPages.size() * sizeof(uint64_t) + EntrySizeWithoutGuestCode);
+     memcpy(HitData.Blob.data(), GuestPages.data(), GuestPages.size() * sizeof(uint64_t));
+-    uint32_t BlobOffset = GuestPages.size() * sizeof(uint64_t);
++    const size_t BlobStartOffset = GuestPages.size() * sizeof(uint64_t);
++    size_t BlobOffset = BlobStartOffset;
+     bool FoundInLRU = false;
++    Stamp(DCS_ALLOC);
++    const uint64_t ReadT0 = PT;
+     if (BlobRef && BlobRef->size() >= EntrySizeWithoutGuestCode) {
+       FoundInLRU = true;
+       memcpy(HitData.Blob.data() + BlobOffset, BlobRef->data(), EntrySizeWithoutGuestCode);
+@@ -727,6 +1462,10 @@ namespace DiskCache {
+       return std::nullopt;
+     }
+ 
++    Stamp(DCS_READ);
++    if (Prof && PT - ReadT0 > EmberDCSlowTicks()) {
++      EmberDCProfSlowRead();
++    }
+     if (EntrySizeWithoutGuestCode < sizeof(BlobFixedHeader)) {
+       return std::nullopt;
+     }
+@@ -734,9 +1473,18 @@ namespace DiskCache {
+     memcpy(&Header, HitData.Blob.data() + BlobOffset, sizeof(Header));
+     BlobOffset += sizeof(Header);
+ 
+-    uint32_t SizeNeeded = sizeof(Header) + Header.HostSize + Header.EntryPointCount * (sizeof(uint64_t) + sizeof(uint32_t));
+-    SizeNeeded += Header.SmallRelocCount * sizeof(BlobSmallRelocation) + Header.ThunkRelocCount * sizeof(BlobThunkRelocation);
+-    if (EntrySizeWithoutGuestCode != SizeNeeded) {
++    uint64_t SizeNeeded = sizeof(Header);
++    auto AddBlobSize = [&](uint64_t Count, uint64_t ElementSize) {
++      // Check both the multiplication and accumulated sum before parsing any payload spans.
++      if (Count > (UINT64_MAX - SizeNeeded) / ElementSize) {
++        return false;
++      }
++      SizeNeeded += Count * ElementSize;
++      return true;
++    };
++    if (!AddBlobSize(Header.HostSize, 1) || !AddBlobSize(Header.EntryPointCount, sizeof(uint64_t) + sizeof(uint32_t)) ||
++        !AddBlobSize(Header.SmallRelocCount, sizeof(BlobSmallRelocation)) ||
++        !AddBlobSize(Header.ThunkRelocCount, sizeof(BlobThunkRelocation)) || EntrySizeWithoutGuestCode != SizeNeeded) {
+       return std::nullopt;
+     }
+ 
+@@ -751,9 +1499,11 @@ namespace DiskCache {
+ 
+     if (StoreInMemory) {
+       auto NewBlobRef = fextl::make_shared<fextl::vector<uint8_t>>(EntrySizeWithoutGuestCode);
+-      memcpy(NewBlobRef->data(), HitData.Blob.data() + BlobOffset, EntrySizeWithoutGuestCode);
++      // Preserve the header with the payload, before relocation or RIP fixups.
++      memcpy(NewBlobRef->data(), HitData.Blob.data() + BlobStartOffset, EntrySizeWithoutGuestCode);
+       std::lock_guard Guard(IndexLock);
+-      auto CurrentIndexEntry = LookupLocked(LookupKey, Header.GuestHash, LastFootprintHashed);
++      const XXH128_hash_t HeaderGuestHash = Header.GuestHash;
++      auto CurrentIndexEntry = LookupLocked(LookupKey, HeaderGuestHash, LastFootprintHashed);
+       if (CurrentIndexEntry && !CurrentIndexEntry->MemoryBlob) {
+         std::lock_guard LRUGuard(MemoryLRULock);
+         MemoryLRU.push_front({LookupKey, Header.GuestHash, LastFootprintHashed, EntrySizeWithoutGuestCode});
+@@ -767,6 +1517,7 @@ namespace DiskCache {
+       Writer->QueueWork(fextl::make_unique<PruneMemoryLRUWorkItem>(this));
+     }
+ 
++    Stamp(DCS_LRU);
+     HitData.HostCode = {HitData.Blob.data() + BlobOffset, Header.HostSize};
+     BlobOffset += Header.HostSize;
+     HitData.EntryPointRIPs = {reinterpret_cast<uint64_t*>(HitData.Blob.data() + BlobOffset), Header.EntryPointCount};
+@@ -790,6 +1541,20 @@ namespace DiskCache {
+       return std::nullopt;
+     }
+ 
++    if (Entry.DB) {
++      Entry.DB->EmberMarkHot(Entry.Offset, Entry.Size);
++    }
++    Stamp(DCS_RELOC);
++    if (Prof) {
++      EmberDCProfHit(Header.HostSize, GuestPages.size(), Header.SmallRelocCount + Header.ThunkRelocCount, Header.EntryPointCount, FoundInLRU);
++    }
 +    EmberHitCount.fetch_add(1, std::memory_order_relaxed);
++    if (ImgWritable) {
++      const uint64_t H = EmberImgHits.fetch_add(1, std::memory_order_relaxed) + 1;
++      if ((H & (ImgConfig().Log ? 0x3FF : 0x7FFF)) == 0) {
++        EmberImgNote("적중", H);
++      }
++    }
      return HitData;
    }
  
-@@ -868,6 +964,7 @@ namespace DiskCache {
+@@ -868,6 +1633,7 @@ namespace DiskCache {
      void Run() override {
        struct MesaFOZ::mesa_index_db_file_entry IndexHeader;
        bool Success = DB->StoreCacheBlob(UniqueKey, LookupKey, Blob, IndexHeader, IndexBlob);
@@ -732,34 +1707,156 @@ index fcf3f84..f5ff193 100644
  
        if (Success) {
          bool KeepEntryInMemory = true;
-@@ -911,12 +1008,16 @@ namespace DiskCache {
+@@ -908,15 +1674,104 @@ namespace DiskCache {
+     }
+   };
+ 
++  // Ember dcbatch: CacheStoreWorkItem::Run 의 성공 뒤 처리와 같다(메모리 LRU·인덱스 항목 갱신).
++  void DiskCache::EmberFinishStore(EmberStoreItem& Item) {
++    if (!Item.Ok) {
++      return;
++    }
++    std::span<uint8_t> Blob = Item.Blob;
++    bool KeepEntryInMemory = true;
++    if (Blob.size() > MemoryLRUMaxSize) {
++      KeepEntryInMemory = false;
++    } else {
++      MemoryLRUCurrentSize += Blob.size();
++    }
++    const IndexExtraBlobHeader* IndexAfterHeader = reinterpret_cast<const IndexExtraBlobHeader*>(Item.IndexBlob.data());
++    fextl::list<MemoryLRUKey>::iterator NewLRUEntry;
++    if (KeepEntryInMemory) {
++      std::lock_guard Guard(MemoryLRULock);
++      MemoryLRU.push_front({Item.LookupKey, IndexAfterHeader->GuestHash, IndexAfterHeader->GuestFootprint, (uint32_t)Blob.size()});
++      NewLRUEntry = MemoryLRU.begin();
++    }
++    {
++      std::lock_guard Guard(IndexLock);
++      auto IndexEntry = LookupLocked(Item.LookupKey, IndexAfterHeader->GuestHash, IndexAfterHeader->GuestFootprint);
++      LOGMAN_THROW_A_FMT(IndexEntry != nullptr, "Stored Index entry not found?");
++      if (IndexEntry) {
++        IndexEntry->DB = Item.DB;
++        IndexEntry->Offset = Item.IndexHeader.cache_db_file_offset;
++        if (!KeepEntryInMemory) {
++          IndexEntry->MemoryBlob.reset();
++        } else {
++          IndexEntry->LRUEntry = NewLRUEntry;
++        }
++      }
++    }
++  }
++
++  struct DiskCache::EmberBatchWorkItem final : WorkQueueThread::WorkItem {
++    DiskCache* Self;
++    explicit EmberBatchWorkItem(DiskCache* Self)
++      : Self(Self) {}
++    void Run() override {
++      constexpr size_t MaxItems = 512;
++      constexpr size_t MaxBytes = 16u << 20;
++      for (;;) {
++        fextl::vector<EmberStoreItem> Take;
++        {
++          std::lock_guard Lk(Self->EmberBatch->M);
++          if (Self->EmberBatch->Items.empty()) {
++            Self->EmberBatch->Queued = false;
++            return;
++          }
++          Take.swap(Self->EmberBatch->Items);
++        }
++        for (size_t B = 0; B < Take.size();) {
++          size_t E = B, Bytes = 0;
++          // 같은 DB 끼리, 개수·크기 한도 안에서
++          while (E < Take.size() && E - B < MaxItems && Take[E].DB == Take[B].DB && (E == B || Bytes + Take[E].Blob.size() <= MaxBytes)) {
++            Bytes += Take[E].Blob.size();
++            E++;
++          }
++          Take[B].DB->EmberStoreBatch(&Take[B], E - B);
++          for (size_t i = B; i < E; i++) {
++            Self->EmberFinishStore(Take[i]);
++          }
++          EmberPendingStores.fetch_sub((int64_t)(E - B), std::memory_order_relaxed);
++          B = E;
++        }
++        if (Self->MemoryLRUCurrentSize > Self->MemoryLRUMaxSize + Self->MemoryLRUEvictThreshold) {
++          Self->Writer->QueueWork(fextl::make_unique<PruneMemoryLRUWorkItem>(Self));
++        }
++      }
++    }
++  };
++
    bool DiskCache::Store(Core::InternalThreadState* Thread, std::optional<ExecutableFileSectionInfo> Region, uint64_t GuestRIP,
                          uint64_t GuestCodeKey, std::span<const uint8_t> GuestCode, const CPU::CPUBackend::CompiledCode& CompiledCode,
                          std::span<const FEXCore::CPU::Relocation> Relocations, const Frontend::Decoder::DecodedBlockInformation* DecodedBlockInfo) {
 -    if (!IsWritingDiskCache()) {
-+    if (!IsWritingDiskCache() || EmberProcessExiting.load(std::memory_order_relaxed)) {
++    if (!IsWritingDiskCache() || EmberProcessExiting.load(std::memory_order_relaxed) || EmberStoreClosed.load(std::memory_order_relaxed)) {
        return false;
      }
      if (!DecodedBlockInfo) {
        return false;
      }
 +    // 쓰기 가능한(RWX) 코드는 저장하지 않는다(위 Lookup 참고)
-+    if (CTX->SyscallHandler->QueryGuestExecutableRange(Thread, GuestRIP).Writable) {
-+      return false;
++    bool ImgWritable = false;
++    if (auto StoreRange = CTX->SyscallHandler->QueryGuestExecutableRange(Thread, GuestRIP); StoreRange.Writable && !EmberCacheWritableMono()) {
++      // Ember xpcache: 이미지 안의 고정된 RWX 코드만(위 EmberCacheWritableImage 설명)
++      if (!EmberCacheWritableImage(Region, StoreRange) || !EmberImagePagesStable(Thread, DecodedBlockInfo->CodePages)) {
++        EmberImgRejects.fetch_add(1, std::memory_order_relaxed);
++        return false;
++      }
++      if (EmberImgStoreBytes.load(std::memory_order_relaxed) >= ImgConfig().BudgetBytes) {
++        if (!EmberImgTripped.exchange(true)) {
++          EmberImgNote("저장 한도 도달 — 이 프로세스에서 끔", EmberImgStoreBytes.load() >> 20);
++        }
++        return false;
++      }
++      ImgWritable = true;
 +    }
      // check for any reloc targets outside of our jurisdiction
      // todo what are they exactly? caching those blocks is great when it works, so need to figure this out and make finer-grained if we can
      if (RelocationFilter && Region) {
-@@ -1174,6 +1275,8 @@ namespace DiskCache {
+@@ -1144,6 +1999,11 @@ namespace DiskCache {
+         if (Dupe) {
+           return true;
+         }
++        // Ember xpcache: 쓰기 가능 이미지 코드는 같은 키(파일 오프셋)의 변형을 몇 개까지만 둔다(바뀌는 코드로 캐시가 불지 않게)
++        if (ImgWritable && 1 + (It->second.MoreEntries ? It->second.MoreEntries->size() : 0) >= ImgConfig().MaxVariants) {
++          EmberImgRejects.fetch_add(1, std::memory_order_relaxed);
++          return false;
++        }
+         if (!It->second.MoreEntries.get()) {
+           It->second.MoreEntries = fextl::make_unique<fextl::multimap<uint64_t, struct IndexEntry>>();
+         } else if (It->second.MoreEntries->size() >= LOOKUP_KEY_MAX_BUCKET_DEPTH) {
+@@ -1173,7 +2033,30 @@ namespace DiskCache {
+     memcpy(IndexBlob.data(), &IndexBlobHeader, sizeof(IndexExtraBlobHeader));
      memcpy(IndexBlob.data() + sizeof(IndexExtraBlobHeader), ExactGuestCodeExtents.data(), ExactGuestCodeExtents.size() * sizeof(uint32_t));
  
++    if (ImgWritable) {
++      EmberImgStoreBytes.fetch_add(TotalSize, std::memory_order_relaxed);
++      const uint64_t N = EmberImgStores.fetch_add(1, std::memory_order_relaxed) + 1;
++      if ((N & (ImgConfig().Log ? 0x3FF : 0x7FFF)) == 0) {
++        EmberImgNote("저장", N);
++      }
++    }
      // hand the rest off to the writer thread
 +    EmberStoreCount.fetch_add(1, std::memory_order_relaxed);
 +    EmberPendingStores.fetch_add(1, std::memory_order_relaxed);
++    if (EmberBatch) {
++      bool NeedWork;
++      {
++        std::lock_guard Lk(EmberBatch->M);
++        EmberBatch->Items.push_back(
++          EmberStoreItem {RWCacheDB.get(), Key, LookupKey, std::span(BlobData, TotalSize), std::move(IndexBlob), {}, false});
++        NeedWork = !EmberBatch->Queued;
++        EmberBatch->Queued = true;
++      }
++      if (NeedWork) {
++        Writer->QueueWork(fextl::make_unique<EmberBatchWorkItem>(this));
++      }
++      return true;
++    }
      Writer->QueueWork(
        fextl::make_unique<CacheStoreWorkItem>(this, RWCacheDB.get(), Key, LookupKey, std::span(BlobData, TotalSize), std::move(IndexBlob)));
      return true;
-@@ -1182,6 +1285,63 @@ namespace DiskCache {
+@@ -1182,6 +2065,88 @@ namespace DiskCache {
    uint16_t GetFormatVersion() {
      return FormatVersion;
    }
@@ -813,6 +1910,31 @@ index fcf3f84..f5ff193 100644
 +    EmberProcessExiting.store(true, std::memory_order_relaxed);
 +  }
 +
++  FEX_DEFAULT_VISIBILITY int64_t EmberDrainStoresForExit() {
++    static const int64_t MaxMs = [] {
++      const char* E = getenv("EMBER_FEX_DCDRAIN_MS");
++      return E && *E ? (int64_t)atoll(E) : (int64_t)1500;
++    }();
++    if (MaxMs <= 0 || EmberStoreClosed.exchange(true)) {
++      return 0;
++    }
++    if (EmberPendingStores.load(std::memory_order_relaxed) <= 0) {
++      return 0;
++    }
++    const auto T0 = std::chrono::steady_clock::now();
++    for (;;) {
++      const int64_t Left = EmberPendingStores.load(std::memory_order_relaxed);
++      const int64_t Ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - T0).count();
++      if (Left <= 0) {
++        return Ms > 0 ? Ms : 1;
++      }
++      if (Ms >= MaxMs) {
++        return -Left;
++      }
++      std::this_thread::sleep_for(std::chrono::milliseconds(2));
++    }
++  }
++
 +  FEX_DEFAULT_VISIBILITY int64_t EmberAOTPending() {
 +    return EmberPendingStores.load(std::memory_order_relaxed);
 +  }
@@ -824,10 +1946,72 @@ index fcf3f84..f5ff193 100644
  
  } // namespace FEXCore
 diff --git a/FEXCore/Source/Interface/Core/DiskCache.h b/FEXCore/Source/Interface/Core/DiskCache.h
-index 35d51cd..8ecf6d5 100644
+index 35d51cd..9bb0760 100644
 --- a/FEXCore/Source/Interface/Core/DiskCache.h
 +++ b/FEXCore/Source/Interface/Core/DiskCache.h
-@@ -204,6 +204,9 @@ namespace DiskCache {
+@@ -3,6 +3,7 @@
+ #include "Interface/Core/JIT/Relocations.h"
+ #include "Interface/Core/Frontend.h"
+ #include "Interface/Core/CPUBackend.h"
++#include <FEXCore/HLE/SyscallHandler.h>
+ 
+ #include <FEXCore/Core/CodeCache.h>
+ #include <FEXCore/Core/Context.h>
+@@ -152,6 +153,9 @@ namespace DiskCache {
+     bool ReadAll(fextl::vector<uint8_t>& Out); // from first blob
+     bool ReadBlob(uint64_t Offset, std::span<uint8_t> OutBlob);
+     bool WriteBlob(const MesaFOZ::foz_payload_key& Key, std::span<const std::span<const uint8_t>> BlobChunks, uint64_t& OutBlobOffset);
++    bool EmberPWrite(const uint8_t* Data, size_t Size, uint64_t Offset) {
++      return FD && FD->PWrite(Data, Size, Offset) == (ssize_t)Size;
++    }
+ 
+   private:
+     static constexpr uint32_t OPEN_LOCK_TIMEOUT_MS = 100;
+@@ -168,6 +172,30 @@ namespace DiskCache {
+     bool ReadCacheBlob(uint64_t Offset, std::span<uint8_t> OutBlob);
+     bool StoreCacheBlob(const MesaFOZ::foz_payload_key& UniqueKey, uint64_t LookupKey, std::span<const uint8_t> Blob,
+                         MesaFOZ::mesa_index_db_file_entry& IndexEntry, std::span<const uint8_t> IndexBlob);
++    // Ember dcbatch(10-23): 여러 블롭을 파일 잠금 한 쌍·쓰기 두 번으로(캐시 파일 1번, 인덱스 1번). 성공한 항목은 Ok=true.
++    bool EmberStoreBatch(struct EmberStoreItem* Items, size_t Count);
++    // Ember fexdc(10-17): 적중 때의 디스크 폴트를 없애려고 캐시 파일을 미리 읽는다(큰 pread 로 페이지 캐시를 채우고 매핑 페이지를 건드림).
++    // 지난 실행에서 적중한 64KB 구역(뜨거운 구역 파일)이 있으면 그것만, 없으면 FullFallback 일 때 파일 전체.
++    uint64_t EmberPrefetch(uint64_t MaxBytes, bool FullFallback);
++    void EmberSetupHot(const fextl::string& Path);
++    void EmberMarkHot(uint64_t Offset, uint32_t Size) {
++      if (HotWords == 0) {
++        return;
++      }
++      for (uint64_t C = Offset >> HOT_CHUNK_SHIFT, E = (Offset + (Size ? Size - 1 : 0)) >> HOT_CHUNK_SHIFT; C <= E; C++) {
++        const uint64_t W = C >> 6;
++        if (W >= HotWords) {
++          return;
++        }
++        const uint64_t Bit = 1ULL << (C & 63);
++        std::atomic_ref<uint64_t> Ref(HotBits[W]);
++        if (!(Ref.load(std::memory_order_relaxed) & Bit)) {
++          Ref.fetch_or(Bit, std::memory_order_relaxed);
++          HotDirty.store(true, std::memory_order_relaxed);
++        }
++      }
++    }
++    bool EmberWriteHotIfDirty();
+ 
+   private:
+     // stores run on the Writer, so returning quick isn't as important
+@@ -180,6 +208,12 @@ namespace DiskCache {
+     std::atomic<uint64_t> CacheFileSize;
+     FOZFile IndexFOZ;
+     bool ReadOnly = false;
++
++    static constexpr uint32_t HOT_CHUNK_SHIFT = 16;
++    fextl::vector<uint64_t> HotBits; // 크기는 열 때 한 번 정하고 그 뒤로는 atomic_ref 로만 만진다
++    uint64_t HotWords = 0;
++    std::atomic<bool> HotDirty {false};
++    fextl::string HotPath;
+   };
+ 
+   class DiskCache {
+@@ -204,9 +238,24 @@ namespace DiskCache {
        return Validation;
      }
  
@@ -837,7 +2021,87 @@ index 35d51cd..8ecf6d5 100644
    private:
      bool OpenCacheDB(const fextl::string& CacheDBName, bool ReadOnly);
      uint64_t MakeLookupKey(Core::InternalThreadState* Thread, const uint64_t ModuleOffset, bool Writable, bool MonoBackpatcher);
-@@ -244,7 +247,10 @@ namespace DiskCache {
++    bool EmberCacheWritableMono() const;
++    // Ember xpcache(10-18): 실행 파일 이미지 안의 쓰기 가능(RWX) 코드 — 로드 뒤 안 바뀌거나 한 번 풀린 뒤 고정된 것만 캐시.
++    bool EmberCacheWritableImage(const std::optional<ExecutableFileSectionInfo>& Region, const HLE::ExecutableRangeInfo& RangeInfo);
++    template<typename PageList>
++    bool EmberImagePagesStable(Core::InternalThreadState* Thread, const PageList& Pages);
++    void EmberImgNote(const char* What, uint64_t Count);
++    std::atomic<uint64_t> EmberImgHits {};
++    std::atomic<uint64_t> EmberImgStale {};
++    std::atomic<uint64_t> EmberImgStores {};
++    std::atomic<uint64_t> EmberImgStoreBytes {};
++    std::atomic<uint64_t> EmberImgRejects {};
++    std::atomic<bool> EmberImgTripped {};
+     IndexEntry* LookupLocked(const uint64_t LookupKey, const XXH128_hash_t& GuestHash, const uint64_t GuestFootprint);
+ 
+     bool ReadingDiskCache {};
+@@ -216,17 +265,25 @@ namespace DiskCache {
+     fextl::vector<fextl::unique_ptr<IndexedDB>> ROCacheDBs;
+     fextl::unique_ptr<IndexedDB> RWCacheDB;
+     Index Index;
+-    std::mutex IndexLock;
++    FEXCore::Utils::EmberRobustMutex IndexLock; // Ember fexmtx
+     bool FoundMetadata = false;
+     struct CacheStoreWorkItem;
++    // Ember dcbatch(10-23): 저장 대기 묶음(쓰기 스레드가 한꺼번에 비운다)
++    struct EmberBatchWorkItem;
++    struct EmberBatchState* EmberBatch = nullptr; // 쓰기 스레드를 만들 때 한 번 만들고 프로세스 끝까지 둔다
++    void EmberFinishStore(struct EmberStoreItem& Item);
+ 
+     struct PruneMemoryLRUWorkItem;
+     std::atomic<uint64_t> MemoryLRUCurrentSize {};
+-    std::mutex MemoryLRULock;
++    FEXCore::Utils::EmberRobustMutex MemoryLRULock; // Ember fexmtx
+     fextl::list<MemoryLRUKey> MemoryLRU;
+ 
+     // the Writer holds references to all this stuff above and needs to be last
+     fextl::unique_ptr<WorkQueueThread> Writer;
++    // Ember fexdc: 캐시 파일 미리 읽기(쓰기 스레드와 따로 — 저장을 늦추지 않게)
++    fextl::unique_ptr<WorkQueueThread> Prefetcher;
++    fextl::unique_ptr<WorkQueueThread> ProfTicker;
++    struct EmberPrefetchWorkItem;
+ 
+     FEX_CONFIG_OPT(EnableDiskCache, DISKCACHE);
+     FEX_CONFIG_OPT(Validation, DISKCACHEVALIDATION);
+@@ -240,11 +297,47 @@ namespace DiskCache {
+     uint64_t MemoryLRUEvictThreshold = MemoryLRUMaxSize / 25;
+   };
+ 
++  // Ember fexdc(10-17): 디스크 캐시 적중 1건의 단계별 비용 측정. EMBER_FEX_DCPROF=<Windows 경로> 일 때만 켠다(파일에 덧붙임).
++  enum EmberDCStage : int {
++    DCS_PRE,     // CompileBlock 앞부분(PreCompile·무효화 잠금·FindBlock·디코더 준비)
++    DCS_REGION,  // LookupExecutableFileSection
++    DCS_KEY,     // 코드 키 해시(파일 오프셋 또는 익명 디코드+해시)
++    DCS_RANGE,   // QueryGuestExecutableRange
++    DCS_INDEX,   // IndexLock + 해시표 조회 + 항목 복사
++    DCS_GHASH,   // 게스트 코드 해시(검증)
++    DCS_PAGES,   // 게스트 페이지 목록
++    DCS_ALLOC,   // 적중 결과 버퍼 할당
++    DCS_READ,    // 블롭 읽기(LRU 복사 또는 mmap/pread)
++    DCS_LRU,     // 메모리 LRU 저장
++    DCS_RELOC,   // 재배치 적용
++    DCS_LOAD,    // LoadCachedCode(코드 버퍼 할당·복사·icache)
++    DCS_EXEC,    // AddBlockExecutableRange + MarkGuestExecutableRange
++    DCS_MAP,     // AddBlockMapping
++    DCS_MISS,    // 빗나감 때 Lookup 전체
++    DCS_COUNT
++  };
++  extern bool EmberDCProfOn;
++  extern std::atomic<uint64_t> EmberCodeClears;
++  void EmberDCProfAdd(int Stage, uint64_t Ticks);
++  void EmberDCProfHit(uint64_t HostBytes, uint64_t Pages, uint64_t Relocs, uint64_t Entries, bool FromLRU);
++  void EmberDCProfMiss();
++  uint64_t EmberDCSlowTicks();
++  void EmberDCProfSlowRead();
++  void EmberDCProfDump(const char* Why);
++  static inline uint64_t EmberDCNow() {
++    uint64_t V;
++    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(V));
++    return V;
++  }
++
+   static constexpr uint16_t AnonPrefixGuestBytes = 64;
    // The current version of the diskcache.
    // This must be changed any time codegen changes occur!
    // Be aware of the impact of changing this frequently!
@@ -850,10 +2114,17 @@ index 35d51cd..8ecf6d5 100644
    static constexpr uint32_t LOOKUP_KEY_MAX_BUCKET_DEPTH = 20;
  
 diff --git a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
-index b174dab..46940e9 100644
+index b174dab..8f0b2b0 100644
 --- a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
 +++ b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
-@@ -52,6 +52,7 @@ Dispatcher::~Dispatcher() {
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: MIT
+ 
++#include <cstdlib>
+ #include "Common/VectorRegType.h"
+ #include "Interface/Context/Context.h"
+ #include "Interface/Core/CPUBackend.h"
+@@ -52,6 +53,7 @@ Dispatcher::~Dispatcher() {
  }
  
  void Dispatcher::EmitDispatcher() {
@@ -861,7 +2132,7 @@ index b174dab..46940e9 100644
    // Don't modify TMP3 since it contains our RIP once the block doesn't exist
    auto RipReg = TMP3;
  #ifdef VIXL_DISASSEMBLER
-@@ -150,7 +151,12 @@ void Dispatcher::EmitDispatcher() {
+@@ -150,7 +152,12 @@ void Dispatcher::EmitDispatcher() {
    // Clobbers TMP1/2
    // Check the EC code bitmap incase we need to exit the JIT to call into native code.
    ARMEmitter::ForwardLabel l_NotECCode;
@@ -875,7 +2146,34 @@ index b174dab..46940e9 100644
    ldr(TMP1, TMP1, PEB_EC_CODE_BITMAP_OFFSET);
  
    lsr(ARMEmitter::Size::i64Bit, TMP2, RipReg, 18);
-@@ -258,7 +264,12 @@ void Dispatcher::EmitDispatcher() {
+@@ -174,6 +181,26 @@ void Dispatcher::EmitDispatcher() {
+ 
+   ARMEmitter::ForwardLabel NoBlock;
+ 
++  // Ember fexwait(10-18): L1 먼저(fix-displ1.py 설명 참고). TMP1/TMP2/TMP4 를 쓴다 — RipReg(TMP3)는 그대로.
++  static const bool EmberDispL1 = [] {
++    const char* E = getenv("EMBER_FEX_DISPL1");
++    return !(E && *E == '0');
++  }();
++  if (EmberDispL1) {
++    ARMEmitter::ForwardLabel L1Miss;
++    ldp<ARMEmitter::IndexType::OFFSET>(TMP1, TMP2, STATE, offsetof(FEXCore::Core::CpuStateFrame, State.L1Pointer));
++    // L1Mask is pre-shifted.
++    and_(ARMEmitter::Size::i64Bit, TMP2, TMP2, RipReg.R(), ARMEmitter::ShiftType::LSL, FEXCore::ilog2(sizeof(LookupCache::LookupCacheEntry)));
++    add(TMP1, TMP1, TMP2);
++    // { HostCode, GuestCode }
++    ldp<ARMEmitter::IndexType::OFFSET>(TMP4, TMP2, TMP1, 0);
++    sub(TMP2, TMP2, RipReg);
++    (void)cbnz(ARMEmitter::Size::i64Bit, TMP2, &L1Miss);
++    (void)cbz(ARMEmitter::Size::i64Bit, TMP4, &L1Miss);
++    br(TMP4);
++    (void)Bind(&L1Miss);
++  }
++
+   if (DisableL2Cache()) {
+     (void)b(&NoBlock);
+   } else {
+@@ -258,7 +285,12 @@ void Dispatcher::EmitDispatcher() {
  #endif
  
  #ifdef ARCHITECTURE_arm64ec
@@ -889,7 +2187,7 @@ index b174dab..46940e9 100644
      LoadConstant(ARMEmitter::Size::i32Bit, TMP1, 1);
      strb(TMP1.W(), TMP2, CPU_AREA_IN_SYSCALL_CALLBACK_OFFSET);
  #endif
-@@ -266,7 +277,12 @@ void Dispatcher::EmitDispatcher() {
+@@ -266,7 +298,12 @@ void Dispatcher::EmitDispatcher() {
      Body();
  
  #ifdef ARCHITECTURE_arm64ec
@@ -1932,6 +3230,39 @@ index 6e8df95..39432ec 100644
    strb(ARMEmitter::WReg::zr, TMP2, CPU_AREA_IN_SYSCALL_CALLBACK_OFFSET);
  #endif
  
+diff --git a/FEXCore/Source/Interface/Core/LookupCache.h b/FEXCore/Source/Interface/Core/LookupCache.h
+index 391d485..b73ac1e 100644
+--- a/FEXCore/Source/Interface/Core/LookupCache.h
++++ b/FEXCore/Source/Interface/Core/LookupCache.h
+@@ -307,6 +307,28 @@ public:
+     CacheBlockMapping(Address, Entry, true, lk);
+   }
+ 
++  // Ember fexdc(10-17): 디스크 캐시 적중 때 입구 여러 개(게임 실측 평균 6~8개)를 쓰기 잠금 한 번으로 넣는다.
++  // 입구마다 잠금을 잡으면 다른 스레드의 읽기(FindBlock)가 끝나길 매번 기다렸다(쓰기 우선 잠금). 넣는 내용·순서는 같다.
++  // 돌려주는 값: GuestRIP 입구의 호스트 주소(없으면 0).
++  uintptr_t AddBlockMappings(FEXCore::Core::InternalThreadState* Thread, std::span<const uint64_t> Addresses,
++                             std::span<const uint32_t> HostOffsets, uint8_t* HostBase, std::span<const uint64_t> CodePages, uint64_t GuestRIP) {
++    std::optional<FEXCore::SHMStats::AccumulationBlock<uint64_t>> LockTime(
++      Thread->ThreadStats ? &Thread->ThreadStats->AccumulatedCacheWriteLockTime : nullptr);
++    auto lk = Shared->AcquireWriteLock();
++    LockTime.reset();
++
++    uintptr_t Result = 0;
++    for (size_t i = 0; i < Addresses.size(); i++) {
++      void* HostAddr = HostBase + HostOffsets[i];
++      const auto& Entry = Shared->AddBlockMapping(Addresses[i], CodePages, HostAddr, lk);
++      CacheBlockMapping(Addresses[i], Entry, true, lk);
++      if (Addresses[i] == GuestRIP) {
++        Result = reinterpret_cast<uintptr_t>(HostAddr);
++      }
++    }
++    return Result;
++  }
++
+   // Invalidates L1/L2 for a given guest block
+   void InvalidateCache(uint64_t Address, const LookupCacheWriteLockToken& lk) {
+     // Do L1
 diff --git a/FEXCore/Source/Interface/Core/OpcodeDispatcher/Vector.cpp b/FEXCore/Source/Interface/Core/OpcodeDispatcher/Vector.cpp
 index 6cf764f..ee920f0 100644
 --- a/FEXCore/Source/Interface/Core/OpcodeDispatcher/Vector.cpp

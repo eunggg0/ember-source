@@ -1,5 +1,5 @@
-# dxmt-dxgi — base: 3Shain/dxmt 7c8dee1 (+ submodules)
-# dxgi.dll (x86_64, i386, arm64ec)
+# dxmt-dxgi — base: DXMT 7c8dee1 with submodules; retained verified DXGI lineage
+#
 # changed 93 files (new 37)
 M src/d3d11/d3d11_context_def.cpp
 M src/d3d11/d3d11_context_imm.cpp

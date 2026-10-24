@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "snapshot_date": "2026-10-24",
+  "path_convention": "historical_recipe_id is a workspace-relative evidence identifier, not a file bundled in this repository",
+  "recipes": [
+    {
+      "component": "cx-winemac",
+      "historical_recipe_id": "Tools/dev/fgnight-1023/r3/cx/winemac/build.sh",
+      "sha256": "bd8bd88832728b99f2d7c453adc4312011eb138b1c324b6c83387ba3f270749d",
+      "status": "read-only recipe inspection; not replayed by this documentation update"
+    },
+    {
+      "component": "arm64-ntdll",
+      "historical_recipe_id": "Tools/dev/fex32load-1023/r3/build_candidate.py",
+      "sha256": "e92b95a427b33e188ac06f364132a7a20365c03155f13ced9845ad30a20e5a0f",
+      "status": "read-only recipe inspection; not replayed by this documentation update"
+    },
+    {
+      "component": "arm64-winemac",
+      "historical_recipe_id": "Tools/dev/fex32d-1019/wm/build.py",
+      "sha256": "8e0015ecd19ceef0a10caf28c95c4c8f90080eacda2ce1c7303bfc8ca05fbe2e",
+      "status": "read-only recipe inspection; not replayed by this documentation update"
+    },
+    {
+      "component": "winecoreaudio",
+      "historical_recipe_id": "Tools/dev/micwedge2-1023/build.py",
+      "sha256": "b47d421739f96daeae8570bde8cf876be0ec3861aa00546bc2fa9c68b34149d7",
+      "status": "read-only recipe inspection; not replayed by this documentation update"
+    },
+    {
+      "component": "dxmt-d3d11",
+      "historical_recipe_id": "Tools/dev/bneck-1020/dxmt/scripts/build.py",
+      "sha256": "7de076c1727b7f08b683f2187298d628a46c9252b686ff9724b7d0fa1863d4bd",
+      "status": "read-only recipe inspection; not replayed by this documentation update"
+    },
+    {
+      "component": "dxmt-d3d12",
+      "historical_recipe_id": "Tools/dev/dxmt-tess-1023/tools/build.py",
+      "sha256": "f2aed9d2a359377bc2acdf7214cabe2b9164e09550c067a3111750dfd8269ac4",
+      "status": "read-only recipe inspection; not replayed by this documentation update"
+    },
+    {
+      "component": "dxmt-winemetal",
+      "historical_recipe_id": "Tools/dev/dxmt-tess-1023/wm/build-wm.py",
+      "sha256": "370874dfda5f7b1f047eb34c482c61de2ebf4ad3fccdaa1ec15cc8a143526b83",
+      "status": "read-only recipe inspection; not replayed by this documentation update"
+    },
+    {
+      "component": "fex",
+      "historical_recipe_id": "Tools/dev/fexnight-1023/r3/dcb-build.sh",
+      "sha256": "facf5cffcd39642311b985ad038fb07c90c0f291ef124c5fbb5d6507a8ce0087",
+      "status": "read-only recipe inspection; not replayed by this documentation update"
+    },
+    {
+      "component": "dxmt-winemetal-wine11",
+      "historical_recipe_id": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/prepare-build.py",
+      "sha256": "20e9475c035d595fac286302fda637da4059a6388aae3b908f60c75da0b9c24e",
+      "status": "recipe inspected; candidate built by module-audit agent; not replayed by documentation update"
+    }
+  ]
+}

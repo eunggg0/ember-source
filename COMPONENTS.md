@@ -1,31 +1,32 @@
 # Components / 구성요소 — Ember 1.0
 
-Every open-source component in Ember.app whose license requires source (LGPL, MPL) is listed here, plus the
-modified permissive components whose patches we publish anyway (FEX, DXVK).
-The upstream archives are mirrored as assets of the `v1.0` release of this repository; `upstream/SOURCES.tsv`
-has the exact URL, size and SHA-256 of every file, and how it was verified (GPG signature or the upstream
-checksum file).
+This inventory is the 2026-10-24 local source-package candidate. It lists the open-source runtime components
+covered by this package and retains the existing upstream URLs and SHA-256 records. `upstream/SOURCES.tsv` is the
+archive manifest; this run did not upload archives or verify that the configured release mirror is public.
+Installed-artifact observations and the uninstalled CX `ANE_O=0` and stock Wine winemetal replacement candidates are separated in
+[PROVENANCE.md](PROVENANCE.md). This inventory is not a legal compliance certification.
 
-LGPL·MPL 처럼 소스 공개 의무가 있는 Ember.app 의 오픈소스 구성요소 전부와, 의무는 없지만 Ember 가 고쳐서 패치를 함께 공개하는
-구성요소(FEX, DXVK)입니다. 원본 압축 파일은 이 저장소 `v1.0` 릴리스에 그대로 올려 두었습니다.
+2026-10-24 로컬 소스 묶음 후보의 구성요소 목록입니다. 원본 URL·SHA-256은 보존했으며 이번 작업에서 압축 파일을
+게시하지 않았습니다. 설치본 대조와 미설치 CX 후보를 구분하고, 법적 적합성을 확정하지 않습니다.
 
 ## 1. Components Ember modified (source + patches)
 
-| Component | Version / base | In Ember.app | License | Upstream archive (mirrored) | SHA-256 | Ember patches |
+| Component | Version / base | In Ember.app | License | Upstream archive (manifest reference) | SHA-256 | Ember patches |
 |---|---|---|---|---|---|---|
-| Wine (WineCX, Rosetta engine) | CrossOver 26.3.0 FOSS source, `sources/wine` (Wine 11.0 + CodeWeavers changes) | `Resources/WineCX` | LGPL-2.1-or-later | https://media.codeweavers.com/pub/crossover/source/crossover-sources-26.3.0.tar.gz | `ac99c8ca4b3848f3e81784135f023df266b61c2345726ea55a50b3e030dd6872` | `patches/wine-cx` — 74 patches, 221 files (11 new) |
-| DXVK (CrossOver copy) | 1.10.3, same archive `sources/dxvk` | `Resources/Renderers/dxvk` | zlib | (same archive) | (same) | `patches/dxvk-cx` — 6 patches, 33 files |
-| Wine (WineARM64, FEX engine) | Wine 11.18 | `Resources/WineARM64` | LGPL-2.1-or-later | https://dl.winehq.org/wine/source/11.x/wine-11.18.tar.xz | `c6282f6d4daecf11f3ab9f9a2b6c598f67be7e28c363ba2cae8a3c44b611e7a4` | `patches/wine-arm64` — 34 patches, 99 files (4 new) |
-| Wine (x86_64, built-in 11.0 + `Renderers/stock`) | Wine 11.0 | `Resources/Wine`, `Resources/Renderers/stock` | LGPL-2.1-or-later | https://dl.winehq.org/wine/source/11.0/wine-11.0.tar.xz | `c07a6857933c1fc60dff5448d79f39c92481c1e9db5aa628db9d0358446e0701` | `patches/wine-x64` — 12 patches, 34 files (1 new) |
-| DXMT — d3d11 / d3d10core | 3Shain/dxmt `7c8dee1` (+ submodules nvapi `d08488f`, directx headers `9df86f2`) | `Resources/Renderers/dxmt*` | LGPL-2.1-or-later | git https://github.com/3Shain/dxmt @ 7c8dee1c2d73 → `dxmt-7c8dee1-with-submodules.tar.xz` | `2118ca72c6592cfce8378cf5e671b92321751f588deba33e9368a215c78e57ac` | `patches/dxmt-d3d11` — 7 patches, 93 files |
-| DXMT — dxgi | same | `Resources/Renderers/dxmt*` | LGPL-2.1-or-later | same | same | `patches/dxmt-dxgi` — 7 patches, 93 files |
-| DXMT — d3d12 | same | `Resources/Renderers/dxmt*` | LGPL-2.1-or-later | same | same | `patches/dxmt-d3d12` — 7 patches, 94 files |
-| DXMT — winemetal (.so + PE) | same | `Resources/Wine*/lib/wine/*/winemetal.*` | LGPL-2.1-or-later | same | same | `patches/dxmt-winemetal` — 7 patches, 93 files |
+| Wine (WineCX, Rosetta engine) | CrossOver 26.3.0 FOSS source, `sources/wine` (Wine 11.0 + CodeWeavers changes) | `Resources/WineCX` | LGPL-2.1-or-later | https://media.codeweavers.com/pub/crossover/source/crossover-sources-26.3.0.tar.gz | `ac99c8ca4b3848f3e81784135f023df266b61c2345726ea55a50b3e030dd6872` | `patches/wine-cx` — see `series` / `FILES.txt` |
+| DXVK (CrossOver copy) | 1.10.3, same archive `sources/dxvk` | `Resources/Renderers/dxvk` | zlib | (same archive) | (same) | `patches/dxvk-cx` — see `series` / `FILES.txt` |
+| Wine (WineARM64, FEX engine) | Wine 11.18 | `Resources/WineARM64` | LGPL-2.1-or-later | https://dl.winehq.org/wine/source/11.x/wine-11.18.tar.xz | `c6282f6d4daecf11f3ab9f9a2b6c598f67be7e28c363ba2cae8a3c44b611e7a4` | `patches/wine-arm64` — see `series` / `FILES.txt` |
+| Wine (x86_64, built-in 11.0 + `Renderers/stock`) | Wine 11.0 | `Resources/Wine`, `Resources/Renderers/stock` | LGPL-2.1-or-later | https://dl.winehq.org/wine/source/11.0/wine-11.0.tar.xz | `c07a6857933c1fc60dff5448d79f39c92481c1e9db5aa628db9d0358446e0701` | `patches/wine-x64` — see `series` / `FILES.txt` |
+| DXMT — d3d11 / d3d10core | 3Shain/dxmt `7c8dee1` (+ submodules nvapi `d08488f`, directx headers `9df86f2`) | `Resources/Renderers/dxmt*` | LGPL-2.1-or-later | git https://github.com/3Shain/dxmt @ 7c8dee1c2d73 → `dxmt-7c8dee1-with-submodules.tar.xz` | `2118ca72c6592cfce8378cf5e671b92321751f588deba33e9368a215c78e57ac` | `patches/dxmt-d3d11` — see `series` / `FILES.txt` |
+| DXMT — dxgi | same | `Resources/Renderers/dxmt*` | LGPL-2.1-or-later | same | same | `patches/dxmt-dxgi` — see `series` / `FILES.txt` |
+| DXMT — d3d12 | same | `Resources/Renderers/dxmt*` | LGPL-2.1-or-later | same | same | `patches/dxmt-d3d12` — see `series` / `FILES.txt` |
+| DXMT — winemetal (.so + PE) | same | `Resources/WineCX/lib/wine/*/winemetal.*`, `Resources/WineARM64/lib/wine/*/winemetal.*` | LGPL-2.1-or-later | same | same | `patches/dxmt-winemetal` — see `series` / `FILES.txt` |
+| DXMT — stock Wine winemetal replacement | same | `Resources/Wine/lib/wine/x86_64-unix/winemetal.so` | LGPL-2.1-or-later | same | same | `patches/dxmt-winemetal-wine11` — 1 patch, 27 changed files; pristine upstream + native candidate/support closure, dynamic Tone bridge; uninstalled candidate |
 | LLVM (statically linked into DXMT airconv / winemetal) | 15.0.7, unmodified | inside `winemetal.so` | Apache-2.0 WITH LLVM-exception | https://github.com/llvm/llvm-project/releases/download/llvmorg-15.0.7/llvm-project-15.0.7.src.tar.xz | `8b5fcb24b4128cf04df1b0b9410ce8b1a729cb3c544e6da885d234280dedeac6` | — |
-| FEX (ARM64EC / WoW64 DLLs) | FEX-Emu/FEX `48d7175` | `Resources/WineARM64/lib/wine/aarch64-*/lib{arm64ec,wow64}fex.*` | MIT | git https://github.com/FEX-Emu/FEX @ 48d7175 → `FEX-48d7175-with-submodules.tar.xz` (test-binary submodules left out) | `02130743e68c9fdece5575636391ad3079a9c1384d72d403ee50482b22f37f3e` | `patches/fex` — 5 patches, 61 files |
+| FEX (ARM64EC / WoW64 DLLs) | FEX-Emu/FEX `48d7175` | `Resources/WineARM64/lib/wine/aarch64-*/lib{arm64ec,wow64}fex.*` | MIT | git https://github.com/FEX-Emu/FEX @ 48d7175 → `FEX-48d7175-with-submodules.tar.xz` (test-binary submodules left out) | `02130743e68c9fdece5575636391ad3079a9c1384d72d403ee50482b22f37f3e` | `patches/fex` — see `series` / `FILES.txt` |
 | ForgePlay-derived Wine changes (7) | ForgePlay 1.3 bundled Wine 11.12 patches | inside WineCX / WineARM64 / Wine (see `patches/forgeplay-origin/NOTICE.md`) | LGPL-2.1-or-later | originals in `patches/forgeplay-origin/` | — | already contained in the Wine series above |
 
-## 2. Unmodified LGPL / MPL components (source mirrored)
+## 2. Unmodified LGPL / MPL components (source manifest)
 
 ### 2.1 Rosetta engine (x86_64) — `Resources/GStreamer`, `Resources/Wine/lib`, `Resources/WineCX/lib`
 
@@ -47,7 +48,7 @@ LGPL·MPL 처럼 소스 공개 의무가 있는 Ember.app 의 오픈소스 구�
 
 The MacPorts port definitions and patches for the Gcenx libraries are in `macports/ports/` (snapshot commits in
 `macports/REFS.txt`). FreeType 2.13.3 (FTL) for both x86_64 Wines is built by Ember (`build/arm64-deps/freetype-x64-min1015.sh`)
-and its archive is mirrored too.
+and its archive is recorded in the manifest too.
 
 ### 2.2 FEX engine (arm64) — `Resources/WineARM64/lib` (all built by Ember from these archives, unmodified; `build/arm64-deps/build-deps.sh`)
 
@@ -65,7 +66,7 @@ and its archive is mirrored too.
 | libunistring | 1.4.2 | LGPL-3.0-or-later (or GPL-2.0-or-later) | https://ftp.gnu.org/gnu/libunistring/libunistring-1.4.2.tar.xz | `5b46e74377ed7409c5b75e7a96f95377b095623b689d8522620927964a41499c` |
 | gettext libintl | 1.0 | LGPL-2.1-or-later | https://ftp.gnu.org/gnu/gettext/gettext-1.0.tar.xz | `71132a3fb71e68245b8f2ac4e9e97137d3e5c02f415636eb508ae607bc01add7` |
 | libusb | 1.0.29 | LGPL-2.1-or-later | https://github.com/libusb/libusb/releases/download/v1.0.29/libusb-1.0.29.tar.bz2 | `5977fc950f8d1395ccea9bd48c06b3f808fd3c2c961b44b0c2e6e29fc3a70a85` |
-| FreeType · libpng · PCRE2 · ORC (permissive, mirrored for a complete rebuild) | 2.14.3 · 1.6.58 · 10.48 · 0.4.44 | FTL · libpng-2.0 · BSD-3 · BSD-2 | see `upstream/SOURCES.tsv` | |
+| FreeType · libpng · PCRE2 · ORC (permissive, recorded for rebuilding) | 2.14.3 · 1.6.58 · 10.48 · 0.4.44 | FTL · libpng-2.0 · BSD-3 · BSD-2 | see `upstream/SOURCES.tsv` | |
 
 ### 2.3 Wine add-ons (all engines)
 
@@ -78,7 +79,7 @@ and its archive is mirrored too.
 ## 3. Not included here
 
 - Ember's own software (the Ember app, EmberCore libraries `libEmberFG/HUD/GM/Up/Tone`, models, artwork) — proprietary,
-  separate libraries that are loaded at run time; not derived from the LGPL components.
+  implementation sources remain excluded; LGPL-side dynamic-loading adapters remain in the applicable patch series.
 - Apple D3DMetal and Metal Shader Converter libraries — not shipped; the user installs them from Apple.
 - Permissive components with notice-only duties (MoltenVK, SDL2, ICU, libxml2, zlib, Sparkle, llama.cpp, …) — notices are in
   Ember › Settings › Licenses and on the website's license page.

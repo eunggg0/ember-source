@@ -1,14 +1,22 @@
 From: Ember <ember@users.noreply.github.com>
 Subject: [PATCH 4/5] FEXCore-include: Ember changes
 
-Base: FEX-Emu/FEX 48d7175 (+ submodules)
+Base: FEX 48d7175 with submodules
 License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
 ---
 diff --git a/FEXCore/include/FEXCore/Core/CodeCache.h b/FEXCore/include/FEXCore/Core/CodeCache.h
-index 3f34a78..e18b8b1 100644
+index 3f34a78..8d3ee81 100644
 --- a/FEXCore/include/FEXCore/Core/CodeCache.h
 +++ b/FEXCore/include/FEXCore/Core/CodeCache.h
-@@ -161,6 +161,11 @@ public:
+@@ -17,6 +17,7 @@
+ #include <shared_mutex>
+ #include <span>
+ #include <unistd.h>
++#include <FEXCore/Utils/WritePriorityMutex.h>
+ 
+ namespace FEXCore {
+ 
+@@ -161,15 +162,20 @@ public:
    // Thread-safely commit any pending data to disk
    void Flush(size_t Offset);
  
@@ -20,11 +28,22 @@ index 3f34a78..e18b8b1 100644
  private:
    // Queues data into an internal ring buffer.
    // Call Flush() to commit the data to disk.
+   void AppendData(std::span<const std::byte> Data);
+ 
+   // Commit given data range to disk
+-  void Flush(size_t Offset, std::unique_lock<std::shared_mutex>&);
++  void Flush(size_t Offset, std::unique_lock<FEXCore::Utils::EmberRobustSharedMutex>&);
+ 
+-  std::shared_mutex Mutex;
++  FEXCore::Utils::EmberRobustSharedMutex Mutex; // Ember fexmtx
+   fextl::vector<std::byte> Buffer;
+   std::atomic<size_t> BufferOffset {0};
+ 
 diff --git a/FEXCore/include/FEXCore/Core/DiskCache.h b/FEXCore/include/FEXCore/Core/DiskCache.h
-index 22cabec..561d1a8 100644
+index 22cabec..27962fa 100644
 --- a/FEXCore/include/FEXCore/Core/DiskCache.h
 +++ b/FEXCore/include/FEXCore/Core/DiskCache.h
-@@ -5,6 +5,20 @@
+@@ -5,6 +5,23 @@
  
  #include <cstdint>
  
@@ -42,6 +61,9 @@ index 22cabec..561d1a8 100644
 +FEX_DEFAULT_VISIBILITY int64_t EmberAOTPending();
 +// 프로세스 종료가 시작됐다(다른 스레드가 곧/이미 죽음): 이후 디스크 캐시 조회·저장을 하지 않는다.
 +FEX_DEFAULT_VISIBILITY void EmberSetProcessExiting();
++// Ember dcbatch(10-23): 종료 직전 — 새 저장을 막고 쓰기 큐가 빌 때까지 최대 EMBER_FEX_DCDRAIN_MS(기본 1500, 0=끔) 기다린다.
++// 돌려주는 값: 기다린 ms(남은 것이 없으면 0), 다 못 비웠으면 음수(-남은 수).
++FEX_DEFAULT_VISIBILITY int64_t EmberDrainStoresForExit();
 +// Ember 코드 맵(10-01): 이 프로세스가 디스크 캐시에 쓰는 중인가(코드 맵을 버킷 폴더에 남길지).
 +FEX_DEFAULT_VISIBILITY bool EmberDiskCacheWriting(FEXCore::Context::Context* CTX);
  } // namespace FEXCore::DiskCache
@@ -81,15 +103,20 @@ index 0000000..ed706dd
 +}
 +} // namespace FEXCore::Core
 diff --git a/FEXCore/include/FEXCore/HLE/SyscallHandler.h b/FEXCore/include/FEXCore/HLE/SyscallHandler.h
-index 0ba0218..7c27cbc 100644
+index 0ba0218..53e463e 100644
 --- a/FEXCore/include/FEXCore/HLE/SyscallHandler.h
 +++ b/FEXCore/include/FEXCore/HLE/SyscallHandler.h
-@@ -21,6 +21,8 @@ struct ExecutableRangeInfo {
+@@ -21,6 +21,13 @@ struct ExecutableRangeInfo {
    uint64_t Base;
    uint64_t Size;
    bool Writable;
 +  // 쓰기 트랩을 포기한(너무 자주 폴트한) 페이지: 블록마다 코드 바이트를 검증해 SMC 를 잡는다
 +  bool FullSMC {};
++  // Ember xpcache(10-18): 이 호스트 페이지에서 번역된 코드가 쓰기로 무효화된 누적 횟수(SMC 폴트·추적 안 되는 쓰기, 255 에서 멈춤).
++  // 보호 변경·시간 창으로 지워지지 않는다. 쓰기 가능 이미지 코드의 디스크 캐시 허용 판단에 쓴다.
++  uint8_t SMCWrites {};
++  // Ember xpcache2: 이 주소가 PE 헤더에 쓰기+실행으로 선언된 이미지 섹션(.xpdata 같은) 안이다. SMCWrites 는 이런 페이지만 센다.
++  bool ImageRWX {};
  };
  
  class SyscallHandler;
@@ -196,6 +223,27 @@ index df8e4b7..6d1cbd3 100644
  [[noreturn]] FEX_DEFAULT_VISIBILITY void LongJump(const JumpBuf& Buffer, uint64_t Value);
  FEX_DEFAULT_VISIBILITY void ManuallyLoadJumpBuf(const JumpBuf& Buffer, uint64_t Value, uint64_t* GPRs, __uint128_t* FPRs, uint64_t* PC);
  } // namespace FEXCore::UncheckedLongJump
+diff --git a/FEXCore/include/FEXCore/Utils/ThreadPoolAllocator.h b/FEXCore/include/FEXCore/Utils/ThreadPoolAllocator.h
+index 69e410c..775e47d 100644
+--- a/FEXCore/include/FEXCore/Utils/ThreadPoolAllocator.h
++++ b/FEXCore/include/FEXCore/Utils/ThreadPoolAllocator.h
+@@ -5,6 +5,7 @@
+ #include <FEXCore/Utils/LogManager.h>
+ #include <FEXCore/Utils/MathUtils.h>
+ #include <FEXCore/Utils/TypeDefines.h>
++#include <FEXCore/Utils/WritePriorityMutex.h>
+ #include <FEXCore/fextl/list.h>
+ 
+ #include <atomic>
+@@ -332,7 +333,7 @@ protected:
+   /**
+    * @brief Mutex to ensure thread safety while shuffling buffers around and allocating
+    */
+-  std::mutex AllocationMutex;
++  FEXCore::Utils::EmberRobustMutex AllocationMutex; // Ember fexmtx
+ 
+ private:
+   /**
 diff --git a/FEXCore/include/FEXCore/Utils/TypeDefines.h b/FEXCore/include/FEXCore/Utils/TypeDefines.h
 index ec03ac6..59cdc7c 100644
 --- a/FEXCore/include/FEXCore/Utils/TypeDefines.h
@@ -208,3 +256,361 @@ index ec03ac6..59cdc7c 100644
 +// 묶여 보호가 안 된다. 할당 단위(64K)로 잡아 어느 호스트 페이지 크기에서도 온전히 떼어낼 수 있게 한다.
 +constexpr size_t FEX_JIT_GUARD_SIZE = 64 * 1024;
  } // namespace FEXCore::Utils
+diff --git a/FEXCore/include/FEXCore/Utils/WritePriorityMutex.h b/FEXCore/include/FEXCore/Utils/WritePriorityMutex.h
+index bf1bd2b..e10e087 100644
+--- a/FEXCore/include/FEXCore/Utils/WritePriorityMutex.h
++++ b/FEXCore/include/FEXCore/Utils/WritePriorityMutex.h
+@@ -3,6 +3,8 @@
+ #include <atomic>
+ #include <cstdint>
+ #include <limits.h>
++#include <mutex>
++#include <shared_mutex>
+ 
+ #if !defined(_WIN32)
+ #include <linux/futex.h> /* Definition of FUTEX_* constants */
+@@ -10,6 +12,7 @@
+ #include <unistd.h>
+ #else
+ #include <synchapi.h>
++#include <processthreadsapi.h>
+ // Don't pull in all WIN32 headers for INFINITE. Causes too many problems.
+ #ifndef INFINITE
+ #define INFINITE 0xffffffff
+@@ -22,6 +25,19 @@
+ 
+ namespace FEXCore::Utils::WritePriorityMutex {
+ 
++#if defined(_WIN32)
++// Ember fexmtx(10-18): 죽은 스레드가 쥔 채 남긴 잠금을 거두기 위한 고리(프런트엔드가 채움).
++namespace EmberRobust {
++  // 잠금을 1초 넘게 기다릴 때 1초마다 부른다(죽은 스레드를 찾아 EmberRecoverDead 를 부르는 일).
++  inline void (*LongWaitHook)() {};
++  // 지금 스레드가 잠금 Mutex 를 Kind(0 = 공유, 1 = 단독) 로 잡음(+1)/놓음(-1). 스레드별 기록은 프런트엔드가 한다.
++  // 단독은 잡기 "전"에 +1(기다리다 죽어도 어느 잠금인지 알게), 공유는 잡은 "뒤"에 +1·놓기 "전"에 -1.
++  inline void (*Note)(void* Mutex, int Kind, int Delta) {};
++  // 프로세스 종료 중(나 말고 다 죽음): 주소 대기·깨우기를 쓰지 않는다.
++  inline std::atomic<bool> ExitAlone {false};
++} // namespace EmberRobust
++#endif
++
+ // A custom mutex that prioritizes exclusive locks.
+ // In highly contested scenarios, this can help minimize overall contention time.
+ //
+@@ -46,8 +62,18 @@ public:
+   Mutex& operator=(Mutex&&) = delete;
+ 
+   void lock() {
++#if defined(_WIN32)
++    EmberNote(1, 1);
++    LockImpl();
++    std::atomic_ref<uint32_t>(EmberExclusiveTid).store(GetCurrentThreadId(), std::memory_order_relaxed);
++#else
++    LockImpl();
++#endif
++  }
++
++  void LockImpl() {
+     // Try a non-blocking lock first.
+-    if (try_lock()) {
++    if (TryLockRaw()) {
+       return;
+     }
+ 
+@@ -77,6 +103,10 @@ public:
+ 
+     // Thread added to waiter list.
+     Expected = Desired;
++#if defined(_WIN32)
++    const int EmberSlot = EmberRegisterWriter();
++    uint32_t EmberTimeouts = 0;
++#endif
+ 
+     while (true) {
+       bool Sleep = false;
+@@ -105,6 +135,9 @@ public:
+       if (!Sleep) {
+         // Acquired early.
+         LOGMAN_THROW_A_FMT((Desired & WRITE_OWNED_BIT) == WRITE_OWNED_BIT, "Somehow acquired a write-lock without it being set!");
++#if defined(_WIN32)
++        EmberUnregisterWriter(EmberSlot);
++#endif
+         return;
+       }
+ 
+@@ -116,15 +149,26 @@ public:
+       // This thread already incremented `WRITE_WAITER_INCREMENT` before this loop.
+       // - Linux waits for the full 32-bits to change (With bitset wakeup).
+       // - Win32 also waits for the full 32-bits to change (with offset addr on the reader side to reduce stampeding).
++#if defined(_WIN32)
++      FutexWaitForWriteAvailable(Desired, EmberTimeouts);
++#else
+       FutexWaitForWriteAvailable(Desired);
++#endif
+ 
+       Expected = AtomicFutex.load(std::memory_order_relaxed);
+     }
+   }
+ 
+   void lock_shared() {
++    LockSharedImpl();
++#if defined(_WIN32)
++    EmberNote(0, 1);
++#endif
++  }
++
++  void LockSharedImpl() {
+     // Try an uncontended lock first.
+-    if (try_lock_shared()) {
++    if (TryLockSharedRaw()) {
+       return;
+     }
+ 
+@@ -137,6 +181,9 @@ public:
+ 
+     uint32_t Expected = AtomicFutex.load(std::memory_order_relaxed);
+     uint32_t Desired {};
++#if defined(_WIN32)
++    uint32_t EmberTimeouts = 0;
++#endif
+ 
+     while (true) {
+       bool Sleep = false;
+@@ -166,13 +213,27 @@ public:
+       // - Linux waits for full 32-bit futex.
+       // - Win32 waits for upper 16-bits to not match (Either zero writer owned, writer-wait is draining, and `READ_WAITER_BIT` changed).
+       // Can get some spurious wake-ups which will `or` the `READ_WAITER_BIT` again, which does nothing.
++#if defined(_WIN32)
++      FutexWaitForReadAvailable(Desired, EmberTimeouts);
++#else
+       FutexWaitForReadAvailable(Desired);
++#endif
+ 
+       Expected = AtomicFutex.load(std::memory_order_relaxed);
+     }
+   }
+ 
+   void unlock() {
++#if defined(_WIN32)
++    std::atomic_ref<uint32_t>(EmberExclusiveTid).store(0, std::memory_order_relaxed);
++    UnlockImpl();
++    EmberNote(1, -1);
++#else
++    UnlockImpl();
++#endif
++  }
++
++  void UnlockImpl() {
+     auto AtomicFutex = std::atomic_ref<uint32_t>(Futex);
+ 
+     uint32_t Expected = AtomicFutex.load(std::memory_order_relaxed);
+@@ -204,6 +265,13 @@ public:
+   }
+ 
+   void unlock_shared() {
++#if defined(_WIN32)
++    EmberNote(0, -1);
++#endif
++    UnlockSharedImpl();
++  }
++
++  void UnlockSharedImpl() {
+     auto AtomicFutex = std::atomic_ref<uint32_t>(Futex);
+ 
+     uint32_t Desired {};
+@@ -232,6 +300,17 @@ public:
+   }
+ 
+   bool try_lock() {
++    const bool Got = TryLockRaw();
++#if defined(_WIN32)
++    if (Got) {
++      std::atomic_ref<uint32_t>(EmberExclusiveTid).store(GetCurrentThreadId(), std::memory_order_relaxed);
++      EmberNote(1, 1);
++    }
++#endif
++    return Got;
++  }
++
++  bool TryLockRaw() {
+     auto AtomicFutex = std::atomic_ref<uint32_t>(Futex);
+ 
+     uint32_t Expected = 0;
+@@ -245,6 +324,60 @@ public:
+ 
+   // Can race with other threads trying to lock shared!
+   bool try_lock_shared() {
++    const bool Got = TryLockSharedRaw();
++#if defined(_WIN32)
++    if (Got) {
++      EmberNote(0, 1);
++    }
++#endif
++    return Got;
++  }
++
++#if defined(_WIN32)
++  // Ember fexmtx: 죽은 스레드(Tid)가 단독으로 쥐었거나 쓰기 대기로 남긴 몫, 그리고 쥐고 있던 공유 잠금 SharedHeld 개를 거둔다.
++  // 돌려주는 값: 비트 1 = 단독 주인 풀어 줌, 2 = 쓰기 대기 수 되돌림, 4 = 공유 잠금 되돌림.
++  uint32_t EmberRecoverDead(uint32_t Tid, uint32_t SharedHeld) {
++    uint32_t Fixed = 0;
++    if (!Tid) {
++      return 0;
++    }
++    uint32_t Want = Tid;
++    if (std::atomic_ref<uint32_t>(EmberExclusiveTid).compare_exchange_strong(Want, 0, std::memory_order_acq_rel)) {
++      UnlockImpl();
++      Fixed |= 1;
++    }
++    for (auto& Slot : EmberWaitingWriters) {
++      uint32_t W = Tid;
++      if (std::atomic_ref<uint32_t>(Slot).compare_exchange_strong(W, 0, std::memory_order_acq_rel)) {
++        auto AtomicFutex = std::atomic_ref<uint32_t>(Futex);
++        uint32_t Expected = AtomicFutex.load(std::memory_order_relaxed);
++        uint32_t Desired {};
++        do {
++          if ((Expected & WRITE_WAITER_COUNT_MASK) == 0) {
++            Desired = Expected;
++            break;
++          }
++          Desired = Expected - WRITE_WAITER_INCREMENT;
++          if ((Desired & WRITE_WAITER_COUNT_MASK) == 0 && (Desired & WRITE_OWNED_BIT) == 0) {
++            Desired &= ~READ_WAITER_BIT;
++          }
++        } while (AtomicFutex.compare_exchange_strong(Expected, Desired, std::memory_order_acq_rel, std::memory_order_acquire) == false);
++        if ((Expected & READ_WAITER_BIT) && !(Desired & READ_WAITER_BIT)) {
++          FutexWakeReaders();
++        }
++        FutexWakeWriter();
++        Fixed |= 2;
++      }
++    }
++    for (uint32_t i = 0; i < SharedHeld; i++) {
++      UnlockSharedImpl();
++      Fixed |= 4;
++    }
++    return Fixed;
++  }
++#endif
++
++  bool TryLockSharedRaw() {
+     auto AtomicFutex = std::atomic_ref<uint32_t>(Futex);
+     uint32_t Expected = AtomicFutex.load(std::memory_order_relaxed);
+ 
+@@ -294,23 +427,85 @@ private:
+     ::syscall(SYS_futex, &Futex, FUTEX_PRIVATE_FLAG | FUTEX_WAKE_BITSET, INT_MAX, nullptr, nullptr, FUTEX_BITSET_WAIT_READERS);
+   }
+ #else
++  void EmberNote(int Kind, int Delta) {
++    if (auto F = EmberRobust::Note) {
++      F(this, Kind, Delta);
++    }
++  }
++
++  // Ember fexmtx: 250ms 마다 깨어 1초(4번)마다 LongWaitHook — 죽은 스레드가 남긴 몫이 있으면 프런트엔드가 거둔다.
++  static void EmberAfterWait(bool Woke, uint32_t& Timeouts) {
++    if (Woke) {
++      return;
++    }
++    if (++Timeouts >= 4) {
++      Timeouts = 0;
++      if (auto F = EmberRobust::LongWaitHook) {
++        F();
++      }
++    }
++  }
++
++  // 종료 중: 1ms 씩 쉬며 보다가 1초 지나면 상태를 비운다(남은 주인·대기는 죽은 스레드뿐).
++  bool EmberExitWait(uint32_t& Timeouts) {
++    if (!EmberRobust::ExitAlone.load(std::memory_order_relaxed)) {
++      return false;
++    }
++    Sleep(1);
++    if (++Timeouts >= 100) {
++      Timeouts = 0;
++      std::atomic_ref<uint32_t>(EmberExclusiveTid).store(0, std::memory_order_relaxed);
++      std::atomic_ref<uint32_t>(Futex).store(0, std::memory_order_release);
++    }
++    return true;
++  }
++
+   // Writers wait for the full 32-bit futex.
+-  void FutexWaitForWriteAvailable(uint32_t Expected) {
+-    WaitOnAddress(&Futex, &Expected, sizeof(Futex), INFINITE);
++  void FutexWaitForWriteAvailable(uint32_t Expected, uint32_t& Timeouts) {
++    if (EmberExitWait(Timeouts)) {
++      return;
++    }
++    EmberAfterWait(WaitOnAddress(&Futex, &Expected, sizeof(Futex), 250), Timeouts);
+   }
+ 
+   // Readers wait for Futex bits [31:16] to be zero.
+-  void FutexWaitForReadAvailable(uint32_t Expected) {
++  void FutexWaitForReadAvailable(uint32_t Expected, uint32_t& Timeouts) {
++    if (EmberExitWait(Timeouts)) {
++      return;
++    }
+     auto ReadWaiterAddress = reinterpret_cast<uint8_t*>(&Futex) + 2;
+     uint16_t smol_Expected = Expected >> 16;
+-    WaitOnAddress(ReadWaiterAddress, &smol_Expected, sizeof(smol_Expected), INFINITE);
++    EmberAfterWait(WaitOnAddress(ReadWaiterAddress, &smol_Expected, sizeof(smol_Expected), 250), Timeouts);
++  }
++
++  int EmberRegisterWriter() {
++    const uint32_t Self = GetCurrentThreadId();
++    for (int i = 0; i < 4; i++) {
++      uint32_t Z = 0;
++      if (std::atomic_ref<uint32_t>(EmberWaitingWriters[i]).compare_exchange_strong(Z, Self, std::memory_order_acq_rel)) {
++        return i;
++      }
++    }
++    return -1;
++  }
++
++  void EmberUnregisterWriter(int Slot) {
++    if (Slot >= 0) {
++      std::atomic_ref<uint32_t>(EmberWaitingWriters[Slot]).store(0, std::memory_order_release);
++    }
+   }
+ 
+   void FutexWakeWriter() {
++    if (EmberRobust::ExitAlone.load(std::memory_order_relaxed)) {
++      return; // 종료 중: 깨울 산 스레드 없음(죽은 대기 항목을 건드리지 않음)
++    }
+     WakeByAddressSingle(&Futex);
+   }
+ 
+   void FutexWakeReaders() {
++    if (EmberRobust::ExitAlone.load(std::memory_order_relaxed)) {
++      return;
++    }
+     auto ReadWaiterAddress = reinterpret_cast<uint8_t*>(&Futex) + 2;
+     WakeByAddressAll(ReadWaiterAddress);
+   }
+@@ -383,6 +578,11 @@ private:
+     return false;
+   }
+ 
++#if defined(_WIN32)
++  uint32_t EmberExclusiveTid {};
++  uint32_t EmberWaitingWriters[4] {};
++#endif
++
+   constexpr static uint32_t WRITE_OWNED_BIT = 1U << 31;
+   constexpr static uint32_t READ_WAITER_BIT = 1U << 30;
+   constexpr static uint32_t WRITE_WAITER_OFFSET = 16;
+@@ -410,3 +610,14 @@ private:
+   uint32_t Futex {};
+ };
+ } // namespace FEXCore::Utils::WritePriorityMutex
++
++namespace FEXCore::Utils {
++// Ember fexmtx: Windows 에선 죽은 스레드 몫을 거둘 수 있는 잠금, 그 밖에선 표준 잠금.
++#if defined(_WIN32)
++using EmberRobustMutex = WritePriorityMutex::Mutex;
++using EmberRobustSharedMutex = WritePriorityMutex::Mutex;
++#else
++using EmberRobustMutex = std::mutex;
++using EmberRobustSharedMutex = std::shared_mutex;
++#endif
++} // namespace FEXCore::Utils

@@ -1,0 +1,413 @@
+{
+  "schema": 1,
+  "observed_at": "2026-10-24T09:29:45.549276+00:00",
+  "method": "Read-only full-byte SHA256 comparison of installed files and existing build artifacts; no builds, codesign changes, runtime execution, upload or deployment.",
+  "path_convention": "bundle_path is app-relative; *_id fields are historical workspace-relative evidence identifiers, not required repository paths",
+  "installed_observation_summary": {
+    "targeted_mappings": 19,
+    "exact_artifact_matches": 16,
+    "builtin_normalized_matches": 3,
+    "fex32d_members": 854,
+    "fex32d_original_stage_matches": 849
+  },
+  "installed_observations": [
+    {
+      "component": "Wine ARM64 ntdll thread mmap",
+      "bundle_path": "Contents/Resources/WineARM64/lib/wine/aarch64-unix/ntdll.so",
+      "observed_installed_sha256": "3862d3039abd5679707ba71714d3720ab9082de748fb8437f2dd868d0e23af72",
+      "observed_installed_md5": "9f9b171788a2d3374d5e0dbbf33ccc86",
+      "build_artifact_id": "Tools/dev/fex32load-1023/r3/candidate/ntdll.so",
+      "build_artifact_sha256": "3862d3039abd5679707ba71714d3720ab9082de748fb8437f2dd868d0e23af72",
+      "byte_match": true,
+      "builtin_marker_normalized_match": false,
+      "source_ids": [
+        "Tools/dev/fex32d-1019/wsrc",
+        "Tools/dev/fex32load-1023/r3/source/virtual.c"
+      ],
+      "recipe_evidence_ids": [
+        "Tools/dev/fex32load-1023/r3/build_candidate.py",
+        "Tools/dev/fex32load-1023/r3/logs/source-dependencies.json",
+        "Tools/dev/fex32load-1023/r3/logs/object-inputs.json",
+        "Tools/dev/fex32load-1023/r3/INSTALL.md"
+      ],
+      "limitations": "Exact installed bytes match archived candidate; recipe reuses baseline/objects except virtual.o and version-min11.o. All linked source must be preserved, not only virtual.c."
+    },
+    {
+      "component": "Wine CX ntdll",
+      "bundle_path": "Contents/Resources/WineCX/lib/wine/x86_64-unix/ntdll.so",
+      "observed_installed_sha256": "f1144a5a53ad69e3b9437f4aea6b8b7ec5ec5553cedcb388165c512287f4db77",
+      "observed_installed_md5": "17d68bee49dde2d725fb9fed52a381df",
+      "build_artifact_id": "Tools/dev/fexcompat1/deploy/stage-env-cx/x86_64-unix/ntdll.so",
+      "build_artifact_sha256": "f1144a5a53ad69e3b9437f4aea6b8b7ec5ec5553cedcb388165c512287f4db77",
+      "byte_match": true,
+      "builtin_marker_normalized_match": false,
+      "source_ids": [
+        ".refs/cx/src/sources/wine/dlls/ntdll"
+      ],
+      "recipe_evidence_ids": [
+        "Tools/dev/main/morning-1008.md",
+        "Tools/dev/fexcompat1/deploy/deploy-ntdll.sh"
+      ],
+      "limitations": "Exact staged bytes match installed; current .refs/cx build-ember2 output differs (8318243b9cff9fc1b35234957c419516 MD5); no rebuild and complete source-to-object replay not established."
+    },
+    {
+      "component": "Wine CX winemac",
+      "bundle_path": "Contents/Resources/WineCX/lib/wine/x86_64-unix/winemac.so",
+      "observed_installed_sha256": "84989892618eaa318f359fef9fba8bc27933c1cf767eead7052747ec59392b04",
+      "observed_installed_md5": "df91cb88178629c25aa3dd3772b79c17",
+      "build_artifact_id": "Tools/dev/fgnight-1023/r3/cx/winemac/out/winemac.so",
+      "build_artifact_sha256": "84989892618eaa318f359fef9fba8bc27933c1cf767eead7052747ec59392b04",
+      "byte_match": true,
+      "builtin_marker_normalized_match": false,
+      "source_ids": [
+        "Tools/dev/fgnight-1023/r3/cx/winemac/src",
+        "Tools/dev/launchers/winemac",
+        ".refs/cx/src/sources/wine/dlls/winemac.drv"
+      ],
+      "recipe_evidence_ids": [
+        "Tools/dev/fgnight-1023/r3/cx/winemac/build.sh",
+        "Tools/dev/fgnight-1023/r3/RESULT.md",
+        "Tools/dev/llfiadmit-1023/ANALYSIS.md"
+      ],
+      "limitations": "Exact archived artifact match. realign-1020/winemac/src-inst predates LLFI pair changes and is not current. Recipe links existing .refs/cx objects; no source/object reproducibility replay."
+    },
+    {
+      "component": "Wine ARM64 winemac",
+      "bundle_path": "Contents/Resources/WineARM64/lib/wine/aarch64-unix/winemac.so",
+      "observed_installed_sha256": "93601628b68e80a8de4dbf5b82673854e133bced81cd3d7167fc13d007fbac0b",
+      "observed_installed_md5": "9bd79f0069aacc937a546f4d4e194edb",
+      "build_artifact_id": "Tools/dev/fex32d-1019/wm/build/fex32/winemac.so",
+      "build_artifact_sha256": "93601628b68e80a8de4dbf5b82673854e133bced81cd3d7167fc13d007fbac0b",
+      "byte_match": true,
+      "builtin_marker_normalized_match": false,
+      "source_ids": [
+        ".refs/wine/dlls/winemac.drv",
+        "Tools/dev/eafex-1018/src/dlls/winemac.drv",
+        "Tools/dev/fex32d-1019/wsrc"
+      ],
+      "recipe_evidence_ids": [
+        "Tools/dev/fex32d-1019/wm/build.py",
+        "Tools/dev/fex32d-1019/wm/build/fex32/build-result.json"
+      ],
+      "limitations": "No rebuild performed in this audit; matching extant artifact is not independent proof of reproducibility."
+    },
+    {
+      "component": "Wine coreaudio x86_64",
+      "bundle_path": "Contents/Resources/WineCX/lib/wine/x86_64-unix/winecoreaudio.so",
+      "observed_installed_sha256": "c3a272718c0bcf981edd7e43743d4cce2dca6c6b3cb8c55bab5df73e26754839",
+      "observed_installed_md5": "f757ba44d2748be78450618c92bdf84f",
+      "build_artifact_id": "Tools/dev/micwedge2-1023/out/x86_64/winecoreaudio.so",
+      "build_artifact_sha256": "c3a272718c0bcf981edd7e43743d4cce2dca6c6b3cb8c55bab5df73e26754839",
+      "byte_match": true,
+      "builtin_marker_normalized_match": false,
+      "source_ids": [
+        "Tools/dev/micwedge2-1023/src/x86_64",
+        "Tools/dev/micwedge2-1023/src/authorization.m",
+        "Tools/dev/micwedge2-1023/src/ember_capture_adapter.h",
+        "Tools/dev/micwedge2-1023/src/ember_capture_job.h"
+      ],
+      "recipe_evidence_ids": [
+        "Tools/dev/micwedge2-1023/build.py",
+        "Tools/dev/micwedge2-1023/build-manifest.json",
+        "Tools/dev/micwedge2-1023/artifact-manifest.json"
+      ],
+      "limitations": "No rebuild performed in this audit; matching extant artifact is not independent proof of reproducibility."
+    },
+    {
+      "component": "Wine coreaudio arm64",
+      "bundle_path": "Contents/Resources/WineARM64/lib/wine/aarch64-unix/winecoreaudio.so",
+      "observed_installed_sha256": "67ed5e24c0c3bf50dec81d992b1f41308b98aa22b07f1c81611193c039a03efd",
+      "observed_installed_md5": "a197b0b9835bb8d656e4b4ad9afc3842",
+      "build_artifact_id": "Tools/dev/micwedge2-1023/out/arm64/winecoreaudio.so",
+      "build_artifact_sha256": "67ed5e24c0c3bf50dec81d992b1f41308b98aa22b07f1c81611193c039a03efd",
+      "byte_match": true,
+      "builtin_marker_normalized_match": false,
+      "source_ids": [
+        "Tools/dev/micwedge2-1023/src/arm64",
+        "Tools/dev/micwedge2-1023/src/authorization.m",
+        "Tools/dev/micwedge2-1023/src/ember_capture_adapter.h",
+        "Tools/dev/micwedge2-1023/src/ember_capture_job.h"
+      ],
+      "recipe_evidence_ids": [
+        "Tools/dev/micwedge2-1023/build.py",
+        "Tools/dev/micwedge2-1023/build-manifest.json",
+        "Tools/dev/micwedge2-1023/artifact-manifest.json"
+      ],
+      "limitations": "No rebuild performed in this audit; matching extant artifact is not independent proof of reproducibility."
+    },
+    {
+      "component": "FEX libarm64ecfex",
+      "bundle_path": "Contents/Resources/WineARM64/lib/wine/aarch64-windows/libarm64ecfex.dll",
+      "observed_installed_sha256": "7a123fa3c0208454aaa1ed8737b5b53c6993215460f5f89bf0828f38061780f1",
+      "observed_installed_md5": "945fd8c4498787c5548cca38cb7447cf",
+      "build_artifact_id": "Tools/dev/fexnight-1023/r3/out/libarm64ecfex-dcb.dll",
+      "build_artifact_sha256": "7a123fa3c0208454aaa1ed8737b5b53c6993215460f5f89bf0828f38061780f1",
+      "byte_match": true,
+      "builtin_marker_normalized_match": false,
+      "source_ids": [
+        "Tools/dev/fexnight-1023/r3/FEX"
+      ],
+      "recipe_evidence_ids": [
+        "Tools/dev/fexnight-1023/r3/dcb-build.sh",
+        "Tools/dev/fexnight-1023/r3/DCB-RESULT.md",
+        "Tools/dev/fexnight-1023/r3/patches/fex-r3-dcb-optin.patch"
+      ],
+      "limitations": "No rebuild performed in this audit; matching extant artifact is not independent proof of reproducibility."
+    },
+    {
+      "component": "FEX libwow64fex",
+      "bundle_path": "Contents/Resources/WineARM64/lib/wine/aarch64-windows/libwow64fex.dll",
+      "observed_installed_sha256": "3e6bf3fbaf277cafd28098ef6ba576ac86b98c70185ac4ef8b3bd4fb21a80b58",
+      "observed_installed_md5": "cdf5e988da48c0d7c72be303088313c7",
+      "build_artifact_id": "Tools/dev/fexnight-1023/r3/out/libwow64fex-dcb.dll",
+      "build_artifact_sha256": "3e6bf3fbaf277cafd28098ef6ba576ac86b98c70185ac4ef8b3bd4fb21a80b58",
+      "byte_match": true,
+      "builtin_marker_normalized_match": false,
+      "source_ids": [
+        "Tools/dev/fexnight-1023/r3/FEX"
+      ],
+      "recipe_evidence_ids": [
+        "Tools/dev/fexnight-1023/r3/dcb-build.sh",
+        "Tools/dev/fexnight-1023/r3/DCB-RESULT.md",
+        "Tools/dev/fexnight-1023/r3/patches/fex-r3-dcb-optin.patch"
+      ],
+      "limitations": "No rebuild performed in this audit; matching extant artifact is not independent proof of reproducibility."
+    },
+    {
+      "component": "DXMT d3d11 x64",
+      "bundle_path": "Contents/Resources/Renderers/dxmt/x86_64-windows/d3d11.dll",
+      "observed_installed_sha256": "a85e339b6670001e7c25a182a671fd417827b9dd7267e44ccac62469143576f7",
+      "observed_installed_md5": "f2fcdeb6052c3f209f04c7f72aab3d72",
+      "build_artifact_id": "Tools/dev/bneck-1020/dxmt/out/d4/x86_64-windows/d3d11.dll",
+      "build_artifact_sha256": "a85e339b6670001e7c25a182a671fd417827b9dd7267e44ccac62469143576f7",
+      "byte_match": true,
+      "builtin_marker_normalized_match": false,
+      "source_ids": [
+        "Tools/dev/bneck-1020/dxmt/tree"
+      ],
+      "recipe_evidence_ids": [
+        "Tools/dev/bneck-1020/dxmt/out/d4/result.json",
+        "Tools/dev/bneck-1020/dxmt/scripts/build.py",
+        "Tools/dev/realign-1020/dxmt/RESULTS.txt"
+      ],
+      "limitations": "No rebuild performed in this audit; matching extant artifact is not independent proof of reproducibility."
+    },
+    {
+      "component": "DXMT d3d12 x64",
+      "bundle_path": "Contents/Resources/Renderers/dxmt/x86_64-windows/d3d12.dll",
+      "observed_installed_sha256": "452f4da9af01e68a0e1fe18a71d00c73f237e53a4f5a3bf817a8ab51a6e47903",
+      "observed_installed_md5": "7dc436e4933e4e82df40fae0a6c729b7",
+      "build_artifact_id": "Tools/dev/dxmt-tess-1023/out/candidate/x86_64-windows/d3d12.dll",
+      "build_artifact_sha256": "452f4da9af01e68a0e1fe18a71d00c73f237e53a4f5a3bf817a8ab51a6e47903",
+      "byte_match": true,
+      "builtin_marker_normalized_match": false,
+      "source_ids": [
+        "Tools/dev/dxmt-tess-1023/tree12"
+      ],
+      "recipe_evidence_ids": [
+        "Tools/dev/dxmt-tess-1023/tools/build.py",
+        "Tools/dev/dxmt-tess-1023/artifacts.json"
+      ],
+      "limitations": "No rebuild performed in this audit; matching extant artifact is not independent proof of reproducibility."
+    },
+    {
+      "component": "DXMT winemetal.so x64",
+      "bundle_path": "Contents/Resources/WineCX/lib/wine/x86_64-unix/winemetal.so",
+      "observed_installed_sha256": "0f0e9a4571c5972257f2ddee581aae77e9f651e6e7dd8c1f4e47657633823896",
+      "observed_installed_md5": "a3034c3d49ee0c185e5c9b4b86fc07e0",
+      "build_artifact_id": "Tools/dev/dxmt-tess-1023/wm/x64/winemetal.so",
+      "build_artifact_sha256": "0f0e9a4571c5972257f2ddee581aae77e9f651e6e7dd8c1f4e47657633823896",
+      "byte_match": true,
+      "builtin_marker_normalized_match": false,
+      "source_ids": [
+        "Tools/dev/dxmt-tess-1023/wm/src",
+        ".refs/dxmt-src/src/winemetal"
+      ],
+      "recipe_evidence_ids": [
+        "Tools/dev/dxmt-tess-1023/wm/build-wm.py",
+        "Tools/dev/dxmt-tess-1023/wm/x64/build.sh",
+        "Tools/dev/dxmt-tess-1023/wm/build-result.json",
+        "Tools/dev/dxmt-tess-1023/artifacts.json"
+      ],
+      "limitations": "Exact artifact match; build.sh links preexisting dxmt-src objects and recompiles selected units. Source series must include both wm/src overrides and those base objects sources."
+    },
+    {
+      "component": "DXMT winemetal.dll x64",
+      "bundle_path": "Contents/Resources/WineCX/lib/wine/x86_64-windows/winemetal.dll",
+      "observed_installed_sha256": "cb945cb1c7bb74d9b5abd7bc880cd2009a1939684ae4e75b6fde4d96028d5455",
+      "observed_installed_md5": "05971588d17cabe1f112b4dd33e53fd1",
+      "build_artifact_id": "Tools/dev/dxmt-tess-1023/wm/x64/winemetal.dll",
+      "build_artifact_sha256": "cb945cb1c7bb74d9b5abd7bc880cd2009a1939684ae4e75b6fde4d96028d5455",
+      "byte_match": true,
+      "builtin_marker_normalized_match": false,
+      "source_ids": [
+        "Tools/dev/dxmt-tess-1023/wm/src",
+        ".refs/dxmt-src/src/winemetal"
+      ],
+      "recipe_evidence_ids": [
+        "Tools/dev/dxmt-tess-1023/wm/build-wm.py",
+        "Tools/dev/dxmt-tess-1023/wm/x64/build.sh",
+        "Tools/dev/dxmt-tess-1023/wm/build-result.json",
+        "Tools/dev/dxmt-tess-1023/artifacts.json"
+      ],
+      "limitations": "Exact artifact match; build.sh links preexisting dxmt-src objects and recompiles selected units. Source series must include both wm/src overrides and those base objects sources."
+    },
+    {
+      "component": "DXMT d3d11 ec",
+      "bundle_path": "Contents/Resources/Renderers/dxmt-arm64ec/d3d11.dll",
+      "observed_installed_sha256": "f8237d67081d4e2caf97c275f39759b5a760660c24bce47ca46cf2fc928ae7f3",
+      "observed_installed_md5": "5ade8d50d3937829679dc776f34e3f47",
+      "build_artifact_id": "Tools/dev/bneck-1020/dxmt/out/d4/aarch64-windows/d3d11.dll",
+      "build_artifact_sha256": "f8237d67081d4e2caf97c275f39759b5a760660c24bce47ca46cf2fc928ae7f3",
+      "byte_match": true,
+      "builtin_marker_normalized_match": false,
+      "source_ids": [
+        "Tools/dev/bneck-1020/dxmt/tree"
+      ],
+      "recipe_evidence_ids": [
+        "Tools/dev/bneck-1020/dxmt/out/d4/result.json",
+        "Tools/dev/bneck-1020/dxmt/scripts/build.py",
+        "Tools/dev/realign-1020/dxmt/RESULTS.txt"
+      ],
+      "limitations": "No rebuild performed in this audit; matching extant artifact is not independent proof of reproducibility."
+    },
+    {
+      "component": "DXMT d3d12 ec",
+      "bundle_path": "Contents/Resources/Renderers/dxmt-arm64ec/d3d12.dll",
+      "observed_installed_sha256": "ac7770d71baacf906f48e5e5d8ac994c27302ae2f621668a82e2f44c40803255",
+      "observed_installed_md5": "09411f5f83b58ea22ed407151e1287fd",
+      "build_artifact_id": "Tools/dev/dxmt-tess-1023/out/candidate/aarch64-windows/d3d12.dll",
+      "build_artifact_sha256": "ac7770d71baacf906f48e5e5d8ac994c27302ae2f621668a82e2f44c40803255",
+      "byte_match": true,
+      "builtin_marker_normalized_match": false,
+      "source_ids": [
+        "Tools/dev/dxmt-tess-1023/tree12"
+      ],
+      "recipe_evidence_ids": [
+        "Tools/dev/dxmt-tess-1023/tools/build.py",
+        "Tools/dev/dxmt-tess-1023/artifacts.json"
+      ],
+      "limitations": "No rebuild performed in this audit; matching extant artifact is not independent proof of reproducibility."
+    },
+    {
+      "component": "DXMT winemetal.so ec",
+      "bundle_path": "Contents/Resources/WineARM64/lib/wine/aarch64-unix/winemetal.so",
+      "observed_installed_sha256": "5755e26be409e9fad9bc704e19b5715702b2fb634b9db49de9f9622936c6dd31",
+      "observed_installed_md5": "abe1da03428d9920bde1b812d1f49acb",
+      "build_artifact_id": "Tools/dev/dxmt-tess-1023/wm/ec/winemetal.so",
+      "build_artifact_sha256": "5755e26be409e9fad9bc704e19b5715702b2fb634b9db49de9f9622936c6dd31",
+      "byte_match": true,
+      "builtin_marker_normalized_match": false,
+      "source_ids": [
+        "Tools/dev/dxmt-tess-1023/wm/src",
+        ".refs/dxmt-src/src/winemetal"
+      ],
+      "recipe_evidence_ids": [
+        "Tools/dev/dxmt-tess-1023/wm/build-wm.py",
+        "Tools/dev/dxmt-tess-1023/wm/ec/build.sh",
+        "Tools/dev/dxmt-tess-1023/wm/build-result.json",
+        "Tools/dev/dxmt-tess-1023/artifacts.json"
+      ],
+      "limitations": "Exact artifact match; build.sh links preexisting dxmt-src objects and recompiles selected units. Source series must include both wm/src overrides and those base objects sources."
+    },
+    {
+      "component": "DXMT winemetal.dll ec",
+      "bundle_path": "Contents/Resources/WineARM64/lib/wine/aarch64-windows/winemetal.dll",
+      "observed_installed_sha256": "159fa3a03c098a8903bbd44b933a3c856294eec05af7fa6a475c8defd07cf9f9",
+      "observed_installed_md5": "ba0d543579154ddfe9c30984130ffb71",
+      "build_artifact_id": "Tools/dev/dxmt-tess-1023/wm/ec/winemetal.dll",
+      "build_artifact_sha256": "159fa3a03c098a8903bbd44b933a3c856294eec05af7fa6a475c8defd07cf9f9",
+      "byte_match": true,
+      "builtin_marker_normalized_match": false,
+      "source_ids": [
+        "Tools/dev/dxmt-tess-1023/wm/src",
+        ".refs/dxmt-src/src/winemetal"
+      ],
+      "recipe_evidence_ids": [
+        "Tools/dev/dxmt-tess-1023/wm/build-wm.py",
+        "Tools/dev/dxmt-tess-1023/wm/ec/build.sh",
+        "Tools/dev/dxmt-tess-1023/wm/build-result.json",
+        "Tools/dev/dxmt-tess-1023/artifacts.json"
+      ],
+      "limitations": "Exact artifact match; build.sh links preexisting dxmt-src objects and recompiles selected units. Source series must include both wm/src overrides and those base objects sources."
+    },
+    {
+      "component": "DXMT dxgi x64",
+      "bundle_path": "Contents/Resources/Renderers/dxmt/x86_64-windows/dxgi.dll",
+      "observed_installed_sha256": "5e1e7b468496b92110fdd49011a213c8cffc190787572b1fbfbc57a1c6df7391",
+      "observed_installed_md5": "4c02d922b373e00a26fc2866470d39e7",
+      "build_artifact_id": ".refs/dxmt-emberfg/build-x64/src/dxgi/dxgi.dll",
+      "build_artifact_sha256": "7774b12f7766cf3cd806423a3165f4ec2cf39b8a860e2eab7ec2762c207ae789",
+      "byte_match": false,
+      "builtin_marker_normalized_match": true,
+      "source_ids": [
+        ".refs/dxmt-emberfg"
+      ],
+      "recipe_evidence_ids": [
+        "Tools/dev/inhud/stage.sh",
+        "Tools/dev/inhud/deploy_pace.sh"
+      ],
+      "limitations": "Raw hash differs only at 32-byte DOS-stub Wine builtin marker; copied installed bytes 64..95 for comparison, not a full rebuild. Current newer DXMT trees are not the source of these preserved dxgi DLLs."
+    },
+    {
+      "component": "DXMT dxgi ec",
+      "bundle_path": "Contents/Resources/Renderers/dxmt-arm64ec/dxgi.dll",
+      "observed_installed_sha256": "a3b8b74524abd934638b5682c603425a81f5e5245b8dd3ef8bfd86d9ac3a1336",
+      "observed_installed_md5": "aff73f796502d91d16377b338cb3ab70",
+      "build_artifact_id": ".refs/dxmt-emberfg/build-ec/src/dxgi/dxgi.dll",
+      "build_artifact_sha256": "0af344e9afe98b7892dd6fb87e135adc5b56f66cd580a5f0d1e024b4027b15f0",
+      "byte_match": false,
+      "builtin_marker_normalized_match": true,
+      "source_ids": [
+        ".refs/dxmt-emberfg"
+      ],
+      "recipe_evidence_ids": [
+        "Tools/dev/inhud/stage.sh",
+        "Tools/dev/inhud/deploy_pace.sh"
+      ],
+      "limitations": "Raw hash differs only at 32-byte DOS-stub Wine builtin marker; copied installed bytes 64..95 for comparison, not a full rebuild. Current newer DXMT trees are not the source of these preserved dxgi DLLs."
+    },
+    {
+      "component": "DXMT dxgi x86",
+      "bundle_path": "Contents/Resources/Renderers/dxmt/i386-windows/dxgi.dll",
+      "observed_installed_sha256": "3f65ce3c39737e56da1d4c52e2d7cf65ecc219684199d7ebf88af68c275a571a",
+      "observed_installed_md5": "c41686b7d777409b7a8743a3125acf06",
+      "build_artifact_id": ".refs/dxmt-emberfg/build-x86/src/dxgi/dxgi.dll",
+      "build_artifact_sha256": "bf2cda7bbb0fe4ff6cb8afe30e890aefeeacc4e6e18e106e8e1e084610e88791",
+      "byte_match": false,
+      "builtin_marker_normalized_match": true,
+      "source_ids": [
+        ".refs/dxmt-emberfg"
+      ],
+      "recipe_evidence_ids": [
+        "Tools/dev/inhud/stage.sh",
+        "Tools/dev/inhud/deploy_pace.sh"
+      ],
+      "limitations": "Raw hash differs only at 32-byte DOS-stub Wine builtin marker; copied installed bytes 64..95 for comparison, not a full rebuild. Current newer DXMT trees are not the source of these preserved dxgi DLLs."
+    }
+  ],
+  "candidate_overrides": [
+    {
+      "component": "Wine CX winemac",
+      "bundle_path": "Contents/Resources/WineCX/lib/wine/x86_64-unix/winemac.so",
+      "installed": false,
+      "build_parameter": "ANE_O=0",
+      "md5": "05ba79216e3ce273686f9f7cf4e431a6",
+      "sha256": "8424cafd793230ab389c64eb9ed6d6c9151786ca114250491073d434d2b07ade",
+      "verification": "built and symbol inspected; no install, loading or game validation"
+    },
+    {
+      "component": "Stock Wine winemetal x86_64",
+      "bundle_path": "Contents/Resources/Wine/lib/wine/x86_64-unix/winemetal.so",
+      "installed": false,
+      "md5": "5a4355e06af866b2a14ae9b0c1cf8d5a",
+      "sha256": "f787852ab0032aa007659cac6c39b14f19bb5fefb3d63eaef46aad00ef2d78a4",
+      "observed_installed_md5": "cc9acca136f52abe57218c183f2b9eac",
+      "archived_exact_installed_artifact_id": "Tools/dev/minos27/wm-out/x64/winemetal.so",
+      "candidate_source_id": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/src/winemetal",
+      "recipe_evidence_id": "Tools/dev/srcpub-1024/module-audit/winemetal-noane/prepare-build.py",
+      "verification": "built and strictly codesign-verified; 12 legacy ember_ane worker exports removed, no new exports; game loading not tested",
+      "limitations": "Recovery of pre-FG/MSC-3 native baseline plus current Tone bridge is not an exact source replay of the historical archived binary. Observed stock Wine directory lacks sibling libEmberTone; optional legacy Neural requires a compatible provider via EMBER_TONE_LIB or release packaging."
+    }
+  ]
+}

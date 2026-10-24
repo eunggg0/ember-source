@@ -1,0 +1,86 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 8/10] src-util: Ember changes
+
+Base: DXMT 7c8dee1 with submodules
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/src/util/ec_thunk_order.cpp b/src/util/ec_thunk_order.cpp
+new file mode 100644
+index 0000000..8eba3b9
+--- /dev/null
++++ b/src/util/ec_thunk_order.cpp
+@@ -0,0 +1,37 @@
++/*
++ * Ember (10-16 fexx19): ARM64EC exit thunk 이름 충돌 막기.
++ *
++ * LLVM 은 ARM64EC exit thunk 를 "$iexit_thunk$cdecl$<반환>$<인자>" 이름의 comdat(아무거나 하나 고름)으로 만든다.
++ * 그런데 8바이트 C++ 클래스를 sret 로 돌려주는 함수(예: Rc<T> f(this, a, b, c))의 thunk 도 반환을 "i8" 로
++ * 적어서, HRESULT f(this, a, b, c) 같은 정수 반환 함수의 thunk 와 이름이 같아진다. sret 판은 x8 을 RCX 로
++ * 넣고 인자를 한 칸씩 민다. 링커가 sret 판을 고르면 hybrid_patchable 함수(Present1 등)의 $hybpatch_thunk 가
++ * x64 후킹(스팀·EOS·디스코드 오버레이)으로 갈 때 this 대신 x8(= __os_arm64x_dispatch_call 주소)을 넘긴다
++ * → 스텔라 블레이드 FEX 40초 튕김(overlayTick 에서 this=check_call).
++ *
++ * 링커(lld)는 comdat 을 처음 본 오브젝트 것으로 고른다. 이 파일을 각 DLL 소스 목록 맨 앞에 두고, 여기서
++ * 정수 반환 간접 호출을 인자 0~12개로 만들어 정수 판 thunk 가 늘 이기게 한다. sret 판을 쓰던 호출은
++ * 대상이 x64 일 때만 thunk 를 타는데, DXMT 내부 C++ 함수는 늘 ARM64EC 라 영향이 없다.
++ * 빌드 뒤 확인: Tools/dev/fexx19-1016/hpcheck.py <dll> (sret 꼴 0 이어야 함).
++ */
++#if defined(__arm64ec__)
++typedef long long I;
++typedef void *P;
++extern "C" __attribute__((used, noinline)) I
++dxmt_ec_thunk_order(P const volatile *f, P a) {
++  I r = 0;
++  r += ((I(*)())f[0])();
++  r += ((I(*)(P))f[1])(a);
++  r += ((I(*)(P, P))f[2])(a, a);
++  r += ((I(*)(P, P, P))f[3])(a, a, a);
++  r += ((I(*)(P, P, P, P))f[4])(a, a, a, a);
++  r += ((I(*)(P, P, P, P, P))f[5])(a, a, a, a, a);
++  r += ((I(*)(P, P, P, P, P, P))f[6])(a, a, a, a, a, a);
++  r += ((I(*)(P, P, P, P, P, P, P))f[7])(a, a, a, a, a, a, a);
++  r += ((I(*)(P, P, P, P, P, P, P, P))f[8])(a, a, a, a, a, a, a, a);
++  r += ((I(*)(P, P, P, P, P, P, P, P, P))f[9])(a, a, a, a, a, a, a, a, a);
++  r += ((I(*)(P, P, P, P, P, P, P, P, P, P))f[10])(a, a, a, a, a, a, a, a, a, a);
++  r += ((I(*)(P, P, P, P, P, P, P, P, P, P, P))f[11])(a, a, a, a, a, a, a, a, a, a, a);
++  r += ((I(*)(P, P, P, P, P, P, P, P, P, P, P, P))f[12])(a, a, a, a, a, a, a, a, a, a, a, a);
++  return r;
++}
++#endif
+diff --git a/src/util/thread.hpp b/src/util/thread.hpp
+index 45476d6..201d1b0 100644
+--- a/src/util/thread.hpp
++++ b/src/util/thread.hpp
+@@ -77,6 +77,14 @@ public:
+ 
+   bool joinable() const { return m_handle != nullptr; }
+ 
++  /* Ember(fc12 10-18): 상한 있는 join. 끝났으면 손잡이를 닫고 true, 아직이면 false(손잡이 그대로). */
++  bool join_for(uint32_t ms) {
++    if (::WaitForSingleObjectEx(m_handle, ms, FALSE) != WAIT_OBJECT_0)
++      return false;
++    this->detach();
++    return true;
++  }
++
+   void set_priority(ThreadPriority priority) {
+     int32_t value;
+     switch (priority) {
+@@ -128,6 +136,8 @@ public:
+ 
+   void join() { m_thread->join(); }
+ 
++  bool join_for(uint32_t ms) { return m_thread->join_for(ms); }
++
+   bool joinable() const { return m_thread != nullptr && m_thread->joinable(); }
+ 
+   void set_priority(ThreadPriority priority) {
+@@ -327,6 +337,8 @@ class thread : public std::thread {
+ public:
+   using std::thread::thread;
+ 
++  bool join_for(uint32_t) { join(); return true; }
++
+   void set_priority(ThreadPriority priority) {
+     ::sched_param param = {};
+     int32_t policy;

@@ -1,0 +1,609 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 35/36] server: Ember changes
+
+Base: Wine 11.18
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/server/device.c b/server/device.c
+index a74a6aa..d5e6a5e 100644
+--- a/server/device.c
++++ b/server/device.c
+@@ -630,11 +630,41 @@ static void device_file_flush( struct fd *fd, struct async *async )
+     queue_irp( file, &params, async );
+ }
+ 
++/* Ember 진단: WINESERVER_IOCTL_STATS=1 이면 장치별 ioctl 코드 횟수를 5초마다 stderr 에 찍는다 */
++static void ember_ioctl_stats( struct device_file *file, ioctl_code_t code )
++{
++    static int enabled = -1;
++    static struct { struct device *device; ioctl_code_t code; unsigned int count; } slots[64];
++    static unsigned int nslots;
++    static timeout_t last;
++    unsigned int i;
++
++    if (enabled < 0) enabled = getenv( "WINESERVER_IOCTL_STATS" ) != NULL;
++    if (!enabled) return;
++    for (i = 0; i < nslots; i++) if (slots[i].device == file->device && slots[i].code == code) break;
++    if (i == nslots && nslots < 64) { slots[nslots].device = file->device; slots[nslots].code = code; slots[nslots].count = 0; nslots++; }
++    if (i < 64) slots[i].count++;
++    if (!last) last = current_time;
++    if (current_time - last >= 5 * TICKS_PER_SEC)
++    {
++        fprintf( stderr, "ember-ioctl-stats (%.1fs):", (current_time - last) / (double)TICKS_PER_SEC );
++        for (i = 0; i < nslots; i++)
++        {
++            if (!slots[i].count) continue;
++            fprintf( stderr, " dev=%p code=%08x n=%u;", slots[i].device, slots[i].code, slots[i].count );
++            slots[i].count = 0;
++        }
++        fprintf( stderr, "\n" );
++        last = current_time;
++    }
++}
++
+ static void device_file_ioctl( struct fd *fd, ioctl_code_t code, struct async *async )
+ {
+     struct device_file *file = get_fd_user( fd );
+     union irp_params params;
+ 
++    ember_ioctl_stats( file, code );
+     memset( &params, 0, sizeof(params) );
+     params.ioctl.type = IRP_CALL_IOCTL;
+     params.ioctl.code = code;
+diff --git a/server/inproc_sync.c b/server/inproc_sync.c
+index 522d9a4..8cc2da8 100644
+--- a/server/inproc_sync.c
++++ b/server/inproc_sync.c
+@@ -223,6 +223,346 @@ static int get_obj_inproc_sync( struct object *obj, int *type )
+     return fd;
+ }
+ 
++int inproc_sync_publish_timer( struct object *obj, timeout_t due, unsigned int period_ms )
++{
++    return 0;
++}
++
++#elif defined(__APPLE__)   /* macOS: 공유 메모리 + __ulock 으로 직접 구현한다 */
++
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <unistd.h>
++#include "wine/inproc_sync_macos.h"
++
++extern int __ulock_wake( uint32_t operation, void *addr, uint64_t wake_value );
++#define UL_COMPARE_AND_WAIT_SHARED 3
++#define ULF_WAKE_ALL               0x00000100
++
++static struct macos_sync_global *macos_global;
++
++/* macOS 에는 /dev/ntsync 같은 커널 장치가 없다.
++ * 그 자리에 전역 깨우기 카운터를 담은 공유 메모리를 하나 두고, 그 fd 를 넘긴다.
++ * 클라이언트는 이 값이 0 이상이면 in-process 동기화가 있다고 본다.
++ *
++ * 기본으로 켠다. WINEMSYNC=0 으로 끄면 예전처럼 서버가 모든 대기를 맡는다. */
++int get_inproc_device_fd(void)
++{
++    static int fd = -2;
++
++    if (fd == -2)
++    {
++        const char *opt = getenv( "WINEMSYNC" );
++        char name[64];
++        void *map;
++
++        fd = -1;
++        if (opt && !atoi( opt )) return fd;
++
++        snprintf( name, sizeof(name), "/wine-sync-global-%u", (unsigned int)getpid() );
++        shm_unlink( name );
++        if ((fd = shm_open( name, O_RDWR | O_CREAT | O_EXCL, 0600 )) == -1) return fd = -1;
++        shm_unlink( name );
++        if (ftruncate( fd, MACOS_SYNC_MAP_SIZE ) == -1) goto failed;
++        map = mmap( NULL, MACOS_SYNC_MAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
++        if (map == MAP_FAILED) goto failed;
++        memset( map, 0, MACOS_SYNC_MAP_SIZE );
++        macos_global = map;
++    }
++    return fd;
++
++failed:
++    close( fd );
++    return fd = -1;
++}
++
++struct inproc_sync
++{
++    struct object            obj;
++    enum inproc_sync_type    type;
++    int                      fd;
++    struct macos_sync_state *state;   /* 공유 메모리. 누가 기다리기 전엔 NULL(지연 생성) */
++    struct list              entry;
++    /* state 가 없을 때의 초기값. 파일 잠금·IRP 마다 내부 동기화 객체가 생기는데 대부분 아무도 기다리지 않는다.
++     * shm_open+mmap 을 그때마다 하면(실측 wineserver 6%) 낭비라, fd 를 요청하는 쪽이 있을 때만 만든다. */
++    int                      init_manual;
++    unsigned int             init_max;
++    unsigned int             init_count;
++    int                      init_owner;
++    int                      init_abandoned;
++};
++
++static struct list inproc_mutexes = LIST_INIT( inproc_mutexes );
++
++static void inproc_sync_dump( struct object *obj, int verbose );
++static int inproc_sync_signal( struct object *obj, unsigned int access, int signal );
++static void inproc_sync_destroy( struct object *obj );
++
++static const struct object_ops inproc_sync_ops =
++{
++    .size    = sizeof(struct inproc_sync),
++    .type    = &no_type,
++    .dump    = inproc_sync_dump,
++    .signal  = inproc_sync_signal,
++    .destroy = inproc_sync_destroy,
++};
++
++static int macos_sync_materialize( struct inproc_sync *sync );
++
++int get_inproc_sync_fd( struct inproc_sync *sync )
++{
++    if (!sync) return -1;
++    if (macos_sync_materialize( sync ) < 0) return -1;
++    return sync->fd;
++}
++
++/* 자는 사람이 없으면 깨우기 syscall 을 부르지 않는다.
++ * 게임은 대부분 이미 신호가 와 있는 객체를 건드린다. 그 길에서 syscall 을 빼는 게 핵심이다. */
++static void wake_waiters( struct macos_sync_state *state )
++{
++    __atomic_add_fetch( &state->seq, 1, __ATOMIC_SEQ_CST );
++    if (__atomic_load_n( &state->waiters, __ATOMIC_SEQ_CST ))
++        __ulock_wake( UL_COMPARE_AND_WAIT_SHARED | ULF_WAKE_ALL, &state->seq, 0 );
++    if (!macos_global) return;
++    /* 객체 여러 개를 기다리는 쪽은 전역 카운터만 보고 있다. 같이 깨워 준다.
++     * 다만 이 객체를 목록에 넣은 사람이 없으면 전역은 건드리지 않는다.
++     * 안 그러면 신호 한 번에 온 시스템의 대기자가 다 깨어난다. */
++    if (!__atomic_load_n( &state->multi, __ATOMIC_SEQ_CST )) return;
++    __atomic_add_fetch( &macos_global->seq, 1, __ATOMIC_SEQ_CST );
++    if (__atomic_load_n( &macos_global->waiters, __ATOMIC_SEQ_CST ))
++        __ulock_wake( UL_COMPARE_AND_WAIT_SHARED | ULF_WAKE_ALL, &macos_global->seq, 0 );
++}
++
++/* 객체 하나마다 공유 메모리 한 장을 만든다.
++ * 이름을 붙여 열자마자 지워서, fd 를 받은 쪽만 볼 수 있게 한다. */
++static struct inproc_sync *alloc_macos_sync( enum inproc_sync_type type, int manual,
++                                             unsigned int count, unsigned int max, int owner )
++{
++    static unsigned int counter;
++    struct inproc_sync *sync;
++    char name[64];
++    void *map;
++    int fd;
++
++    if (!(sync = alloc_object( &inproc_sync_ops ))) return NULL;
++
++    sync->type  = type;
++    sync->fd    = -1;
++    sync->state = NULL;
++    sync->init_manual = manual;
++    sync->init_max = max;
++    sync->init_count = count;
++    sync->init_owner = owner;
++    sync->init_abandoned = 0;
++    list_init( &sync->entry );
++    if (type == INPROC_SYNC_MUTEX) list_add_tail( &inproc_mutexes, &sync->entry );
++    (void)counter; (void)name; (void)map; (void)fd;
++    return sync;
++}
++
++/* 공유 메모리를 실제로 만든다. 클라이언트가 fd 를 요청할 때(기다리려 할 때) 처음 한 번. */
++static int macos_sync_materialize( struct inproc_sync *sync )
++{
++    static unsigned int counter;
++    char name[64];
++    void *map;
++    int fd;
++
++    if (sync->state) return 0;
++    snprintf( name, sizeof(name), "/wine-sync-%u-%u", (unsigned int)getpid(), ++counter );
++    shm_unlink( name );
++    fd = shm_open( name, O_RDWR | O_CREAT | O_EXCL, 0600 );
++    shm_unlink( name );
++    if (fd == -1 || ftruncate( fd, MACOS_SYNC_MAP_SIZE ) == -1)
++    {
++        if (fd != -1) close( fd );
++        return -1;
++    }
++    map = mmap( NULL, MACOS_SYNC_MAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
++    if (map == MAP_FAILED)
++    {
++        close( fd );
++        return -1;
++    }
++    memset( map, 0, MACOS_SYNC_MAP_SIZE );
++    sync->fd    = fd;
++    sync->state = map;
++    sync->state->type      = sync->type;
++    sync->state->manual    = sync->init_manual;
++    sync->state->max       = sync->init_max;
++    sync->state->count     = sync->init_count;
++    sync->state->owner     = sync->init_owner;
++    sync->state->abandoned = sync->init_abandoned;
++    return 0;
++}
++
++struct inproc_sync *create_inproc_internal_sync( int manual, int signaled )
++{
++    return alloc_macos_sync( INPROC_SYNC_INTERNAL, manual, signaled ? 1 : 0, 0, 0 );
++}
++
++struct inproc_sync *create_inproc_event_sync( int manual, int signaled )
++{
++    return alloc_macos_sync( INPROC_SYNC_EVENT, manual, signaled ? 1 : 0, 0, 0 );
++}
++
++struct inproc_sync *create_inproc_mutex_sync( thread_id_t owner, unsigned int count )
++{
++    return alloc_macos_sync( INPROC_SYNC_MUTEX, 0, count, 0, owner );
++}
++
++struct inproc_sync *create_inproc_semaphore_sync( unsigned int initial, unsigned int max )
++{
++    return alloc_macos_sync( INPROC_SYNC_SEMAPHORE, 0, initial, max, 0 );
++}
++
++static void inproc_sync_dump( struct object *obj, int verbose )
++{
++    struct inproc_sync *sync = (struct inproc_sync *)obj;
++    fprintf( stderr, "in-process sync (macOS) fd=%d type=%u\n", sync->fd, sync->type );
++}
++
++void signal_inproc_sync( struct inproc_sync *sync )
++{
++    if (!sync) return;
++    if (!sync->state) { sync->init_count = 1; return; }   /* 아직 아무도 안 본다. 초기값만 바꾼다 */
++    /* 이미 켜져 있었으면 새로 깰 사람이 없다. */
++    if (__atomic_exchange_n( &sync->state->count, 1, __ATOMIC_SEQ_CST )) return;
++    wake_waiters( sync->state );
++}
++
++void reset_inproc_sync( struct inproc_sync *sync )
++{
++    if (!sync) return;
++    if (!sync->state) { sync->init_count = 0; return; }
++    __atomic_store_n( &sync->state->count, 0, __ATOMIC_SEQ_CST );
++}
++
++/* 대기 타이머를 프로세스 안에서 처리하게 한다. 만료 시각만 공유 메모리에 적고 대기자를 한 번 깨워
++ * 새 시각에 맞춰 다시 자게 한다. due 0 은 취소: 이미 만료했는데 아직 소모되지 않았으면 신호 상태로 남긴다. */
++int inproc_sync_publish_timer( struct object *obj, timeout_t due, unsigned int period_ms )
++{
++    struct inproc_sync *sync = (struct inproc_sync *)obj;
++
++    if (!obj || obj->ops != &inproc_sync_ops) return 0;
++    if (macos_sync_materialize( sync ) < 0) return 0;
++    if (!due)
++    {
++        long long old = __atomic_load_n( &sync->state->due, __ATOMIC_SEQ_CST );
++        if (old && current_time >= old) __atomic_store_n( &sync->state->count, 1, __ATOMIC_SEQ_CST );
++    }
++    __atomic_store_n( &sync->state->period_ms, period_ms, __ATOMIC_SEQ_CST );
++    __atomic_store_n( &sync->state->due, (long long)due, __ATOMIC_SEQ_CST );
++    wake_waiters( sync->state );
++    return 1;
++}
++
++static int inproc_sync_signal( struct object *obj, unsigned int access, int signal )
++{
++    struct inproc_sync *sync = (struct inproc_sync *)obj;
++    assert( obj->ops == &inproc_sync_ops );
++    /* 뮤텍스/세마포어로는 불려 오지 않는다. 이벤트 계열만 신호를 받는다. */
++    assert( sync->type == INPROC_SYNC_INTERNAL || sync->type == INPROC_SYNC_EVENT );
++    assert( signal == 0 || signal == 1 );
++
++    if (signal) signal_inproc_sync( sync );
++    else reset_inproc_sync( sync );
++    return 1;
++}
++
++/* 마지막 핸들이 닫혔는데 아직 누가 쥔 뮤텍스. 윈도우에서는 기다리는 스레드가 객체를 붙잡고 있어서
++ * 쥔 스레드가 죽으면 대기자가 WAIT_ABANDONED 로 깬다. 여기서는 기다림이 클라이언트 쪽이라 서버 참조가 없고,
++ * 객체를 바로 없애면 abandon_inproc_mutexes 가 못 찾아 대기자가 영영 멈췄다(kernel32 sync 테스트 488/492,
++ * 실측 2026-09-25). 공유 상태 매핑만 따로 남겨 두었다가 주인이 놓거나 죽으면 정리한다. */
++struct orphan_mutex
++{
++    struct list              entry;
++    struct macos_sync_state *state;
++};
++static struct list orphan_mutexes = LIST_INIT( orphan_mutexes );
++
++static void sweep_orphan_mutexes(void)
++{
++    struct orphan_mutex *o, *next;
++
++    LIST_FOR_EACH_ENTRY_SAFE( o, next, &orphan_mutexes, struct orphan_mutex, entry )
++    {
++        /* 버려진 표시가 남아 있으면 아직 대기자가 가져가지 않은 것이다 — 둔다. */
++        if (__atomic_load_n( &o->state->owner, __ATOMIC_SEQ_CST ) ||
++            __atomic_load_n( &o->state->abandoned, __ATOMIC_SEQ_CST )) continue;
++        list_remove( &o->entry );
++        munmap( o->state, MACOS_SYNC_MAP_SIZE );
++        free( o );
++    }
++}
++
++static void inproc_sync_destroy( struct object *obj )
++{
++    struct inproc_sync *sync = (struct inproc_sync *)obj;
++    if (sync->type == INPROC_SYNC_MUTEX) list_remove( &sync->entry );
++    if (sync->state)
++    {
++        struct orphan_mutex *o;
++        if (sync->type == INPROC_SYNC_MUTEX && __atomic_load_n( &sync->state->owner, __ATOMIC_SEQ_CST ) &&
++            (o = malloc( sizeof(*o) )))
++        {
++            o->state = sync->state;
++            list_add_tail( &orphan_mutexes, &o->entry );
++        }
++        else munmap( sync->state, MACOS_SYNC_MAP_SIZE );
++    }
++    if (sync->fd != -1) close( sync->fd );
++    sweep_orphan_mutexes();
++}
++
++static int get_obj_inproc_sync( struct object *obj, int *type )
++{
++    struct object *sync;
++    int fd = -1;
++
++    if (!(sync = get_obj_sync( obj ))) return -1;
++    if (sync->ops == &inproc_sync_ops)
++    {
++        struct inproc_sync *inproc = (struct inproc_sync *)sync;
++        *type = inproc->type;
++        if (macos_sync_materialize( inproc ) < 0) fd = -1;
++        else fd = inproc->fd;
++    }
++    release_object( sync );
++    return fd;
++}
++
++/* 스레드가 뮤텍스를 쥔 채 죽으면 다음에 잡는 쪽에 알려 줘야 한다. */
++void abandon_inproc_mutexes( thread_id_t tid )
++{
++    struct inproc_sync *mutex;
++
++    LIST_FOR_EACH_ENTRY( mutex, &inproc_mutexes, struct inproc_sync, entry )
++    {
++        if (!mutex->state)
++        {
++            if (mutex->init_owner == (int)tid) { mutex->init_owner = 0; mutex->init_count = 0; mutex->init_abandoned = 1; }
++            continue;
++        }
++        if (__atomic_load_n( &mutex->state->owner, __ATOMIC_SEQ_CST ) != tid) continue;
++        __atomic_store_n( &mutex->state->count, 0, __ATOMIC_SEQ_CST );
++        __atomic_store_n( &mutex->state->abandoned, 1, __ATOMIC_SEQ_CST );
++        __atomic_store_n( &mutex->state->owner, 0, __ATOMIC_SEQ_CST );
++        wake_waiters( mutex->state );
++    }
++    {
++        struct orphan_mutex *o;
++        LIST_FOR_EACH_ENTRY( o, &orphan_mutexes, struct orphan_mutex, entry )
++        {
++            if (__atomic_load_n( &o->state->owner, __ATOMIC_SEQ_CST ) != tid) continue;
++            __atomic_store_n( &o->state->count, 0, __ATOMIC_SEQ_CST );
++            __atomic_store_n( &o->state->abandoned, 1, __ATOMIC_SEQ_CST );
++            __atomic_store_n( &o->state->owner, 0, __ATOMIC_SEQ_CST );
++            wake_waiters( o->state );
++        }
++    }
++}
++
+ #else /* NTSYNC_IOC_EVENT_READ */
+ 
+ int get_inproc_device_fd(void)
+@@ -263,6 +603,11 @@ void reset_inproc_sync( struct inproc_sync *sync )
+ {
+ }
+ 
++int inproc_sync_publish_timer( struct object *obj, timeout_t due, unsigned int period_ms )
++{
++    return 0;
++}
++
+ void abandon_inproc_mutexes( thread_id_t tid )
+ {
+ }
+diff --git a/server/main.c b/server/main.c
+index 46419a0..3ba99ef 100644
+--- a/server/main.c
++++ b/server/main.c
+@@ -26,6 +26,7 @@
+ #include <signal.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
+ #include <sys/time.h>
+ #include <unistd.h>
+ #ifdef HAVE_SYS_RESOURCE_H
+@@ -35,6 +36,16 @@
+ # include <sys/sysctl.h>
+ #endif
+ 
++#ifdef __APPLE__
++#include <errno.h>
++#include <mach/mach_init.h>
++#include <mach/thread_act.h>
++#include <mach/mach_port.h>
++#include <mach/thread_policy.h>
++#include <mach/thread_info.h>
++#include <mach/policy.h>
++#endif
++
+ #include "object.h"
+ #include "file.h"
+ #include "thread.h"
+@@ -213,6 +224,62 @@ error:
+     exit(1);
+ }
+ 
++#ifdef __APPLE__
++/* Ember (gmserver): raise the server thread's scheduling priority on macOS.
++ *
++ * Every game thread blocks on server round-trips, so the server is on the critical path of each frame.
++ * On macOS it ended up behind the game:
++ *  - open_master_socket() daemonizes with fork(). The child's main thread loses its QoS class, falls back
++ *    to the legacy band (31 - nice) and pthread_set_qos_class_self_np() is refused afterwards (EPERM).
++ *    A launcher started from a niced shell left the server at priority 26 while game threads ran at 31-47.
++ *  - macOS Game Mode favours the game's coalition; the server lives in the launcher's coalition.
++ * The legacy precedence policy needs no privileges and ignores nice, so put the thread at a fixed
++ * (non-timeshare) priority in the foreground UI band, like CrossOver's msync message thread.
++ *   EMBER_SERVER_PRIO=0      leave the thread alone
++ *   EMBER_SERVER_PRIO=<n>    target base priority (default 47, max 63)
++ *   EMBER_SERVER_TIMESHARE=1 keep timeshare decay
++ *   EMBER_SERVER_ROLE=<n>    also set PRIO_DARWIN_ROLE on the process (1 = UI focal) */
++static void ember_raise_server_priority(void)
++{
++    const char *env = getenv( "EMBER_SERVER_PRIO" );
++    int target = env && *env ? atoi( env ) : 47;
++    thread_act_t self = mach_thread_self();
++    struct thread_precedence_policy precedence;
++    struct thread_extended_policy extended;
++    struct policy_timeshare_info info;
++    mach_msg_type_number_t count = POLICY_TIMESHARE_INFO_COUNT;
++    integer_t latency = LATENCY_QOS_TIER_0, throughput = THROUGHPUT_QOS_TIER_0;
++    int base = 31;
++
++    if ((env = getenv( "EMBER_SERVER_ROLE" )) && *env)
++    {
++        int role = atoi( env );
++        if (setpriority( 6 /* PRIO_DARWIN_ROLE */, 0, role ) && debug_level)
++            fprintf( stderr, "wineserver: PRIO_DARWIN_ROLE %d: %s\n", role, strerror( errno ));
++    }
++    if (target <= 0) goto done;
++    if (target > 63) target = 63;
++
++    /* importance 0 puts the thread on the legacy path; its base priority is then the task's (31 - nice) */
++    precedence.importance = 0;
++    thread_policy_set( self, THREAD_PRECEDENCE_POLICY, (thread_policy_t)&precedence, THREAD_PRECEDENCE_POLICY_COUNT );
++    if (thread_info( self, THREAD_SCHED_TIMESHARE_INFO, (thread_info_t)&info, &count ) == KERN_SUCCESS)
++        base = info.base_priority;
++
++    thread_policy_set( self, THREAD_LATENCY_QOS_POLICY, (thread_policy_t)&latency, THREAD_LATENCY_QOS_POLICY_COUNT );
++    thread_policy_set( self, THREAD_THROUGHPUT_QOS_POLICY, (thread_policy_t)&throughput, THREAD_THROUGHPUT_QOS_POLICY_COUNT );
++    env = getenv( "EMBER_SERVER_TIMESHARE" );
++    extended.timeshare = (env && atoi( env )) ? 1 : 0;
++    thread_policy_set( self, THREAD_EXTENDED_POLICY, (thread_policy_t)&extended, THREAD_EXTENDED_POLICY_COUNT );
++    precedence.importance = target - base;
++    thread_policy_set( self, THREAD_PRECEDENCE_POLICY, (thread_policy_t)&precedence, THREAD_PRECEDENCE_POLICY_COUNT );
++    if (debug_level)
++        fprintf( stderr, "wineserver: priority base %d -> %d (timeshare %d)\n", base, target, extended.timeshare );
++done:
++    mach_port_deallocate( mach_task_self(), self );
++}
++#endif
++
+ static void sigterm_handler( int signum )
+ {
+     exit(1);  /* make sure atexit functions get called */
+@@ -259,6 +326,9 @@ int main( int argc, char *argv[] )
+     sock_init();
+     open_master_socket();
+ 
++#ifdef __APPLE__
++    ember_raise_server_priority();
++#endif
+     if (debug_level) fprintf( stderr, "wineserver: starting (pid=%ld)\n", (long) getpid() );
+     set_current_time();
+     init_signals();
+diff --git a/server/object.h b/server/object.h
+index 3c19d15..190a91c 100644
+--- a/server/object.h
++++ b/server/object.h
+@@ -270,6 +270,8 @@ extern struct inproc_sync *create_inproc_mutex_sync( thread_id_t owner, unsigned
+ extern void abandon_inproc_mutexes( thread_id_t owner );
+ extern void signal_inproc_sync( struct inproc_sync *sync );
+ extern void reset_inproc_sync( struct inproc_sync *sync );
++/* Ember: 대기 타이머를 클라이언트가 처리하게 만료 시각을 공유 메모리에 적는다. 1 이면 서버 타임아웃 불필요 */
++extern int inproc_sync_publish_timer( struct object *sync, timeout_t due, unsigned int period_ms );
+ 
+ /* serial functions */
+ 
+diff --git a/server/process.c b/server/process.c
+index f1a8c06..97c3353 100644
+--- a/server/process.c
++++ b/server/process.c
+@@ -445,7 +445,17 @@ unsigned int alloc_ptid( void *ptr )
+     }
+     else  /* need to grow the array */
+     {
+-        unsigned int count = alloc_ptid_entries + (alloc_ptid_entries / 2);
++        unsigned int count = alloc_ptid_entries + (alloc_ptid_entries / 2), skip = 0;
++        /* Ember: 세션마다 첫 ID 를 무작위로 민다(0~2047칸). Wine 은 매번 같은 작은 PID(0x24…)를 같은 순서로 줘서,
++         * 강제 종료로 남은 PID 잠금 파일(Qt QLockFile 등)을 새 프로세스가 "아직 살아 있는 자기 자신"으로 보고
++         * "이미 실행 중"이라며 끝났다(GOG 갤럭시: 한 번씩 번갈아 안 뜸, 2026-09-26). 윈도우처럼 예측 못 하게. */
++        if (!alloc_ptid_entries)
++        {
++            struct timeval tv;
++            gettimeofday( &tv, NULL );
++            skip = (unsigned int)(tv.tv_usec ^ (tv.tv_sec * 2654435761u) ^ getpid()) % 2048;
++            count = 512 + skip;
++        }
+         if (!count) count = 512;
+         if (!(entry = realloc( ptid_entries, count * sizeof(*entry) )))
+         {
+@@ -454,6 +464,7 @@ unsigned int alloc_ptid( void *ptr )
+         }
+         ptid_entries = entry;
+         alloc_ptid_entries = count;
++        for (; skip; skip--) { ptid_entries[used_ptid_entries].ptr = NULL; ptid_entries[used_ptid_entries++].next = 0; }
+         index = used_ptid_entries + PTID_OFFSET;
+         entry = &ptid_entries[used_ptid_entries++];
+     }
+diff --git a/server/registry.c b/server/registry.c
+index e71d023..8afe71c 100644
+--- a/server/registry.c
++++ b/server/registry.c
+@@ -1814,6 +1814,10 @@ static void init_supported_machines(void)
+     if (prefix_type == PREFIX_64BIT)
+     {
+         supported_machines[count++] = IMAGE_FILE_MACHINE_ARM64;
++        /* macOS 에서 32비트 실행은 불가(4GB 아래 매핑 불가)지만 I386 은 목록에 남긴다.
++         * 빼면 프로그램 폴더의 32비트 DLL(예: STOVE 의 dbghelp.dll)이 MISMATCH 가 아니라
++         * INVALID_IMAGE_FORMAT 으로 실패해 로더가 내장 DLL 로 넘어가지 못한다.
++         * 32비트 exe 는 i386 PE 트리를 런타임에 넣지 않는 것으로 막는다(c000000d 로 실패). */
+         supported_machines[count++] = IMAGE_FILE_MACHINE_I386;
+         if (supports_aarch32()) supported_machines[count++] = IMAGE_FILE_MACHINE_ARMNT;
+         supported_machines[count++] = IMAGE_FILE_MACHINE_AMD64;
+diff --git a/server/timer.c b/server/timer.c
+index d6be55c..c05d4bb 100644
+--- a/server/timer.c
++++ b/server/timer.c
+@@ -127,6 +127,8 @@ static int cancel_timer( struct timer *timer )
+ {
+     int signaled = timer->signaled;
+ 
++    inproc_sync_publish_timer( timer->sync, 0, 0 );   /* 로컬 타이머 취소 */
++
+     if (timer->timeout)
+     {
+         remove_timeout_user( timer->timeout );
+@@ -158,7 +160,18 @@ static int set_timer( struct timer *timer, timeout_t expire, unsigned int period
+     timer->arg      = arg;
+     if (callback) timer->thread = (struct thread *)grab_object( current );
+     if (expire != TIMEOUT_INFINITE)
+-        timer->timeout = add_timeout_user( expire, timer_callback, timer );
++    {
++        /* Ember: APC 없는 타이머는 클라이언트가 만료를 처리한다(macOS in-process 동기화).
++         * 서버 타임아웃·신호·깨우기 왕복이 만료마다 드는 비용을 없앤다. */
++        timeout_t due;
++        /* Ember clkboost(10-03): 상대 시간이 아주 크면(스레드풀 타이머 큐가 빈 목록일 때 rel_now - MAXLONGLONG 를 건다)
++         * current_time - expire 가 넘쳐 음수 due 가 되고, 클라이언트는 그걸 '이미 만료'로 보아 타이머 큐 스레드가
++         * NtSetTimer 왕복을 끝없이 돈다(로아 wine_threadpool_timerqueue 46% CPU + wineserver 부하). 넘치면 무한대로 둔다. */
++        if (expire <= 0) due = (expire <= current_time - TIMEOUT_INFINITE) ? TIMEOUT_INFINITE : current_time - expire;
++        else due = max( expire, current_time );
++        if (callback || !inproc_sync_publish_timer( timer->sync, due, period ))
++            timer->timeout = add_timeout_user( expire, timer_callback, timer );
++    }
+     return signaled;
+ }
+ 

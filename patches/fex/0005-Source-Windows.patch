@@ -1,7 +1,7 @@
 From: Ember <ember@users.noreply.github.com>
 Subject: [PATCH 5/5] Source-Windows: Ember changes
 
-Base: FEX-Emu/FEX 48d7175 (+ submodules)
+Base: FEX 48d7175 with submodules
 License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
 ---
 diff --git a/Source/Windows/ARM64EC/CMakeLists.txt b/Source/Windows/ARM64EC/CMakeLists.txt
@@ -112,15 +112,16 @@ index 4a59cf6..fd47308 100644
    ldr x17, [x17, #0x20] // ChpeV2CpuAreaInfo->SuspendDoorbell
    ldr w17, [x17]
 diff --git a/Source/Windows/ARM64EC/Module.cpp b/Source/Windows/ARM64EC/Module.cpp
-index 93a3ab0..430b9e8 100644
+index 93a3ab0..9e47953 100644
 --- a/Source/Windows/ARM64EC/Module.cpp
 +++ b/Source/Windows/ARM64EC/Module.cpp
-@@ -6,12 +6,14 @@ desc: Implements the ARM64EC BT module API using FEXCore
+@@ -6,12 +6,15 @@ desc: Implements the ARM64EC BT module API using FEXCore
  $end_info$
  */
  
 +#include "../Common/Priv.h"
  #include <FEXCore/fextl/fmt.h>
++#include <FEXCore/fextl/vector.h>
  #include <FEXCore/Core/X86Enums.h>
  #include <FEXCore/Core/SignalDelegator.h>
  #include <FEXCore/Core/Context.h>
@@ -130,7 +131,15 @@ index 93a3ab0..430b9e8 100644
  #include <FEXCore/Debug/InternalThreadState.h>
  #include <FEXCore/HLE/SyscallHandler.h>
  #include <FEXCore/Config/Config.h>
-@@ -78,6 +80,17 @@ extern void* ExitFunctionSuspendResumePoint;
+@@ -50,6 +53,7 @@ $end_info$
+ #include "BTInterface.h"
+ #include "Windows/Common/SHMStats.h"
+ 
++#include <atomic>
+ #include <cstdint>
+ #include <cstdio>
+ #include <type_traits>
+@@ -78,6 +82,17 @@ extern void* ExitFunctionSuspendResumePoint;
  void* X64ReturnInstr; // See Module.S
  uintptr_t NtDllBase;
  
@@ -148,7 +157,357 @@ index 93a3ab0..430b9e8 100644
  // Exports on ARM64EC point to x64 fast forward sequences to allow for redirecting to the JIT if functions are hotpatched. This LUT is from their addresses to the relative addresses of the native code exports.
  uint32_t* NtDllRedirectionLUT;
  uint32_t NtDllRedirectionLUTSize;
-@@ -160,7 +173,7 @@ std::pair<NTSTATUS, ThreadCPUArea> GetThreadCPUArea(HANDLE Thread) {
+@@ -135,8 +150,16 @@ struct ThreadCPUArea {
+   }
+ };
+ 
++// Ember fexmtx: 스레드가 지금 쥔(또는 단독으로 잡으려 기다리는) FEX 내부 잠금 기록 — 쥔 채 죽으면 다른 스레드가 되돌린다.
++struct EmberHeldLock {
++  void* M;
++  int32_t Shared;
++  int32_t Excl;
++};
++
+ struct FrontendThreadData {
+   bool InLockedRWXRead {};
++  EmberHeldLock Held[8] {};
+ };
+ 
+ namespace {
+@@ -149,10 +172,331 @@ std::optional<FEX::Windows::CPUFeatures> CPUFeatures;
+ std::optional<FEX::Windows::OvercommitTracker> OvercommitTracker;
+ std::optional<FEX::Windows::ImageTracker> ImageTracker;
+ 
+-std::recursive_mutex ThreadCreationMutex;
++// Ember fexmtx(10-18): ThreadCreationMutex 주인 죽음 교착 고침.
++// 예전엔 std::recursive_mutex(= CRITICAL_SECTION) 였다. 이 잠금은 메모리 통지(NtAllocate/Protect/Free 앞뒤)·스레드 생성(ThreadInit)·
++// 예외 처리(SMC) 동안 쥐는데, 쥔 스레드가 Windows 쪽 정리 없이 죽으면(유닉스 쪽 abort_thread: 마지막 페이지 스택 넘침·
++// 시그널 스택 중첩 예외, 또는 NtTerminateProcess(0) 가 다른 스레드를 SIGQUIT 로 죽일 때 = 프로세스 종료) 잠금이 영영 안 풀려
++// 다른 모든 스레드(종료 중인 스레드의 DLL 분리 포함)가 RtlpWaitForCriticalSection 에서 영원히 기다렸다.
++// 이제: 주인 TID 를 직접 들고, 1초 넘게 같은 주인을 기다리면 그 스레드가 살아 있는지 서버에 묻는다(NtOpenThread·ExitStatus).
++// 두 번(약 0.1초 간격) 연달아 죽었으면 잠금을 넘겨받고, 죽은 스레드들을 Threads 목록에서 뺀다(무효화가 죽은 스레드 상태를 안 건드리게).
++// 프로세스 종료 중(NtTerminateProcess(0) 뒤, 나 혼자 남음)엔 20ms 만에 확인한다. 끄기: EMBER_FEX_MTXROBUST=0(옛 방식처럼 영원히 기다림).
++void EmberOnMutexStolen(DWORD DeadTid, uint32_t WaitedMs);
++void EmberMtxLongWaitNote(DWORD Owner, bool Dead, uint32_t WaitedMs);
++extern "C" NTSTATUS WINAPI NtQueryPerformanceCounter(LARGE_INTEGER*, LARGE_INTEGER*);
++extern "C" NTSTATUS WINAPI NtOpenThread(HANDLE*, ACCESS_MASK, const OBJECT_ATTRIBUTES*, const CLIENT_ID*);
++void (*EmberDbgOut)(const char*) {};
++bool EmberMtxRobust {true};
++std::atomic<bool> EmberProcessExitAlone {false};
++
++uint64_t EmberMtxNowMs() {
++  LARGE_INTEGER Counter, Freq;
++  NtQueryPerformanceCounter(&Counter, &Freq);
++  return Freq.QuadPart ? static_cast<uint64_t>(Counter.QuadPart) * 1000 / static_cast<uint64_t>(Freq.QuadPart) : 0;
++}
++
++// 그 TID 의 스레드가 이 프로세스에서 이미 끝났나? 모르면(오류) 살아 있다고 본다.
++bool EmberThreadIsDead(DWORD Tid) {
++  OBJECT_ATTRIBUTES Attr {};
++  Attr.Length = sizeof(Attr);
++  CLIENT_ID Cid {};
++  Cid.UniqueThread = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(Tid));
++  HANDLE Handle {};
++  NTSTATUS Status = NtOpenThread(&Handle, THREAD_QUERY_LIMITED_INFORMATION, &Attr, &Cid);
++  if (Status == STATUS_INVALID_CID || Status == STATUS_INVALID_PARAMETER) {
++    return true; // 스레드 객체가 이미 없음
++  }
++  if (Status) {
++    return false;
++  }
++  THREAD_BASIC_INFORMATION Info {};
++  Status = NtQueryInformationThread(Handle, ThreadBasicInformation, &Info, sizeof(Info), nullptr);
++  NtClose(Handle);
++  if (Status) {
++    return false;
++  }
++  if (static_cast<DWORD>(reinterpret_cast<uintptr_t>(Info.ClientId.UniqueProcess)) != GetCurrentProcessId()) {
++    return true; // TID 가 다른 프로세스 스레드로 다시 쓰임 = 우리 주인은 죽었음
++  }
++  return Info.ExitStatus != STATUS_PENDING;
++}
++
++class EmberRobustRecursiveMutex final {
++public:
++  void lock() {
++    const DWORD Self = GetCurrentThreadId();
++    if (Owner.load(std::memory_order_relaxed) == Self) {
++      ++Count;
++      return;
++    }
++    DWORD Expected = 0;
++    if (!Owner.compare_exchange_strong(Expected, Self, std::memory_order_acquire, std::memory_order_relaxed)) {
++      LockSlow(Self);
++    }
++    Count = 1;
++  }
++
++  bool try_lock() {
++    const DWORD Self = GetCurrentThreadId();
++    if (Owner.load(std::memory_order_relaxed) == Self) {
++      ++Count;
++      return true;
++    }
++    DWORD Expected = 0;
++    if (Owner.compare_exchange_strong(Expected, Self, std::memory_order_acquire, std::memory_order_relaxed)) {
++      Count = 1;
++      return true;
++    }
++    return false;
++  }
++
++  void unlock() {
++    if (--Count != 0) {
++      return;
++    }
++    Owner.store(0, std::memory_order_seq_cst);
++    if (Waiters.load(std::memory_order_seq_cst) != 0 && !EmberProcessExitAlone.load(std::memory_order_relaxed)) {
++      RtlWakeAddressSingle(&Owner);
++    }
++  }
++
++  // 바로 못 잡으면, 주인이 죽었을 때만(0.1초 간격 두 번 확인) 넘겨받는다. 잡았으면 true(부른 쪽이 unlock).
++  bool TryLockRecover() {
++    if (try_lock()) {
++      return true;
++    }
++    const DWORD Cur = Owner.load(std::memory_order_seq_cst);
++    if (!Cur || !EmberThreadIsDead(Cur)) {
++      return false;
++    }
++    LARGE_INTEGER Delay;
++    Delay.QuadPart = -100LL * 10000;
++    NtDelayExecution(FALSE, &Delay);
++    if (Owner.load(std::memory_order_seq_cst) != Cur || !EmberThreadIsDead(Cur)) {
++      return false;
++    }
++    DWORD Expected = Cur;
++    if (!Owner.compare_exchange_strong(Expected, GetCurrentThreadId(), std::memory_order_acquire, std::memory_order_relaxed)) {
++      return false;
++    }
++    Count = 1;
++    EmberOnMutexStolen(Cur, 0);
++    return true;
++  }
++
++private:
++  void LockSlow(DWORD Self) {
++    for (int i = 0; i < 128; i++) {
++      DWORD Expected = 0;
++      if (Owner.load(std::memory_order_relaxed) == 0 &&
++          Owner.compare_exchange_weak(Expected, Self, std::memory_order_acquire, std::memory_order_relaxed)) {
++        return;
++      }
++      __asm__ volatile("yield");
++    }
++
++    Waiters.fetch_add(1, std::memory_order_seq_cst);
++    const uint64_t Start = EmberMtxNowMs();
++    DWORD Watched = 0;
++    uint64_t WatchedSince = Start;
++    int DeadSeen = 0;
++    bool Noted = false;
++    for (;;) {
++      DWORD Cur = Owner.load(std::memory_order_seq_cst);
++      if (Cur == 0) {
++        DWORD Expected = 0;
++        if (Owner.compare_exchange_strong(Expected, Self, std::memory_order_acquire, std::memory_order_relaxed)) {
++          break;
++        }
++        continue;
++      }
++
++      if (EmberMtxRobust && EmberProcessExitAlone.load(std::memory_order_relaxed)) {
++        // 종료 중(나 말고 다 죽음): 주소 대기 없이 1ms 씩 보다가 20ms 지나면 넘겨받는다(주인은 죽은 스레드뿐).
++        LARGE_INTEGER Delay;
++        Delay.QuadPart = -1LL * 10000;
++        NtDelayExecution(FALSE, &Delay);
++        const DWORD Again = Owner.load(std::memory_order_seq_cst);
++        if (Again != Cur) {
++          continue;
++        }
++        if (EmberMtxNowMs() - Start >= 20) {
++          DWORD Expected = Cur;
++          if (Owner.compare_exchange_strong(Expected, Self, std::memory_order_acquire, std::memory_order_relaxed)) {
++            Waiters.fetch_sub(1, std::memory_order_seq_cst);
++            EmberOnMutexStolen(Cur, static_cast<uint32_t>(EmberMtxNowMs() - Start));
++            return;
++          }
++        }
++        continue;
++      }
++
++      LARGE_INTEGER Timeout;
++      Timeout.QuadPart = -100LL * 10000; // 100ms (상대)
++      RtlWaitOnAddress(&Owner, &Cur, sizeof(Cur), EmberMtxRobust ? &Timeout : nullptr);
++      if (!EmberMtxRobust) {
++        continue;
++      }
++
++      Cur = Owner.load(std::memory_order_seq_cst);
++      if (Cur == 0) {
++        continue;
++      }
++      const uint64_t Now = EmberMtxNowMs();
++      if (Cur != Watched) {
++        Watched = Cur;
++        WatchedSince = Now;
++        DeadSeen = 0;
++        continue;
++      }
++      const uint64_t Threshold = EmberProcessExitAlone.load(std::memory_order_relaxed) ? 20 : 1000;
++      if (Now - WatchedSince < Threshold) {
++        continue;
++      }
++      if (!EmberThreadIsDead(Cur)) {
++        DeadSeen = 0;
++        WatchedSince = Now; // 살아 있음 — 1초 뒤 다시 묻기
++        if (!Noted && Now - Start >= 3000) {
++          Noted = true;
++          EmberMtxLongWaitNote(Cur, false, static_cast<uint32_t>(Now - Start));
++        }
++        continue;
++      }
++      if (++DeadSeen < 2) {
++        continue; // 한 번 더(약 0.1초 뒤) 확인: 서버가 죽음 표시를 먼저 하고 시그널이 늦게 닿는 틈
++      }
++      DWORD Expected = Cur;
++      if (Owner.compare_exchange_strong(Expected, Self, std::memory_order_acquire, std::memory_order_relaxed)) {
++        Waiters.fetch_sub(1, std::memory_order_seq_cst);
++        EmberOnMutexStolen(Cur, static_cast<uint32_t>(Now - Start));
++        return;
++      }
++    }
++    Waiters.fetch_sub(1, std::memory_order_seq_cst);
++  }
++
++  std::atomic<DWORD> Owner {0};
++  std::atomic<uint32_t> Waiters {0};
++  uint32_t Count {0}; // 주인만 건드림
++};
++
++EmberRobustRecursiveMutex ThreadCreationMutex;
+ // Map of TIDs to their FEX thread state, `ThreadCreationMutex` must be locked when accessing
+ std::unordered_map<DWORD, FEXCore::Core::InternalThreadState*> Threads;
+ 
++void EmberMtxLog(const char* Fmt, unsigned A, unsigned B, unsigned C, const char* S) {
++  if (EmberDbgOut) {
++    char Buf[300];
++    int N = snprintf(Buf, sizeof(Buf), "%04x:err:fex:ember ", static_cast<unsigned>(GetCurrentThreadId()));
++    snprintf(Buf + N, sizeof(Buf) - N, Fmt, A, B, C, S);
++    EmberDbgOut(Buf);
++  }
++}
++
++// 죽은 스레드 하나가 남긴 코드 무효화 잠금 몫을 거둔다(ThreadCreationMutex 를 쥔 채로 부름).
++uint32_t EmberRecoverDeadThread(DWORD Tid, FEXCore::Core::InternalThreadState* Thread) {
++  using WPM = FEXCore::Utils::WritePriorityMutex::Mutex;
++  WPM* CIM = CTX ? &CTX->GetCodeInvalidationMutex() : nullptr;
++  uint32_t Fixed = 0, SharedTotal = 0, Locks = 0;
++  bool SawCIM = false;
++  if (Thread && Thread->FrontendPtr) {
++    for (auto& H : static_cast<FrontendThreadData*>(Thread->FrontendPtr)->Held) {
++      if (!H.M) {
++        continue;
++      }
++      const uint32_t Shared = H.Shared > 0 ? static_cast<uint32_t>(H.Shared) : 0;
++      const uint32_t F = static_cast<WPM*>(H.M)->EmberRecoverDead(Tid, Shared);
++      if (F) {
++        Fixed |= F;
++        Locks++;
++        SharedTotal += Shared;
++      }
++      SawCIM |= H.M == CIM;
++      H = {};
++    }
++  }
++  if (CIM && !SawCIM) {
++    if (const uint32_t F = CIM->EmberRecoverDead(Tid, 0)) {
++      Fixed |= F;
++      Locks++;
++    }
++  }
++  if (Fixed) {
++    EmberMtxLog("죽은 스레드 %04x 가 남긴 FEX 내부 잠금 %u 개 거둠(종류 %u%s)\n", static_cast<unsigned>(Tid), Locks, Fixed, "");
++    (void)SharedTotal;
++  }
++  return Fixed;
++}
++
++// 목록에서 죽은 스레드를 빼고 그 몫을 거둔다(ThreadCreationMutex 를 쥔 채로). 두 번(0.1초 간격) 죽어 있어야 죽은 것으로 본다.
++// Force: 프로세스 종료 중(나 말고 다 죽음) — 묻지 않고 다 뺀다.
++uint32_t EmberPruneDeadThreads(DWORD KnownDead, bool Force) {
++  const DWORD Self = GetCurrentThreadId();
++  fextl::vector<DWORD> Cand;
++  for (auto& [Tid, T] : Threads) {
++    if (Tid != Self && (Force || Tid == KnownDead || EmberThreadIsDead(Tid))) {
++      Cand.push_back(Tid);
++    }
++  }
++  if (Cand.empty()) {
++    return 0;
++  }
++  {
++    // 서버가 죽음 표시를 먼저 하고 그 스레드에 SIGQUIT 가 늦게 닿는 틈 — 조금 기다린 뒤 다시 확인(종료 중이면 20ms 만)
++    LARGE_INTEGER Delay;
++    Delay.QuadPart = (Force ? -20LL : -100LL) * 10000;
++    NtDelayExecution(FALSE, &Delay);
++  }
++  uint32_t Pruned = 0;
++  for (DWORD Tid : Cand) {
++    if (!Force && Tid != KnownDead && !EmberThreadIsDead(Tid)) {
++      continue;
++    }
++    auto It = Threads.find(Tid);
++    if (It == Threads.end()) {
++      continue;
++    }
++    EmberRecoverDeadThread(Tid, It->second);
++    Threads.erase(It);
++    Pruned++;
++  }
++  return Pruned;
++}
++
++// 잠금을 쥔 채로 부름(Count 는 lock() 이 1 로 둔다).
++void EmberOnMutexStolen(DWORD DeadTid, uint32_t WaitedMs) {
++  const bool Alone = EmberProcessExitAlone.load(std::memory_order_relaxed);
++  const uint32_t Pruned = EmberPruneDeadThreads(DeadTid, Alone);
++  EmberMtxLog("ThreadCreationMutex 주인 %04x 가 쥔 채 죽음 — 잠금 회수(%u ms 대기, 죽은 스레드 %u 개 목록에서 뺌%s)\n",
++              static_cast<unsigned>(DeadTid), WaitedMs, Pruned, Alone ? ", 프로세스 종료 중" : "");
++}
++
++void EmberMtxLongWaitNote(DWORD Owner, bool Dead, uint32_t WaitedMs) {
++  EmberMtxLog("ThreadCreationMutex 를 %u ms 째 기다림 — 주인 %04x%.0u %s\n", WaitedMs, static_cast<unsigned>(Owner), 0,
++              Dead ? "(죽음)" : "(살아 있음)");
++}
++
++// 코드 무효화 잠금을 1초 넘게 기다릴 때(WritePriorityMutex 가 1초마다 부름). 죽은 스레드가 남긴 몫이 원인이면 거둔다.
++// ThreadCreationMutex 를 내가 쥐었거나 바로 잡을 수 있을 때만(목록을 만지므로). 2초에 한 번만.
++std::atomic<uint64_t> EmberLastLongWaitScan {0};
++void EmberLongWaitHook() {
++  if (!EmberMtxRobust) {
++    return;
++  }
++  const uint64_t Now = EmberMtxNowMs();
++  uint64_t Last = EmberLastLongWaitScan.load(std::memory_order_relaxed);
++  if (Now - Last < 2000 || !EmberLastLongWaitScan.compare_exchange_strong(Last, Now)) {
++    return;
++  }
++  if (!ThreadCreationMutex.TryLockRecover()) {
++    return;
++  }
++  const uint32_t Pruned = EmberPruneDeadThreads(0, false);
++  ThreadCreationMutex.unlock();
++  if (Pruned) {
++    EmberMtxLog("코드 무효화 잠금 오래 기다림 — 죽은 스레드 %u 개 정리%.0u%.0u%s\n", Pruned, 0, 0, "");
++  }
++}
++
+ std::pair<NTSTATUS, ThreadCPUArea> GetThreadCPUArea(HANDLE Thread) {
+   THREAD_BASIC_INFORMATION Info;
+   const NTSTATUS Err = NtQueryInformationThread(Thread, ThreadBasicInformation, &Info, sizeof(Info), nullptr);
+@@ -160,7 +504,7 @@ std::pair<NTSTATUS, ThreadCPUArea> GetThreadCPUArea(HANDLE Thread) {
  }
  
  ThreadCPUArea GetCPUArea() {
@@ -157,7 +516,7 @@ index 93a3ab0..430b9e8 100644
  }
  
  FrontendThreadData* GetFrontendThreadData(FEXCore::Core::InternalThreadState* Thread) {
-@@ -195,6 +208,215 @@ void FillNtDllLUTs(HMODULE NtDll) {
+@@ -195,6 +539,215 @@ void FillNtDllLUTs(HMODULE NtDll) {
    }
  }
  
@@ -373,7 +732,7 @@ index 93a3ab0..430b9e8 100644
  template<typename T>
  void WriteModuleRVA(HMODULE Module, LONG RVA, T Data) {
    if (!RVA) {
-@@ -246,7 +468,9 @@ void ParseWineSyscallNumbers(HMODULE NtDll) {
+@@ -246,7 +799,9 @@ void ParseWineSyscallNumbers(HMODULE NtDll) {
    // which we need to manually issue. Note that all functions starting with Nt besides NtGetTickCount are syscalls.
    for (uint32_t Idx = 0; Idx < Exports->NumberOfNames; Idx++) {
      const char* Name = reinterpret_cast<const char*>(NtDllBase + NameTable[Idx]);
@@ -384,7 +743,7 @@ index 93a3ab0..430b9e8 100644
        *SyscallTableEnd++ = {Name, FunctionTable[OrdinalTable[Idx]]};
      }
    }
-@@ -359,7 +583,7 @@ static void LoadStateFromECContext(FEXCore::Core::InternalThreadState* Thread, C
+@@ -359,7 +914,7 @@ static void LoadStateFromECContext(FEXCore::Core::InternalThreadState* Thread, C
      State.gs_idx = Context.SegGs & 0xffff;
  
      // The TEB is the only populated GDT entry by default
@@ -393,7 +752,7 @@ index 93a3ab0..430b9e8 100644
      auto GDT = State.GetSegmentFromIndex(State, (Context.SegGs & 0xffff));
      State.SetGDTBase(GDT, TEB);
      State.SetGDTLimit(GDT, 0xF'FFFFU);
-@@ -380,6 +604,12 @@ static void LoadStateFromECContext(FEXCore::Core::InternalThreadState* Thread, C
+@@ -380,6 +935,12 @@ static void LoadStateFromECContext(FEXCore::Core::InternalThreadState* Thread, C
      } else {
        CTX->SetXMMRegistersFromState(Thread, reinterpret_cast<const __uint128_t*>(Context.FltSave.XmmRegisters), nullptr);
      }
@@ -406,7 +765,7 @@ index 93a3ab0..430b9e8 100644
      memcpy(State.mm, Context.FltSave.FloatRegisters, sizeof(State.mm));
  
      State.FCW = Context.FltSave.ControlWord;
-@@ -576,6 +806,7 @@ extern "C" void SyncThreadContext(CONTEXT* Context) {
+@@ -576,6 +1137,7 @@ extern "C" void SyncThreadContext(CONTEXT* Context) {
  
    uint32_t StateEFlags = CTX->ReconstructCompactedEFLAGS(Thread, false, nullptr, 0);
    Context->EFlags = (Context->EFlags & ECValidEFlagsMask) | (StateEFlags & ~ECValidEFlagsMask);
@@ -414,7 +773,50 @@ index 93a3ab0..430b9e8 100644
    Exception::LoadStateFromECContext(Thread, *Context);
  }
  
-@@ -605,8 +836,8 @@ NTSTATUS ProcessInit() {
+@@ -589,6 +1151,42 @@ NTSTATUS ProcessInit() {
+   FEX::Config::LoadConfig(AppConfigName, _environ, FEX::ReadPortabilityInformation());
+   FEXCore::Config::ReloadMetaLayer();
+   FEX::Windows::Logging::Init();
++  EmberDbgOut = reinterpret_cast<decltype(EmberDbgOut)>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "__wine_dbg_output"));
++  if (const char* E = getenv("EMBER_FEX_MTXROBUST"); E && *E == '0') {
++    EmberMtxRobust = false;
++  }
++  if (EmberMtxRobust) {
++    FEXCore::Utils::WritePriorityMutex::EmberRobust::Note = [](void* M, int Kind, int Delta) {
++      auto* Thread = GetCPUArea().ThreadState();
++      if (!Thread || !Thread->FrontendPtr) {
++        return;
++      }
++      auto& Held = static_cast<FrontendThreadData*>(Thread->FrontendPtr)->Held;
++      EmberHeldLock* E = nullptr;
++      EmberHeldLock* Free = nullptr;
++      for (auto& H : Held) {
++        if (H.M == M) {
++          E = &H;
++          break;
++        }
++        if (!H.M && !Free) {
++          Free = &H;
++        }
++      }
++      if (!E) {
++        if (Delta <= 0 || !Free) {
++          return; // 기록 칸이 모자라면 기록 안 함(그 잠금은 회수 대상 밖)
++        }
++        E = Free;
++        E->M = M;
++      }
++      (Kind ? E->Excl : E->Shared) += Delta;
++      if (E->Excl <= 0 && E->Shared <= 0) {
++        *E = {};
++      }
++    };
++    FEXCore::Utils::WritePriorityMutex::EmberRobust::LongWaitHook = EmberLongWaitHook;
++  }
+   FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_FILENAME, ExecutablePath);
+   FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_CONFIG_NAME, AppConfigName);
+ 
+@@ -605,8 +1203,8 @@ NTSTATUS ProcessInit() {
  
    FEX::Windows::SetupEnvironmentVariableValues(NtDll);
  
@@ -424,7 +826,7 @@ index 93a3ab0..430b9e8 100644
    if (FEX::Windows::UnixLib::Available()) {
      FEXCore::DiskCache::SetFileMapper(FEX::Windows::UnixLib::MapFile);
    }
-@@ -624,7 +855,7 @@ NTSTATUS ProcessInit() {
+@@ -624,7 +1222,7 @@ NTSTATUS ProcessInit() {
    InvalidationTracker.emplace(*CTX, Threads);
    ImageTracker.emplace(*CTX, false);
  
@@ -433,7 +835,7 @@ index 93a3ab0..430b9e8 100644
    HandleImageMap(reinterpret_cast<uint64_t>(MainModule), true);
  
    HandleImageMap(NtDllBase);
-@@ -636,9 +867,18 @@ NTSTATUS ProcessInit() {
+@@ -636,9 +1234,18 @@ NTSTATUS ProcessInit() {
                                                            PAGE_EXECUTE_READ);
    *reinterpret_cast<uint8_t*>(X64ReturnInstr) = 0xc3;
  
@@ -452,7 +854,7 @@ index 93a3ab0..430b9e8 100644
    FEX_CONFIG_OPT(ProfileStats, PROFILESTATS);
    FEX_CONFIG_OPT(StartupSleep, STARTUPSLEEP);
    FEX_CONFIG_OPT(StartupSleepProcName, STARTUPSLEEPPROCNAME);
-@@ -655,7 +895,16 @@ NTSTATUS ProcessInit() {
+@@ -655,7 +1262,33 @@ NTSTATUS ProcessInit() {
    return STATUS_SUCCESS;
  }
  
@@ -461,16 +863,33 @@ index 93a3ab0..430b9e8 100644
 +// 이후(DLL 분리 코드 번역)에는 디스크 캐시를 쓰지 않는다 — DiskCache.cpp EmberProcessExiting 참고.
 +void ProcessTerm(HANDLE Handle, BOOL After, NTSTATUS Status) {
 +  if (!Handle && !After) {
++    // Ember dcbatch(10-23): 첫 실행에 번역한 블록이 쓰기 큐에 남은 채 버려지지 않게(다음 실행이 또 번역) — 최대 1.5초.
++    FEXCore::DiskCache::EmberDrainStoresForExit();
 +    FEXCore::DiskCache::EmberSetProcessExiting();
 +    if (ImageTracker) {
 +      ImageTracker->EmberFlushCodeMap();
++    }
++  }
++  if (!Handle && After && EmberMtxRobust) {
++    // Ember fexmtx: 다른 스레드는 방금 죽었다(그중 누가 ThreadCreationMutex 를 쥐고 있었을 수 있음). 이제부터 잠금 대기는 20ms 만에
++    // 주인 생존을 묻는다. 잠금을 잡고(죽은 주인이면 회수) 나 말고 다 목록에서 뺀다 — DLL 분리 때 무효화가 죽은 스레드 상태를 안 건드리게.
++    EmberProcessExitAlone.store(true, std::memory_order_relaxed);
++    FEXCore::Utils::WritePriorityMutex::EmberRobust::ExitAlone.store(true, std::memory_order_relaxed);
++    const uint64_t T0 = EmberMtxNowMs();
++    {
++      std::scoped_lock Lock(ThreadCreationMutex);
++      EmberPruneDeadThreads(0, true);
++    }
++    const uint64_t Took = EmberMtxNowMs() - T0;
++    if (Took >= 200) {
++      EmberMtxLog("프로세스 종료 정리 %u ms%.0u%.0u%s\n", static_cast<unsigned>(Took), 0, 0, "");
 +    }
 +  }
 +}
  
  class ScopedCallbackDisable {
  private:
-@@ -673,6 +922,165 @@ public:
+@@ -673,6 +1306,165 @@ public:
    }
  };
  
@@ -636,7 +1055,7 @@ index 93a3ab0..430b9e8 100644
  // Returns true if exception dispatch should be halted and the execution context restored to NativeContext
  bool ResetToConsistentStateImpl(const ThreadCPUArea CPUArea, EXCEPTION_RECORD* Exception, CONTEXT* GuestContext, ARM64_NT_CONTEXT* NativeContext) {
    auto Thread = CPUArea.ThreadState();
-@@ -691,6 +1099,11 @@ bool ResetToConsistentStateImpl(const ThreadCPUArea CPUArea, EXCEPTION_RECORD* E
+@@ -691,6 +1483,11 @@ bool ResetToConsistentStateImpl(const ThreadCPUArea CPUArea, EXCEPTION_RECORD* E
    if (Exception->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
      const auto FaultAddress = static_cast<uint64_t>(Exception->ExceptionInformation[1]);
  
@@ -648,7 +1067,7 @@ index 93a3ab0..430b9e8 100644
      if (FEX::Windows::CallRetStack::HandleAccessViolation(Thread, FaultAddress, NativeContext->X17)) {
        return true;
      }
-@@ -703,8 +1116,11 @@ bool ResetToConsistentStateImpl(const ThreadCPUArea CPUArea, EXCEPTION_RECORD* E
+@@ -703,8 +1500,11 @@ bool ResetToConsistentStateImpl(const ThreadCPUArea CPUArea, EXCEPTION_RECORD* E
      std::scoped_lock Lock(ThreadCreationMutex);
      if (InvalidationTracker && InvalidationTracker->HandleRWXAccessViolation(Thread, NativeContext->Pc, FaultAddress)) {
        FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedSMCCount, 1);
@@ -661,7 +1080,16 @@ index 93a3ab0..430b9e8 100644
          // If we are not patching ourself (single inst block case) and potentially patching the current block, this is inline SMC. Reconstruct the current context (before the SMC write) then single step the write to reduce it to regular SMC.
          Exception::ReconstructThreadState(Thread, *NativeContext);
          LogMan::Msg::DFmt("Handled inline self-modifying code: pc: {:X} rip: {:X} fault: {:X}", NativeContext->Pc,
-@@ -1035,11 +1451,10 @@ NTSTATUS ThreadTerm(HANDLE Thread, LONG ExitCode) {
+@@ -1002,7 +1802,7 @@ NTSTATUS ThreadInit() {
+ 
+   {
+     auto ThreadTID = GetCurrentThreadId();
+-    Threads.emplace(ThreadTID, Thread);
++    Threads.insert_or_assign(ThreadTID, Thread); // Ember fexmtx: 같은 TID 의 낡은 항목은 덮어쓴다
+     if (StatAllocHandler) {
+       Thread->ThreadStats = StatAllocHandler->AllocateSlot(ThreadTID);
+     }
+@@ -1035,11 +1835,10 @@ NTSTATUS ThreadTerm(HANDLE Thread, LONG ExitCode) {
      NtGetContextThread(*ThreadDup, &TmpContext);
    }
  
@@ -677,7 +1105,7 @@ index 93a3ab0..430b9e8 100644
    {
      std::scoped_lock Lock(ThreadCreationMutex);
      auto it = Threads.find(ThreadTID);
-@@ -1048,12 +1463,18 @@ NTSTATUS ThreadTerm(HANDLE Thread, LONG ExitCode) {
+@@ -1048,12 +1847,18 @@ NTSTATUS ThreadTerm(HANDLE Thread, LONG ExitCode) {
        return STATUS_SUCCESS;
      }
  
@@ -698,7 +1126,7 @@ index 93a3ab0..430b9e8 100644
  
    delete GetFrontendThreadData(ThreadState);
  
-@@ -1062,7 +1483,7 @@ NTSTATUS ThreadTerm(HANDLE Thread, LONG ExitCode) {
+@@ -1062,7 +1867,7 @@ NTSTATUS ThreadTerm(HANDLE Thread, LONG ExitCode) {
  
    FEX::Windows::CallRetStack::DestroyThread(ThreadState);
    CTX->DestroyThread(ThreadState);
@@ -707,7 +1135,7 @@ index 93a3ab0..430b9e8 100644
    if (ThreadTID == GetCurrentThreadId()) {
      FEX::Windows::DeinitCRTThread();
    }
-@@ -1077,3 +1498,65 @@ BOOLEAN BTCpu64IsProcessorFeaturePresent(UINT Feature) {
+@@ -1077,3 +1882,65 @@ BOOLEAN BTCpu64IsProcessorFeaturePresent(UINT Feature) {
  void UpdateProcessorInformation(SYSTEM_CPU_INFORMATION* Info) {
    CPUFeatures->UpdateInformation(Info);
  }
@@ -988,7 +1416,7 @@ index c62a763..7d6bd9e 100644
 +
  } // namespace FEX::Windows::UnixLib
 diff --git a/Source/Windows/Common/ImageTracker.cpp b/Source/Windows/Common/ImageTracker.cpp
-index c459c44..1ad47fa 100644
+index c459c44..41f9d7a 100644
 --- a/Source/Windows/Common/ImageTracker.cpp
 +++ b/Source/Windows/Common/ImageTracker.cpp
 @@ -6,8 +6,13 @@
@@ -1014,7 +1442,7 @@ index c459c44..1ad47fa 100644
  namespace FEX::Windows {
  static fextl::string ToLower(std::string_view String) {
    fextl::string Res;
-@@ -180,6 +187,32 @@ FEXCore::ExecutableFileSectionInfo ImageTracker::HandleImageMap(std::string_view
+@@ -180,12 +187,62 @@ FEXCore::ExecutableFileSectionInfo ImageTracker::HandleImageMap(std::string_view
      if (AOTImage != AOTImages.end() && AOTImage->second.CacheFile) {
        CTX.GetCodeCache().EnableLoadedSection(nullptr, *AOTImage->second.CacheFile, ImageInfo->SectionInfo);
      }
@@ -1047,7 +1475,38 @@ index c459c44..1ad47fa 100644
    }
  
    uint64_t EndAddress = Address + Nt->OptionalHeader.SizeOfImage;
-@@ -218,13 +251,56 @@ std::optional<FEXCore::ExecutableFileSectionInfo> ImageTracker::LookupExecutable
+   fextl::set<uint64_t> VolatileInstructions {};
+   FEXCore::IntervalList<uint64_t> VolatileValidRanges {};
+-  LoadImageVolatileMetadata(VolatileInstructions, VolatileValidRanges, Module, Nt, Address, EndAddress);
++  // Ember(fexcompat1 10-08): MSVC 볼라틸 메타데이터는 "볼라틸로 표시 안 된 접근은 순서 보장 불필요" 로 읽혀 그 블록의 나머지 적재를
++  // TSO 없이 번역한다. x86 의 공짜 순서에 기대는 무잠금 큐(CS2 rendersystemdx11 의 head->next 적재)가 깨졌다.
++  // VolatileMetadata=0(AppConfig·환경)이면 MS 표를 안 읽고 모든 접근을 TSO 로(확장 메타데이터는 그대로 적용).
++  // Ember(fexcs2 10-08): EMBER_FEX_NOVOLMETA=a.dll,b.dll — 그 모듈만 MS 볼라틸 메타데이터를 안 읽는다(모듈 전체 TSO, 버전 무관).
++  // 게임 프로필 env 로 주는 탈출구. 기본 처방은 Core.cpp 잠금 멀티블록 TSO.
++  bool EmberNoVol = false;
++  if (const char* NoVol = getenv("EMBER_FEX_NOVOLMETA"); NoVol && *NoVol) {
++    const auto Lower = ToLower(ModuleName);
++    std::string_view List {NoVol};
++    while (!List.empty()) {
++      const auto Comma = List.find(',');
++      const auto Item = ToLower(List.substr(0, Comma));
++      if (!Item.empty() && (Item == "*" || Item == Lower)) {
++        EmberNoVol = true;
++        break;
++      }
++      if (Comma == std::string_view::npos) {
++        break;
++      }
++      List.remove_prefix(Comma + 1);
++    }
++  }
++  if (VolatileMetadataConfig() && !EmberNoVol) {
++    LoadImageVolatileMetadata(VolatileInstructions, VolatileValidRanges, Module, Nt, Address, EndAddress);
++  }
+   if (auto It = ExtendedMetaData.find(ID); It != ExtendedMetaData.end()) {
+     FEX::VolatileMetadata::ApplyFEXExtendedVolatileMetadata(It->second, VolatileInstructions, VolatileValidRanges, Address, EndAddress);
+   }
+@@ -218,13 +275,56 @@ std::optional<FEXCore::ExecutableFileSectionInfo> ImageTracker::LookupExecutable
    return std::prev(It)->second.SectionInfo;
  }
  
@@ -1105,10 +1564,18 @@ index c459c44..1ad47fa 100644
    // Don't attempt cache loading for FEXOfflineCompiler itself
    static bool IsFOC32 = ImageInfo.Info.Filename.ends_with("fexofflinecompiler32.exe");
 diff --git a/Source/Windows/Common/ImageTracker.h b/Source/Windows/Common/ImageTracker.h
-index 438bcbc..cede26d 100644
+index 438bcbc..fb347c9 100644
 --- a/Source/Windows/Common/ImageTracker.h
 +++ b/Source/Windows/Common/ImageTracker.h
-@@ -46,6 +46,10 @@ public:
+@@ -5,6 +5,7 @@
+ #include <mutex>
+ #include <map>
+ #include <shared_mutex>
++#include <FEXCore/Utils/WritePriorityMutex.h>
+ #include <string_view>
+ 
+ #include <FEXCore/Utils/CompilerDefs.h>
+@@ -46,6 +47,10 @@ public:
  
    int OpenCodeMapFile() override;
  
@@ -1119,7 +1586,18 @@ index 438bcbc..cede26d 100644
  private:
    struct MappedImageInfo {
      FEXCore::ExecutableFileInfo Info;
-@@ -72,6 +76,11 @@ private:
+@@ -64,14 +69,21 @@ private:
+   FEXCore::Context::Context& CTX;
+ 
+   FEX_CONFIG_OPT(ExtendedVolatileMetadataConfig, EXTENDEDVOLATILEMETADATA);
++  // Ember(fexcompat1 10-08): 설정 VolatileMetadata 가 어디서도 안 읽혀 끌 수 없었다(AppConfig 의 "VolatileMetadata": "0" 이 무시됨)
++  FEX_CONFIG_OPT(VolatileMetadataConfig, VOLATILEMETADATA);
+   fextl::unordered_map<fextl::string, FEX::VolatileMetadata::ExtendedVolatileMetadata> ExtendedMetaData;
+ 
+-  std::shared_mutex ImagesLock;
++  FEXCore::Utils::WritePriorityMutex::Mutex ImagesLock; // Ember fexmtx: 죽은 스레드 몫 회수 대상(옛 std::shared_mutex)
+   std::map<uint64_t, MappedImageInfo> MappedImages;
+   std::map<fextl::string, AOTImageInfo> AOTImages;
  
    std::string ActiveCodeMapPath;
    bool IsGeneratingCache;
@@ -1132,7 +1610,7 @@ index 438bcbc..cede26d 100644
  
  } // namespace FEX::Windows
 diff --git a/Source/Windows/Common/InvalidationTracker.cpp b/Source/Windows/Common/InvalidationTracker.cpp
-index 155403d..42a1e9c 100644
+index 155403d..6b4e1fa 100644
 --- a/Source/Windows/Common/InvalidationTracker.cpp
 +++ b/Source/Windows/Common/InvalidationTracker.cpp
 @@ -1,3 +1,4 @@
@@ -1354,7 +1832,56 @@ index 155403d..42a1e9c 100644
      const bool EffectiveExec = HasExec || (DEPDisabled && ProtIsReadable(Prot));
      const bool EffectiveRWX = EffectiveExec && ProtIsWritable(Prot);
  
-@@ -217,12 +401,16 @@ void InvalidationTracker::ReprotectRWXIntervals(uint64_t Address, uint64_t Size)
+@@ -148,6 +332,9 @@ void InvalidationTracker::HandleImageMap(std::string_view Name, uint64_t Address
+       if (Section->Characteristics & IMAGE_SCN_MEM_WRITE) {
+         LogMan::Msg::DFmt("Add image SMC interval: {:X} - {:X}", SectionBase, SectionBase + Section->Misc.VirtualSize);
+         RWXIntervals.Insert({SectionBase, SectionBase + Section->Misc.VirtualSize});
++        // Ember xpcache2: 쓰기+실행 이미지 섹션(보호된 실행 파일의 .xpdata 등) — 이미지 RWX 캐시 후보
++        ImageRWXIntervals.Insert({SectionBase, SectionBase + Section->Misc.VirtualSize});
++        HasImageRWX.store(true, std::memory_order_relaxed);
+       }
+     }
+   }
+@@ -189,6 +376,7 @@ InvalidationTracker::InvalidateContainingSectionResult InvalidationTracker::Inva
+     std::unique_lock Lock(IntervalsLock);
+     XIntervals.Remove({SectionBase, SectionBase + SectionSize});
+     RWXIntervals.Remove({SectionBase, SectionBase + SectionSize});
++    ForgetImageRWXLocked(SectionBase, SectionBase + SectionSize);
+   }
+ 
+   return {SectionBase, SectionSize};
+@@ -209,6 +397,30 @@ void InvalidationTracker::InvalidateAlignedInterval(uint64_t Address, uint64_t S
+     std::unique_lock Lock(IntervalsLock);
+     XIntervals.Remove({AlignedBase, AlignedBase + AlignedSize});
+     RWXIntervals.Remove({AlignedBase, AlignedBase + AlignedSize});
++    ForgetImageRWXLocked(AlignedBase, AlignedBase + AlignedSize);
++  } else if (Address && AlignedSize <= (1ULL << 30) && HasImageRWX.load(std::memory_order_relaxed) && [&] {
++               std::shared_lock Lock(IntervalsLock);
++               return ImageRWXIntervals.Intersect({AlignedBase, AlignedBase + AlignedSize}) &&
++                      RWXIntervals.Intersect({AlignedBase, AlignedBase + AlignedSize});
++             }()) {
++    // Ember xpcache(10-18): 코드 캐시 비우기·다른 프로세스 쓰기(NtWriteVirtualMemory)·ReadFile 로 RWX 페이지가 바뀐 것도 센다.
++    std::unique_lock Lock(IntervalsLock);
++    const uint64_t End = AlignedBase + AlignedSize;
++    uint64_t Page = AlignedBase & HOST_PAGE_MASK;
++    while (Page < End) {
++      if (RWXIntervals.Intersect({Page, Page + HOST_PAGE_SIZE})) {
++        NoteSMCWriteLocked(Page);
++        Page += HOST_PAGE_SIZE;
++        continue;
++      }
++      const auto Query = RWXIntervals.Query(Page);
++      if (!Query.Size) {
++        break;
++      }
++      // 다음 RWX 구간이 시작하는 호스트 페이지로 건너뛴다
++      const uint64_t Next = (Page + Query.Size) & HOST_PAGE_MASK;
++      Page = Next > Page ? Next : Page + HOST_PAGE_SIZE;
++    }
+   }
+ }
+ 
+@@ -217,12 +429,16 @@ void InvalidationTracker::ReprotectRWXIntervals(uint64_t Address, uint64_t Size)
  }
  
  bool InvalidationTracker::HandleRWXAccessViolation(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPc, uint64_t FaultAddress) {
@@ -1375,7 +1902,7 @@ index 155403d..42a1e9c 100644
    }(FaultAddress);
  
    if (NeedsInvalidate) {
-@@ -230,13 +418,39 @@ bool InvalidationTracker::HandleRWXAccessViolation(FEXCore::Core::InternalThread
+@@ -230,13 +446,42 @@ bool InvalidationTracker::HandleRWXAccessViolation(FEXCore::Core::InternalThread
      {
        std::scoped_lock Lock(CTX.GetCodeInvalidationMutex());
  
@@ -1395,6 +1922,9 @@ index 155403d..42a1e9c 100644
 +      NtQuerySystemTime(&Now);
 +      std::unique_lock Lock(IntervalsLock);
 +      const uint64_t Page = FaultAddress & HOST_PAGE_MASK;
++      if (HasImageRWX.load(std::memory_order_relaxed)) {
++        NoteSMCWriteLocked(Page);
++      }
 +      auto& Info = PageFaultCounts[Page];
 +      // Ember perf2: 시간 창 감쇠 — 마지막 폴트에서 5초 넘게 지났으면 처음부터 다시 센다
 +      if (Info.Count && Now.QuadPart - Info.LastTime > PAGE_FAULT_WINDOW) {
@@ -1420,7 +1950,24 @@ index 155403d..42a1e9c 100644
      }
      DetectMonoBackpatcherBlock(Thread, HostPc);
      return true;
-@@ -249,6 +463,37 @@ bool InvalidationTracker::BeginUntrackedWriteLocked(uint64_t Address, uint64_t S
+@@ -245,10 +490,53 @@ bool InvalidationTracker::HandleRWXAccessViolation(FEXCore::Core::InternalThread
+ }
+ 
+ bool InvalidationTracker::BeginUntrackedWriteLocked(uint64_t Address, uint64_t Size) {
+-  return ProtectRWXIntervalsInternal(Address, Size, true);
++  const bool Hit = ProtectRWXIntervalsInternal(Address, Size, true);
++  if (Hit && HasImageRWX.load(std::memory_order_relaxed)) {
++    // Ember xpcache: 시스템 호출 경로의 쓰기(ReadFile·NtWriteVirtualMemory 등)도 코드 변경으로 센다(RWX 구간 안 페이지만).
++    const uint64_t End = (Address + Size + 16383) & ~16383ULL;
++    std::unique_lock Lock(IntervalsLock);
++    uint64_t N = 0;
++    for (uint64_t Page = Address & ~16383ULL; Page < End && N < 4096; Page += 16384, N++) {
++      if (RWXIntervals.Intersect({Page, Page + HOST_PAGE_SIZE})) {
++        NoteSMCWriteLocked(Page);
++      }
++    }
++  }
++  return Hit;
  }
  
  FEXCore::HLE::ExecutableRangeInfo InvalidationTracker::QueryExecutableRange(uint64_t Address) {
@@ -1458,7 +2005,7 @@ index 155403d..42a1e9c 100644
    std::shared_lock Lock(IntervalsLock);
    const auto XResult = XIntervals.Query(Address);
    if (!XResult.Enclosed) {
-@@ -256,7 +501,11 @@ FEXCore::HLE::ExecutableRangeInfo InvalidationTracker::QueryExecutableRange(uint
+@@ -256,7 +544,19 @@ FEXCore::HLE::ExecutableRangeInfo InvalidationTracker::QueryExecutableRange(uint
    }
    const auto RWXResult = RWXIntervals.Query(Address);
    if (RWXResult.Enclosed) {
@@ -1467,11 +2014,19 @@ index 155403d..42a1e9c 100644
 +    const uint64_t Page = Address & HOST_PAGE_MASK;
 +    const uint64_t Start = std::max<uint64_t>(Page, RWXResult.Interval.Offset);
 +    const uint64_t End = std::min<uint64_t>(Page + HOST_PAGE_SIZE, RWXResult.Interval.End);
-+    return {Start, End - Start, true, UntrappedPages.contains(Page)};
++    uint8_t SMCWrites = 0;
++    bool ImageRWX = false;
++    if (HasImageRWX.load(std::memory_order_relaxed) && ImageRWXIntervals.Query(Address).Enclosed) {
++      ImageRWX = true;
++      if (auto It = EverSMCWrites.find(Page); It != EverSMCWrites.end()) {
++        SMCWrites = It->second;
++      }
++    }
++    return {Start, End - Start, true, UntrappedPages.contains(Page), SMCWrites, ImageRWX};
    } else if (RWXResult.Size && RWXResult.Size < XResult.Size) {
      return {XResult.Interval.Offset, RWXResult.Interval.Offset - XResult.Interval.Offset, false};
    }
-@@ -302,10 +551,7 @@ void InvalidationTracker::DisableSMCDetection() {
+@@ -302,10 +602,7 @@ void InvalidationTracker::DisableSMCDetection() {
    do {
      Query = RWXIntervals.Query(Address);
      if (Query.Enclosed) {
@@ -1483,7 +2038,7 @@ index 155403d..42a1e9c 100644
      }
      Address += Query.Size;
    } while (Query.Size);
-@@ -332,6 +578,17 @@ void InvalidationTracker::InvalidateIntervalInternal(uint64_t Address, uint64_t
+@@ -332,6 +629,17 @@ void InvalidationTracker::InvalidateIntervalInternal(uint64_t Address, uint64_t
  
  void InvalidationTracker::InvalidateIntervalInternalLocked(uint64_t Address, uint64_t Size) {
    // NOTE: This assumes CodeInvalidationMutex is locked by the caller
@@ -1501,7 +2056,7 @@ index 155403d..42a1e9c 100644
    CTX.InvalidateCodeBuffersCodeRange(Address, Size);
    for (auto Thread : Threads) {
      CTX.InvalidateThreadCachedCodeRange(Thread.second, Address, Size);
-@@ -339,7 +596,10 @@ void InvalidationTracker::InvalidateIntervalInternalLocked(uint64_t Address, uin
+@@ -339,7 +647,10 @@ void InvalidationTracker::InvalidateIntervalInternalLocked(uint64_t Address, uin
  }
  
  bool InvalidationTracker::ProtectRWXIntervalsInternal(uint64_t Address, uint64_t Size, bool ForWriteLocked) {
@@ -1513,7 +2068,7 @@ index 155403d..42a1e9c 100644
    std::shared_lock Lock(IntervalsLock);
  
    if (SMCDetectionDisabled) {
-@@ -360,10 +620,20 @@ bool InvalidationTracker::ProtectRWXIntervalsInternal(uint64_t Address, uint64_t
+@@ -360,10 +671,20 @@ bool InvalidationTracker::ProtectRWXIntervalsInternal(uint64_t Address, uint64_t
          }
          HitRWXInterval = true;
        }
@@ -1539,18 +2094,23 @@ index 155403d..42a1e9c 100644
        // No more regions past `Address` in the interval list
        break;
 diff --git a/Source/Windows/Common/InvalidationTracker.h b/Source/Windows/Common/InvalidationTracker.h
-index d2a80bc..55e91ad 100644
+index d2a80bc..b2ea146 100644
 --- a/Source/Windows/Common/InvalidationTracker.h
 +++ b/Source/Windows/Common/InvalidationTracker.h
-@@ -6,6 +6,7 @@
+@@ -3,9 +3,12 @@
+ 
+ #include <FEXCore/Utils/IntervalList.h>
+ #include <FEXCore/HLE/SyscallHandler.h>
++#include <atomic>
  #include <mutex>
  #include <shared_mutex>
++#include <FEXCore/Utils/WritePriorityMutex.h>
  #include <unordered_map>
 +#include <unordered_set>
  #include <string_view>
  
  namespace FEXCore::Core {
-@@ -17,6 +18,12 @@ class Context;
+@@ -17,6 +20,12 @@ class Context;
  }
  
  namespace FEX::Windows {
@@ -1563,7 +2123,7 @@ index d2a80bc..55e91ad 100644
  /**
   * @brief Handles SMC and regular code invalidation
   */
-@@ -40,6 +47,7 @@ public:
+@@ -40,6 +49,7 @@ public:
    bool BeginUntrackedWriteLocked(uint64_t Address, uint64_t Size);
  
    FEXCore::HLE::ExecutableRangeInfo QueryExecutableRange(uint64_t Address);
@@ -1571,7 +2131,15 @@ index d2a80bc..55e91ad 100644
  
  private:
    void DetectMonoBackpatcherBlock(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC);
-@@ -67,6 +75,28 @@ private:
+@@ -60,13 +70,59 @@ private:
+ 
+   FEXCore::IntervalList<uint64_t> XIntervals;
+   FEXCore::IntervalList<uint64_t> RWXIntervals;
+-  std::shared_mutex IntervalsLock;
++  FEXCore::Utils::WritePriorityMutex::Mutex IntervalsLock; // Ember fexmtx: 죽은 스레드 몫 회수 대상(옛 std::shared_mutex)
+   FEXCore::Context::Context& CTX;
+   const std::unordered_map<DWORD, FEXCore::Core::InternalThreadState*>& Threads;
+   bool SMCDetectionDisabled {false};                    // Protected by IntervalsLock
    bool DEPDisabled {false};                             // Protected by IntervalsLock
    FEXCore::IntervalList<uint64_t> DEPPromotedIntervals; // Protected by IntervalsLock
  
@@ -1586,6 +2154,30 @@ index d2a80bc..55e91ad 100644
 +  };
 +  std::unordered_map<uint64_t, PageFaultInfo> PageFaultCounts; // Protected by IntervalsLock
 +  std::unordered_set<uint64_t> UntrappedPages;                 // Protected by IntervalsLock
++  // Ember xpcache(10-18): 번역된 코드가 쓰기로 무효화된 페이지별 누적 횟수(지우지 않음). QueryExecutableRange 가 SMCWrites 로 알려 준다.
++  // xpcache2: 헤더에 쓰기+실행으로 선언된 이미지 섹션만 센다(V8·Mono 같은 익명 JIT 페이지는 손대지 않음 — 비용 0).
++  std::unordered_map<uint64_t, uint8_t> EverSMCWrites;           // Protected by IntervalsLock
++  FEXCore::IntervalList<uint64_t> ImageRWXIntervals;             // Protected by IntervalsLock
++  std::atomic<bool> HasImageRWX {false};
++  void NoteSMCWriteLocked(uint64_t Page) {
++    Page &= ~(uint64_t)(16384 - 1);
++    if (!ImageRWXIntervals.Intersect({Page, Page + 16384})) {
++      return;
++    }
++    auto& C = EverSMCWrites[Page];
++    if (C < 255) {
++      C++;
++    }
++  }
++  void ForgetImageRWXLocked(uint64_t Base, uint64_t End) {
++    if (!HasImageRWX.load(std::memory_order_relaxed) || !ImageRWXIntervals.Intersect({Base, End})) {
++      return;
++    }
++    ImageRWXIntervals.Remove({Base, End});
++    for (auto It = EverSMCWrites.begin(); It != EverSMCWrites.end();) {
++      It = (It->first + 16384 > Base && It->first < End) ? EverSMCWrites.erase(It) : std::next(It);
++    }
++  }
 +  static constexpr uint32_t UNTRAP_FAULT_THRESHOLD_DEFAULT = 128; // Ember fexpar: 16 이면 Mono·CEF JIT 페이지까지 포기돼 전체 검증으로 느려졌다(mcs 4.0→3.05초). 안티치트 폭풍(초당 수천)은 여전히 0.1초 안에 넘는다.
 +  // Ember cefsmc: Chromium/CEF 자식 프로세스(로아 LOSTARKWeb64.ark 등)는 예전 값 16 을 쓴다. 128 로 올린 뒤 로아 인게임 웹이
 +  // 눈에 띄게 느려졌다 — 5초 창에서 초당 3~25번 폴트 나는 페이지가 포기되지 않고 폴트마다 16K 번역 폐기·재컴파일을 되풀이한다.
@@ -1620,6 +2212,27 @@ index 007d498..9d6bd63 100644
  
  static inline bool HandleJITGuardPage(FEXCore::Core::InternalThreadState* Thread, void* Address, uint64_t* GPRs, __uint128_t* FPRs, uint64_t* PC) {
    if (IsAddressInJITGuardPage(Thread->JITGuardPage, reinterpret_cast<uintptr_t>(Address))) {
+diff --git a/Source/Windows/Common/OvercommitTracker.h b/Source/Windows/Common/OvercommitTracker.h
+index ba521e8..3ad896f 100644
+--- a/Source/Windows/Common/OvercommitTracker.h
++++ b/Source/Windows/Common/OvercommitTracker.h
+@@ -4,6 +4,7 @@
+ #include <FEXCore/Utils/IntervalList.h>
+ #include <thread>
+ #include <shared_mutex>
++#include <FEXCore/Utils/WritePriorityMutex.h>
+ 
+ 
+ namespace FEX::Windows {
+@@ -14,7 +15,7 @@ class OvercommitTracker {
+ private:
+   bool IsWine;
+   FEXCore::IntervalList<uint64_t> OvercommitIntervals;
+-  std::shared_mutex OvercommitIntervalsMutex;
++  FEXCore::Utils::WritePriorityMutex::Mutex OvercommitIntervalsMutex; // Ember fexmtx(옛 std::shared_mutex)
+ 
+ public:
+   OvercommitTracker(bool IsWine)
 diff --git a/Source/Windows/Common/Priv.h b/Source/Windows/Common/Priv.h
 index ea702b4..85aba8d 100644
 --- a/Source/Windows/Common/Priv.h
@@ -1765,10 +2378,18 @@ index 5bc5acc..7a24f1f 100644
    DESTINATION ${CMAKE_INSTALL_LIBDIR}
    COMPONENT Runtime)
 diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
-index 8eb1acb..938847d 100644
+index 8eb1acb..e87acf3 100644
 --- a/Source/Windows/WOW64/Module.cpp
 +++ b/Source/Windows/WOW64/Module.cpp
-@@ -28,7 +28,9 @@ $end_info$
+@@ -14,6 +14,7 @@ $end_info$
+ #include <FEXCore/Core/Context.h>
+ #include <FEXCore/Core/CoreState.h>
+ #include <FEXCore/Core/DiskCacheFileMapper.h>
++#include <FEXCore/Core/DiskCache.h>
+ #include <FEXCore/Debug/InternalThreadState.h>
+ #include <FEXCore/HLE/SyscallHandler.h>
+ #include <FEXCore/Config/Config.h>
+@@ -28,7 +29,9 @@ $end_info$
  #include <FEXCore/Utils/ArchHelpers/Arm64.h>
  #include <FEXCore/Utils/TypeDefines.h>
  #include <FEXCore/Utils/SignalScopeGuards.h>
@@ -1778,7 +2399,7 @@ index 8eb1acb..938847d 100644
  #include "Windows/Common/Allocator.h"
  #include "Windows/Common/EnvironmentVariablesHandling.h"
  #include "Windows/Common/FEXUnixLib.h"
-@@ -105,7 +107,7 @@ struct TLS {
+@@ -105,7 +108,7 @@ struct TLS {
  };
  
  CHPE_V2_CPU_AREA_INFO*& GetCpuArea() {
@@ -1787,7 +2408,7 @@ index 8eb1acb..938847d 100644
  }
  
  WOW64_CONTEXT* GetWow64Context() {
-@@ -160,7 +162,7 @@ std::pair<NTSTATUS, TLS> GetThreadTLS(HANDLE Thread) {
+@@ -160,7 +163,7 @@ std::pair<NTSTATUS, TLS> GetThreadTLS(HANDLE Thread) {
  }
  
  TLS GetTLS() {
@@ -1796,7 +2417,7 @@ index 8eb1acb..938847d 100644
  }
  
  FrontendThreadData* GetFrontendThreadData(FEXCore::Core::InternalThreadState* Thread) {
-@@ -188,6 +190,8 @@ bool IsAddressInJit(uint64_t Address) {
+@@ -188,6 +191,8 @@ bool IsAddressInJit(uint64_t Address) {
  }
  
  void HandleImageMap(uint64_t Address, bool MainImage = false) {
@@ -1805,7 +2426,7 @@ index 8eb1acb..938847d 100644
    fextl::string ModulePath = FEX::Windows::GetSectionFilePath(Address);
    fextl::string ModuleName = fextl::string {FEX::Windows::BaseName(ModulePath)};
    InvalidationTracker->HandleImageMap(ModuleName, Address);
-@@ -195,7 +199,7 @@ void HandleImageMap(uint64_t Address, bool MainImage = false) {
+@@ -195,7 +200,7 @@ void HandleImageMap(uint64_t Address, bool MainImage = false) {
  }
  
  void HandleImageUnmap(uint64_t Address, uint64_t Size) {
@@ -1814,7 +2435,7 @@ index 8eb1acb..938847d 100644
  }
  } // namespace
  
-@@ -227,7 +231,8 @@ void LoadStateFromWowContext(FEXCore::Core::InternalThreadState* Thread) {
+@@ -227,7 +232,8 @@ void LoadStateFromWowContext(FEXCore::Core::InternalThreadState* Thread) {
  
    // The TEB is the only populated GDT entry by default
    auto GDT = State.GetSegmentFromIndex(State, (Context->SegFs & 0xffff));
@@ -1824,7 +2445,7 @@ index 8eb1acb..938847d 100644
    State.SetGDTBase(GDT, WowTEB);
    State.SetGDTLimit(GDT, 0xF'FFFFU);
    State.fs_cached = WowTEB;
-@@ -426,26 +431,28 @@ public:
+@@ -426,26 +432,28 @@ public:
    WowSyscallHandler() = default;
  
    static void HandleSyscallImpl(FEXCore::Core::CpuStateFrame* Frame) {
@@ -1859,7 +2480,7 @@ index 8eb1acb..938847d 100644
        const uint64_t EntryRAX = Frame->State.gregs[FEXCore::X86State::REG_RAX];
  
        Frame->State.gregs[FEXCore::X86State::REG_RSP] = ReturnRSP;
-@@ -454,7 +461,7 @@ public:
+@@ -454,7 +462,7 @@ public:
        Context::FlushThreadStateContext();
        Context::UnlockJITContext();
        Wow64ProcessPendingCrossProcessItems();
@@ -1868,7 +2489,7 @@ index 8eb1acb..938847d 100644
        Context::LockJITContext();
        Frame->State.gregs[FEXCore::X86State::REG_RAX] = ReturnRAX;
      }
-@@ -470,15 +477,24 @@ public:
+@@ -470,15 +478,24 @@ public:
    }
  
    std::optional<FEXCore::ExecutableFileSectionInfo> LookupExecutableFileSection(FEXCore::Core::InternalThreadState*, uint64_t Address) override {
@@ -1895,7 +2516,7 @@ index 8eb1acb..938847d 100644
    }
  
    void MarkOvercommitRange(uint64_t Start, uint64_t Length) override {
-@@ -490,7 +506,7 @@ public:
+@@ -490,7 +507,7 @@ public:
    }
  
    FEXCore::HLE::ExecutableRangeInfo QueryGuestExecutableRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Address) override {
@@ -1904,7 +2525,7 @@ index 8eb1acb..938847d 100644
    }
  
    void PreCompile() override {
-@@ -509,6 +525,15 @@ void BTCpuProcessInit() {
+@@ -509,6 +526,15 @@ void BTCpuProcessInit() {
  
    FEXCore::Config::Set(FEXCore::Config::CONFIG_INTERPRETER_INSTALLED, "0");
    FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, "0");
@@ -1920,7 +2541,20 @@ index 8eb1acb..938847d 100644
    FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_FILENAME, ExecutablePath);
    FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_CONFIG_NAME, ExecutableName);
  
-@@ -539,7 +564,7 @@ void BTCpuProcessInit() {
+@@ -520,8 +546,11 @@ void BTCpuProcessInit() {
+   const bool IsWine = !!GetProcAddress(NtDll, "wine_get_version");
+   OvercommitTracker.emplace(IsWine);
+ 
+-  FEX::Windows::Allocator::SetupHooks(NtDll);
++  // Ember wowjit(10-23): unixlib 을 먼저 연다 — Allocator::SetupHooks 가 JIT 쓰기 전환(pthread_jit_write_protect_np) 지원을 unixlib 에
++  // 묻는데, 예전 순서(훅 먼저)에선 늘 "지원 안 함"이 되어 32비트 FEX 의 코드 버퍼 쓰기가 전환 없이 돌았다(ARM64EC 는 이미 이 순서).
++  // 실측(L4D2 DXVK): 디스크 캐시 적중 1건 싣기 118~128µs(64비트 0.5µs), 로딩 중 1~3초 멈춤 6~7번.
+   FEX::Windows::UnixLib::Init(NtDll);
++  FEX::Windows::Allocator::SetupHooks(NtDll);
+   if (FEX::Windows::UnixLib::Available()) {
+     FEXCore::DiskCache::SetFileMapper(FEX::Windows::UnixLib::MapFile);
+   }
+@@ -539,7 +568,7 @@ void BTCpuProcessInit() {
    InvalidationTracker.emplace(*CTX, Threads);
    ImageTracker.emplace(*CTX, false);
  
@@ -1929,7 +2563,21 @@ index 8eb1acb..938847d 100644
    HandleImageMap(reinterpret_cast<uint64_t>(MainModule), true);
  
    auto NtDllX86 = reinterpret_cast<SYSTEM_DLL_INIT_BLOCK*>(GetProcAddress(NtDll, "LdrSystemDllInitBlock"))->ntdll_handle;
-@@ -590,7 +615,14 @@ void BTCpuThreadInit() {
+@@ -580,7 +609,12 @@ void BTCpuProcessInit() {
+   }
+ }
+ 
+-void BTCpuProcessTerm(HANDLE Handle, BOOL After, ULONG Status) {}
++void BTCpuProcessTerm(HANDLE Handle, BOOL After, ULONG Status) {
++  // Ember dcbatch(10-23): 종료 직전 디스크 캐시 쓰기 큐 비우기(최대 1.5초). 조회 끄기(EmberSetProcessExiting)는 ARM64EC 와 달리 하지 않는다(예전 동작 유지).
++  if (!Handle && !After) {
++    FEXCore::DiskCache::EmberDrainStoresForExit();
++  }
++}
+ 
+ void BTCpuThreadInit() {
+   static constexpr size_t DefaultWow64CS {4};
+@@ -590,7 +624,14 @@ void BTCpuThreadInit() {
  
    // Default segment setup.
    auto Frame = Thread->CurrentFrame;
@@ -1945,7 +2593,7 @@ index 8eb1acb..938847d 100644
  
    // Setup initial code-segment GDT
    auto& GDT = NewSegments[DefaultWow64CS];
-@@ -662,7 +694,11 @@ void BTCpuThreadTerm(HANDLE Thread, LONG ExitCode) {
+@@ -662,7 +703,11 @@ void BTCpuThreadTerm(HANDLE Thread, LONG ExitCode) {
    delete GetFrontendThreadData(ThreadState);
  
    // GDT and LDT are mirrored, only free one.
@@ -1958,7 +2606,7 @@ index 8eb1acb..938847d 100644
  
    FEX::Windows::CallRetStack::DestroyThread(ThreadState);
    CTX->DestroyThread(ThreadState);
-@@ -707,7 +743,9 @@ __attribute__((naked)) void BTCpuSimulate() {
+@@ -707,7 +752,9 @@ __attribute__((naked)) void BTCpuSimulate() {
        ".seh_endproc;");
  }
  
@@ -1969,7 +2617,7 @@ index 8eb1acb..938847d 100644
    const auto TLS = GetTLS();
    TLS.EntryContext() = entry_context;
    TLS.CachedCallRetSp() = TLS.ThreadState()->CurrentFrame->State.callret_sp;
-@@ -749,7 +787,7 @@ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
+@@ -749,7 +796,7 @@ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
        FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedSMCCount, 1);
        if (InvalidationTracker->HandleRWXAccessViolation(Thread, Context->Pc, FaultAddress)) {
          if (CTX->IsAddressInCodeBuffer(Thread, Context->Pc) && !CTX->IsCurrentBlockSingleInst(Thread) &&
@@ -1978,7 +2626,7 @@ index 8eb1acb..938847d 100644
            Context::ReconstructThreadState(Context);
            LogMan::Msg::DFmt("Handled inline self-modifying code: pc: {:X} rip: {:X} fault: {:X}", Context->Pc,
                              Thread->CurrentFrame->State.rip, FaultAddress);
-@@ -782,6 +820,16 @@ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
+@@ -782,6 +829,16 @@ bool BTCpuResetToConsistentStateImpl(EXCEPTION_POINTERS* Ptrs) {
    }
  
    LogMan::Msg::DFmt("Reconstructing context");

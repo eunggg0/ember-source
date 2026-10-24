@@ -1,0 +1,60 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 22/36] dlls-wined3d: Ember changes
+
+Base: Wine 11.18
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/wined3d/adapter_vk.c b/dlls/wined3d/adapter_vk.c
+index 3e34924..0dc3ef2 100644
+--- a/dlls/wined3d/adapter_vk.c
++++ b/dlls/wined3d/adapter_vk.c
+@@ -2585,6 +2585,21 @@ static BOOL wined3d_adapter_vk_init(struct wined3d_adapter_vk *adapter_vk,
+         VK_CALL(vkGetPhysicalDeviceProperties(adapter_vk->physical_device, &properties2.properties));
+     adapter_vk->device_limits = properties2.properties.limits;
+ 
++    /* Ember (CW HACK 18311 처럼): 맥(MoltenVK)에서는 d3d10/11 을 Vulkan 백엔드로. OpenGL 백엔드는 애플 GPU 를
++     * 모르고 "NVIDIA GeForce 6800" 으로 속여 게임이 엉뚱한 제조사 경로를 탔고, 장치 생성도 15배 느렸다(600→40ms).
++     * d3d9 이하는 고정 기능 파이프라인이 필요해 OpenGL 로 둔다. */
++    if (wined3d_settings.renderer == WINED3D_RENDERER_AUTO)
++    {
++        bool d3d10 = !(wined3d_creation_flags & WINED3D_PIXEL_CENTER_INTEGER);
++        bool moltenvk = properties2.properties.vendorID == 0x106b;
++
++        if (!moltenvk || !d3d10)
++        {
++            TRACE("Not d3d10+ on MoltenVK, defaulting to the OpenGL backend.\n");
++            goto fail_vulkan;
++        }
++    }
++
+     VK_CALL(vkGetPhysicalDeviceMemoryProperties(adapter_vk->physical_device, &adapter_vk->memory_properties));
+ 
+     if (id_properties.deviceLUIDValid)
+diff --git a/dlls/wined3d/directx.c b/dlls/wined3d/directx.c
+index 8b0f340..130d333 100644
+--- a/dlls/wined3d/directx.c
++++ b/dlls/wined3d/directx.c
+@@ -3485,12 +3485,23 @@ done:
+ 
+ static struct wined3d_adapter *wined3d_adapter_create(unsigned int ordinal, DWORD wined3d_creation_flags)
+ {
++    struct wined3d_adapter *adapter;
++
+     if (wined3d_creation_flags & WINED3D_NO3D)
+         return wined3d_adapter_no3d_create(ordinal, wined3d_creation_flags);
+ 
+     if (wined3d_settings.renderer == WINED3D_RENDERER_VULKAN)
+         return wined3d_adapter_vk_create(ordinal, wined3d_creation_flags);
+ 
++    if (wined3d_settings.renderer == WINED3D_RENDERER_OPENGL)
++        return wined3d_adapter_gl_create(ordinal, wined3d_creation_flags);
++
++    /* Ember: 자동이면 Vulkan 먼저(d3d10/11·MoltenVK 일 때만 성공한다 — adapter_vk.c). */
++    if ((adapter = wined3d_adapter_vk_create(ordinal, wined3d_creation_flags)))
++    {
++        ERR_(winediag)("Using the Vulkan renderer for d3d10/11 applications.\n");
++        return adapter;
++    }
+     return wined3d_adapter_gl_create(ordinal, wined3d_creation_flags);
+ }
+ 

@@ -1,7 +1,7 @@
 From: Ember <ember@users.noreply.github.com>
 Subject: [PATCH 52/74] dlls-shell32: Ember changes
 
-Base: CrossOver 26.3.0 FOSS source, sources/wine (crossover-sources-26.3.0.tar.gz)
+Base: CrossOver 26.3.0 FOSS sources/wine
 License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
 ---
 diff --git a/dlls/shell32/brsfolder.c b/dlls/shell32/brsfolder.c

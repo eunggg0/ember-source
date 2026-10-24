@@ -1,0 +1,51 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 12/12] top: Ember changes
+
+Base: DXMT 7c8dee1 with submodules
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/.clang-format b/.clang-format
+deleted file mode 100644
+index ac7dcd1..0000000
+--- a/.clang-format
++++ /dev/null
+@@ -1 +0,0 @@
+-SortIncludes: false
+diff --git a/.gitignore b/.gitignore
+deleted file mode 100644
+index c31da9c..0000000
+--- a/.gitignore
++++ /dev/null
+@@ -1,19 +0,0 @@
+-build
+-.vscode
+-.DS_Store
+-wineprefix
+-.cache
+-wine
+-.local
+-.config
+-toolchains
+-build-local.txt
+-*.cso
+-*.ll
+-winetricks
+-*.vt100
+-ref.sh
+-*.js
+-*.test
+-releases
+-prefixes
+\ No newline at end of file
+diff --git a/.gitmodules b/.gitmodules
+deleted file mode 100644
+index 988b59a..0000000
+--- a/.gitmodules
++++ /dev/null
+@@ -1,6 +0,0 @@
+-[submodule "external/nvapi"]
+-	path = external/nvapi
+-	url = https://github.com/NVIDIA/nvapi.git
+-[submodule "include/native/directx"]
+-	path = include/native/directx
+-	url = https://github.com/misyltoad/mingw-directx-headers

@@ -1,44 +1,49 @@
 # Ember 1.0 — 오픈소스 구성요소 소스 공개
 
-Ember 는 맥에서 윈도우 게임을 돌리는 런처입니다. Ember 에는 GNU LGPL 을 따르는 구성요소(Wine, DXMT, GStreamer, GLib,
-FFmpeg, GnuTLS 등)와 MPL 을 따르는 wine-gecko, 그 밖의 오픈소스가 들어 있고, 그중 일부는 Ember 가 고쳐서 넣었습니다.
-이 저장소는 **Ember 1.0** 에 들어간 이 구성요소들의 전체 소스입니다(LGPL-2.1 §6, LGPL-3.0 §4, MPL-2.0 §3.2).
+이 저장소는 2026-10-24 기준 Ember 1.0 오픈소스 런타임의 로컬 소스 묶음 후보입니다.
+Wine·DXMT·GStreamer·GLib·FFmpeg·GnuTLS·wine-gecko 등의 원본 소스 주소, 수정 패치와 빌드 설정 기록을 담았습니다.
+법적 적합성을 확정하는 문서는 아닙니다.
 
-Ember 앱과 EmberCore 라이브러리는 Ember 의 독점 소프트웨어라 여기에 없습니다. 이들은 LGPL 라이브러리를 공유 라이브러리로
-불러 쓰는 별도 프로그램입니다.
+Ember 앱·EmberCore 구현·모델·그림은 독점 소프트웨어로 제외합니다. CX winemac 대상은 옛 ANE 워커 객체를
+정적으로 링크하지 않은 `ANE_O=0` 후보이며 아직 설치하지 않았습니다. 나머지 설치본·빌드 산출물 대조 결과와
+검증 범위는 [PROVENANCE.md](PROVENANCE.md)에 기록했습니다. stock Wine winemetal도 정적 워커를 동적 Tone
+연결부로 바꾼 미설치 후보입니다. 기존 stock Wine 폴더에는 Tone 라이브러리가 없어 별도 경로 설정이나 제공 없이는
+이 후보의 옛 Neural 기능이 꺼집니다.
 
 ## 들어 있는 것
 
 | 위치 | 내용 |
 |---|---|
-| `COMPONENTS.md` | 구성요소마다 버전, Ember.app 안 위치, 라이선스, 원본 압축 파일 주소와 SHA-256, 패치 수 |
-| `PROVENANCE.md` | 배포한 바이너리를 어떤 소스 트리로 만들었는지, 어떻게 확인했는지 |
+| `COMPONENTS.md` | 구성요소마다 버전, Ember.app 안 위치, 라이선스, 원본 압축 파일 주소와 SHA-256, 패치 시리즈 위치 |
+| `PROVENANCE.md` | 소스·빌드 산출물의 대응 관계, 후보 대상과 검증 한계 |
 | `patches/<구성요소>/` | 원본 압축 파일에 대한 Ember 수정(패치 시리즈). 순서는 `series`, 바뀐 파일 목록은 `FILES.txt` |
 | `patches/forgeplay-origin/` | Ember 의 Wine 에 들어간 ForgePlay Wine 패치 7건 원본과 고지 |
-| `build/` | 빌드 안내(`BUILD.md`), 실제로 쓴 configure·meson·cmake 옵션과 빌드 스크립트 |
+| `build/` | 빌드 안내(`BUILD.md`), 기존 configure·meson·cmake 기록과 `build/current/`의 현재 레시피 근거 |
 | `macports/` | Gcenx Wine 11.0 묶음에서 가져온 x86_64 라이브러리의 MacPorts 포트 정의와 패치 |
 | `LICENSES/` | 라이선스 전문 |
 | `scripts/` | `apply-series.sh`(패치 시리즈 적용), `fetch-upstream.sh`(원본 압축 파일 받기·검사) |
-| `upstream/SOURCES.tsv` | 미러한 원본 압축 파일 목록: 원래 주소, SHA-256, 크기, 받을 때 확인한 방법 |
+| `upstream/SOURCES.tsv` | 원본 압축 파일 기록: 원래 주소, SHA-256, 크기, 받을 때 확인한 방법 |
 
-원본 압축 파일(약 1.3GB)은 이 저장소의 **v1.0 릴리스**에 그대로 올려 두었습니다:
-https://github.com/eunggg0/ember-source/releases/tag/v1.0 . `scripts/fetch-upstream.sh` 가 이것을 `upstream/` 에 받고
-SHA-256 을 하나하나 확인합니다.
+원본 URL·SHA-256·크기는 `upstream/SOURCES.tsv`에 보존했습니다. 이번 작업에서는 압축 파일을 업로드하지
+않았으며 공개 미러의 이용 가능 여부도 확인하지 않았습니다. `fetch-upstream.sh`는 설정된 v1.0 릴리스 주소를
+사용하므로 먼저 공개 상태를 확인하거나, 기록된 원본 URL에서 받아 해시를 대조해야 합니다.
 
 ## 다시 빌드하기
 
 ```sh
-git clone https://github.com/eunggg0/ember-source && cd ember-source
-scripts/fetch-upstream.sh                         # 필요한 것만: scripts/fetch-upstream.sh wine-11.18.tar.xz
+cd ember-source  # 이 로컬 소스 묶음 사용
+scripts/fetch-upstream.sh                         # 설정된 압축 파일 미러가 공개되어 있어야 함
 tar xf upstream/wine-arm64/wine-11.18.tar.xz
 scripts/apply-series.sh patches/wine-arm64 wine-11.18
 ```
 
-그다음은 `build/BUILD.md` 의 해당 구성요소 안내를 따르면 됩니다. 패치 시리즈는 올리기 전에 원본에 그대로 붙는지 확인합니다.
+그다음 [build/BUILD.md](build/BUILD.md)와 [현재 빌드 기록](build/current/README.md)을 확인합니다.
+패치 적용·트리 비교와 전체 소스 재빌드·로딩·게임 동작 검증은 별도입니다. 기존 객체와 생성된 빌드 파일을 재사용한
+레시피도 있어, 설치 산출물 대조만으로 전체 재현을 입증하지는 못했습니다.
 
 ## Ember.app 의 LGPL 라이브러리를 직접 만든 것으로 바꾸기
 
-LGPL 구성요소는 모두 앱 번들 안의 별도 파일이라 직접 빌드한 것으로 바꿀 수 있습니다.
+아래 LGPL 런타임 라이브러리는 번들 안의 별도 파일입니다. 호환되는 대체 빌드는 다음 위치를 사용합니다.
 
 | 구성요소 | `Ember.app/Contents/Resources/` 안 파일 | 참고 |
 |---|---|---|
@@ -54,13 +59,12 @@ LGPL 구성요소는 모두 앱 번들 안의 별도 파일이라 직접 빌드�
 
 1. Ember 를 끄고 앱 사본에서 작업합니다: `ditto /Applications/Ember.app ~/Applications/Ember-custom.app`
 2. 이 소스로(고친 내용을 넣어) 라이브러리를 빌드합니다. 원래 파일과 같은 파일 이름·설치 이름(`otool -D <파일>`, 예:
-   `@rpath/libgnutls.30.dylib`)·아키텍처·최소 macOS 버전으로 만들고, 절대 경로 LC_RPATH 는 지웁니다.
+   `@rpath/libgnutls.30.dylib`)·아키텍처·최소 macOS 버전으로 만들고, 필요한 상대 LC_RPATH 는 보존하고 빌드 머신의 절대 경로가 남았는지 점검합니다.
 3. 사본 안의 원래 파일 위에 복사하고 그 파일만 서명합니다: `codesign -s - -f <파일>`.
-   Wine 프로세스는 라이브러리 검증을 끈 채 돌기 때문에 직접 서명한 라이브러리도 올라갑니다. Wine 실행 파일
+   바꾼 앱 사본에서 실제 로딩과 동작 호환성을 확인해야 합니다. Wine 실행 파일
    (`wine`, `wineserver`, `wine-host`)을 바꿀 때는 `build/wine/wine.entitlements` 권한을 붙여 서명합니다:
    `codesign -s - -f -o runtime --entitlements build/wine/wine.entitlements <파일>`.
-4. 앱 전체를 다시 서명하지 **마세요**. Ember 는 자기 실행 파일의 서명을 확인하는데, `Contents/Resources` 아래 파일만
-   바꾸면 그 서명은 그대로 유효합니다. 첫 실행 때 macOS 가 번들을 다시 검사하지 않도록 사본의 다운로드 격리 표시를
+4. 앱 전체를 다시 서명하지 **마세요**. 원래 앱 실행 파일과 서명을 보존하고 바꾼 앱 사본을 검증합니다. 첫 실행 때 macOS 가 번들을 다시 검사하지 않도록 사본의 다운로드 격리 표시를
    지웁니다: `xattr -dr com.apple.quarantine ~/Applications/Ember-custom.app`
 5. 사본을 실행합니다. Ember 를 업데이트하면 앱이 새로 바뀌므로 바꾼 파일을 다시 넣어야 합니다. Ember 이용 약관은 LGPL
    구성요소를 고치는 것이나, 고친 것을 디버깅하려고 역분석하는 것을 막지 않습니다.

@@ -1,5 +1,5 @@
-# dxvk-cx — base: CrossOver 26.3.0 FOSS source, sources/dxvk (DXVK 1.10.3)
-# 
+# dxvk-cx — base: CrossOver 26.3.0 sources/dxvk
+#
 # changed 33 files (new 4)
 A build-arm64ec.txt
 M dxvk.conf
