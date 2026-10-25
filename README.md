@@ -1,11 +1,11 @@
 # Ember 1.0 — open-source component source / 오픈소스 구성요소 소스
 
-2026-10-24 local source-package candidate for Ember 1.0's open-source runtime components, patches and build records.
-2026-10-24 기준 Ember 1.0 오픈소스 런타임의 소스·패치·빌드 기록 후보입니다.
+Corresponding source for the open-source runtime components shipped in Ember 1.0 (released 2026-10-24): upstream references, Ember patch series and build records.
+Ember 1.0(2026-10-24 출시)에 들어간 오픈소스 런타임 구성요소의 소스·패치·빌드 기록입니다.
 
-CX winemac and stock Wine winemetal have uninstalled candidates excluding the old static ANE worker. Installed-runtime observations and candidate results
-are distinguished in [PROVENANCE.md](PROVENANCE.md). Full clean rebuild and in-game verification remain separate checks.
-CX winemac(`ANE_O=0`)과 stock Wine winemetal은 옛 정적 ANE 워커를 제외한 미설치 후보입니다.
+Original source archives are attached to the [v1.0 release](https://github.com/eunggg0/ember-source/releases/tag/v1.0); `scripts/fetch-upstream.sh` downloads and verifies them.
+원본 소스 압축 파일은 [v1.0 릴리스](https://github.com/eunggg0/ember-source/releases/tag/v1.0)에 있고, `scripts/fetch-upstream.sh`가 받아서 해시를 확인합니다.
+Source-to-binary mappings and verification limits: [PROVENANCE.md](PROVENANCE.md).
 
 - English: [README-EN.md](README-EN.md) · 한국어: [README-KO.md](README-KO.md)
 - [Components / 구성요소](COMPONENTS.md) · [Provenance / 출처](PROVENANCE.md)

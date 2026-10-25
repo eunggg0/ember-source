@@ -1,21 +1,19 @@
 # Ember 1.0 — corresponding source for the open-source components
 
-This is the 2026-10-24 local candidate source package for Ember 1.0's open-source runtime components.
+This is the corresponding source package for the open-source runtime components shipped in Ember 1.0 (released 2026-10-24).
 It contains upstream source references, Ember patch series and build configuration records for Wine, DXMT,
 GStreamer, GLib, FFmpeg, GnuTLS, wine-gecko and other listed components. It is not a legal compliance certification.
 
-Ember's app, EmberCore implementations, models and artwork remain proprietary and excluded. The CX winemac target
-is a newly built, uninstalled `ANE_O=0` candidate that omits the old static ANE worker object. Other mappings are
-observations of existing installed/build artifacts. Stock Wine winemetal also has an uninstalled dynamic Tone bridge
-replacement. Its legacy Neural service needs a compatible Tone provider; the observed stock Wine directory has none.
-See [PROVENANCE.md](PROVENANCE.md) for the evidence limits.
+Ember's app, EmberCore implementations, models and artwork remain proprietary and excluded. Ember 1.0 ships the CX winemac
+and stock Wine winemetal builds that omit the old static ANE worker (`ANE_O=0`).
+See [PROVENANCE.md](PROVENANCE.md) for source-to-binary mappings and evidence limits.
 
 ## What is here
 
 | Path | Contents |
 |---|---|
 | `COMPONENTS.md` | component inventory: version, bundle location, license, upstream archive and SHA-256, patch-series references |
-| `PROVENANCE.md` | source/build-artifact mappings, candidate target and verification limits |
+| `PROVENANCE.md` | source/build-artifact mappings, targets and verification limits |
 | `patches/<component>/` | Ember's changes as a patch series against the upstream archive (`series` gives the order, `FILES.txt` lists changed files) |
 | `patches/forgeplay-origin/` | the seven original ForgePlay Wine patches that Ember's Wine includes, with their notices |
 | `build/` | build notes (`BUILD.md`), historical configure / meson / cmake options, plus current recipe evidence in `build/current/` |
@@ -24,9 +22,9 @@ See [PROVENANCE.md](PROVENANCE.md) for the evidence limits.
 | `scripts/` | `apply-series.sh` (apply a series), `fetch-upstream.sh` (download and verify archives from the configured release mirror) |
 | `upstream/SOURCES.tsv` | upstream archive manifest: original URL, SHA-256, size, how the download was verified |
 
-`upstream/SOURCES.tsv` preserves the upstream URLs, SHA-256 values and archive metadata. This run has not
-uploaded archives or verified a public mirror. `scripts/fetch-upstream.sh` uses the configured v1.0 release URL;
-check availability before using it, or obtain the archives from the recorded original URLs and verify their hashes.
+`upstream/SOURCES.tsv` records the upstream URLs, SHA-256 values and archive metadata. The original archives are
+attached to this repository's [v1.0 release](https://github.com/eunggg0/ember-source/releases/tag/v1.0); `scripts/fetch-upstream.sh`
+downloads them from there and verifies each hash. You can also fetch them from the recorded original URLs and compare hashes.
 
 ## Rebuilding
 

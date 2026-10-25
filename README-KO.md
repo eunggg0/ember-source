@@ -1,21 +1,18 @@
 # Ember 1.0 — 오픈소스 구성요소 소스 공개
 
-이 저장소는 2026-10-24 기준 Ember 1.0 오픈소스 런타임의 로컬 소스 묶음 후보입니다.
+이 저장소는 Ember 1.0(2026-10-24 출시)에 들어간 오픈소스 런타임 구성요소의 소스 묶음입니다.
 Wine·DXMT·GStreamer·GLib·FFmpeg·GnuTLS·wine-gecko 등의 원본 소스 주소, 수정 패치와 빌드 설정 기록을 담았습니다.
 법적 적합성을 확정하는 문서는 아닙니다.
 
-Ember 앱·EmberCore 구현·모델·그림은 독점 소프트웨어로 제외합니다. CX winemac 대상은 옛 ANE 워커 객체를
-정적으로 링크하지 않은 `ANE_O=0` 후보이며 아직 설치하지 않았습니다. 나머지 설치본·빌드 산출물 대조 결과와
-검증 범위는 [PROVENANCE.md](PROVENANCE.md)에 기록했습니다. stock Wine winemetal도 정적 워커를 동적 Tone
-연결부로 바꾼 미설치 후보입니다. 기존 stock Wine 폴더에는 Tone 라이브러리가 없어 별도 경로 설정이나 제공 없이는
-이 후보의 옛 Neural 기능이 꺼집니다.
+Ember 앱·EmberCore 구현·모델·그림은 독점 소프트웨어로 제외합니다. CX winemac 과 stock Wine winemetal 은 옛 정적 ANE 워커를
+링크하지 않은 판(`ANE_O=0`)이 Ember 1.0 에 들어갔습니다. 설치본·빌드 산출물 대조 결과와 검증 범위는 [PROVENANCE.md](PROVENANCE.md)에 기록했습니다.
 
 ## 들어 있는 것
 
 | 위치 | 내용 |
 |---|---|
 | `COMPONENTS.md` | 구성요소마다 버전, Ember.app 안 위치, 라이선스, 원본 압축 파일 주소와 SHA-256, 패치 시리즈 위치 |
-| `PROVENANCE.md` | 소스·빌드 산출물의 대응 관계, 후보 대상과 검증 한계 |
+| `PROVENANCE.md` | 소스·빌드 산출물의 대응 관계, 대상과 검증 한계 |
 | `patches/<구성요소>/` | 원본 압축 파일에 대한 Ember 수정(패치 시리즈). 순서는 `series`, 바뀐 파일 목록은 `FILES.txt` |
 | `patches/forgeplay-origin/` | Ember 의 Wine 에 들어간 ForgePlay Wine 패치 7건 원본과 고지 |
 | `build/` | 빌드 안내(`BUILD.md`), 기존 configure·meson·cmake 기록과 `build/current/`의 현재 레시피 근거 |
@@ -24,9 +21,9 @@ Ember 앱·EmberCore 구현·모델·그림은 독점 소프트웨어로 제외�
 | `scripts/` | `apply-series.sh`(패치 시리즈 적용), `fetch-upstream.sh`(원본 압축 파일 받기·검사) |
 | `upstream/SOURCES.tsv` | 원본 압축 파일 기록: 원래 주소, SHA-256, 크기, 받을 때 확인한 방법 |
 
-원본 URL·SHA-256·크기는 `upstream/SOURCES.tsv`에 보존했습니다. 이번 작업에서는 압축 파일을 업로드하지
-않았으며 공개 미러의 이용 가능 여부도 확인하지 않았습니다. `fetch-upstream.sh`는 설정된 v1.0 릴리스 주소를
-사용하므로 먼저 공개 상태를 확인하거나, 기록된 원본 URL에서 받아 해시를 대조해야 합니다.
+원본 URL·SHA-256·크기는 `upstream/SOURCES.tsv`에 있습니다. 원본 압축 파일은 이 저장소의
+[v1.0 릴리스](https://github.com/eunggg0/ember-source/releases/tag/v1.0)에 올려 두었고, `fetch-upstream.sh`가 거기서 받아 해시를 확인합니다.
+기록된 원래 주소에서 받아 해시를 대조해도 됩니다.
 
 ## 다시 빌드하기
 
