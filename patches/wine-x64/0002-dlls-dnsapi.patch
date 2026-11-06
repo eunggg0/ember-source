@@ -1,0 +1,29 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 2/17] dlls-dnsapi: Ember changes
+
+Base: Wine 11.0
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/dnsapi/query.c b/dlls/dnsapi/query.c
+index a28d98f..6633ef2 100644
+--- a/dlls/dnsapi/query.c
++++ b/dlls/dnsapi/query.c
+@@ -34,6 +34,9 @@
+ #include "wine/debug.h"
+ #include "dnsapi.h"
+ 
++#define EMBER_BLOCK_MODULE "dnsapi"
++#include "wine/ember_blocklist.h"
++
+ WINE_DEFAULT_DEBUG_CHANNEL(dnsapi);
+ 
+ #define DEFAULT_TTL  1200
+@@ -182,6 +185,8 @@ DNS_STATUS WINAPI DnsQuery_UTF8( const char *name, WORD type, DWORD options, voi
+     if (!name || !result)
+         return ERROR_INVALID_PARAMETER;
+ 
++    if (ember_host_deniedA(name)) { *result = NULL; return DNS_ERROR_RCODE_NAME_ERROR; }
++
+     if (type == DNS_TYPE_A)
+     {
+         struct in_addr addr;

@@ -1,0 +1,18 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 22/46] dlls-rtworkq: Ember changes
+
+Base: Wine 11.18
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/rtworkq/queue.c b/dlls/rtworkq/queue.c
+index 144feb9..4745537 100644
+--- a/dlls/rtworkq/queue.c
++++ b/dlls/rtworkq/queue.c
+@@ -455,6 +455,7 @@ static void CALLBACK serial_queue_finalization_callback(PTP_CALLBACK_INSTANCE in
+     LeaveCriticalSection(&queue->cs);
+ 
+     IUnknown_Release(&item->IUnknown_iface);
++    IUnknown_Release(&item->IUnknown_iface);
+ }
+ 
+ static HRESULT serial_queue_init(const struct queue_desc *desc, struct queue *queue)

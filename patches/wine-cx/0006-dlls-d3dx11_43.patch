@@ -1,0 +1,1032 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 6/95] dlls-d3dx11_43: Ember changes
+
+Base: CrossOver 26.3.0 FOSS sources/wine
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/d3dx11_43/Makefile.in b/dlls/d3dx11_43/Makefile.in
+index 4dedab5..ccfb50d 100644
+--- a/dlls/d3dx11_43/Makefile.in
++++ b/dlls/d3dx11_43/Makefile.in
+@@ -9,6 +9,7 @@ EXTRADLLFLAGS = -Wb,--prefer-native
+ 
+ SOURCES = \
+ 	async.c \
++	threadpump.c \
+ 	d3dx11_43_main.c \
+ 	d3dx_helpers.c \
+ 	texture.c \
+diff --git a/dlls/d3dx11_43/async.c b/dlls/d3dx11_43/async.c
+index 074a852..8fa7dde 100644
+--- a/dlls/d3dx11_43/async.c
++++ b/dlls/d3dx11_43/async.c
+@@ -18,6 +18,7 @@
+ 
+ #include "d3dx11.h"
+ #include "d3dcompiler.h"
++#include "dxhelpers.h"
+ 
+ #include "wine/debug.h"
+ 
+@@ -83,38 +84,29 @@ static const ID3DX11DataLoaderVtbl memorydataloadervtbl =
+     memorydataloader_Destroy
+ };
+ 
++HRESULT load_file(const WCHAR *path, void **data, DWORD *size)
++{
++    uint32_t file_size;
++    HRESULT hr;
++
++    if ((hr = d3dx_load_file(path, data, &file_size)) == ERROR_FILE_NOT_FOUND)
++        return D3D11_ERROR_FILE_NOT_FOUND;
++    *size = file_size;
++    return hr;
++}
++
+ static HRESULT WINAPI filedataloader_Load(ID3DX11DataLoader *iface)
+ {
+     struct asyncdataloader *loader = impl_from_ID3DX11DataLoader(iface);
+-    DWORD size, read_len;
+-    HANDLE file;
+     void *data;
+-    BOOL ret;
++    DWORD size;
++    HRESULT hr;
+ 
+     TRACE("iface %p.\n", iface);
+ 
+     /* Always buffer file contents, even if Load() was already called. */
+-    file = CreateFileW(loader->u.file.path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+-            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+-    if (file == INVALID_HANDLE_VALUE)
+-        return D3D11_ERROR_FILE_NOT_FOUND;
+-
+-    size = GetFileSize(file, NULL);
+-    data = malloc(size);
+-    if (!data)
+-    {
+-        CloseHandle(file);
+-        return E_OUTOFMEMORY;
+-    }
+-
+-    ret = ReadFile(file, data, size, &read_len, NULL);
+-    CloseHandle(file);
+-    if (!ret)
+-    {
+-        ERR("Failed to read file contents.\n");
+-        free(data);
+-        return E_FAIL;
+-    }
++    if (FAILED((hr = load_file(loader->u.file.path, &data, &size))))
++        return hr;
+ 
+     free(loader->data);
+     loader->data = data;
+@@ -308,6 +300,9 @@ HRESULT WINAPI D3DX11CreateAsyncFileLoaderA(const char *filename, ID3DX11DataLoa
+ 
+     len = MultiByteToWideChar(CP_ACP, 0, filename, -1, NULL, 0);
+     filename_w = malloc(len * sizeof(*filename_w));
++    if (!filename_w)
++        return E_OUTOFMEMORY;
++
+     MultiByteToWideChar(CP_ACP, 0, filename, -1, filename_w, len);
+ 
+     hr = D3DX11CreateAsyncFileLoaderW(filename_w, loader);
+diff --git a/dlls/d3dx11_43/d3dx11_43.spec b/dlls/d3dx11_43/d3dx11_43.spec
+index 2033d60..ab28150 100644
+--- a/dlls/d3dx11_43/d3dx11_43.spec
++++ b/dlls/d3dx11_43/d3dx11_43.spec
+@@ -25,7 +25,7 @@
+ @ stdcall D3DX11CreateTextureFromMemory(ptr ptr long ptr ptr ptr ptr)
+ @ stdcall D3DX11CreateTextureFromResourceA(ptr long str ptr ptr ptr ptr)
+ @ stdcall D3DX11CreateTextureFromResourceW(ptr long wstr ptr ptr ptr ptr)
+-@ stub D3DX11CreateThreadPump
++@ stdcall D3DX11CreateThreadPump(long long ptr)
+ @ stdcall D3DX11FilterTexture(ptr ptr long long)
+ @ stdcall D3DX11GetImageInfoFromFileA(str ptr ptr ptr)
+ @ stdcall D3DX11GetImageInfoFromFileW(wstr ptr ptr ptr)
+diff --git a/dlls/d3dx11_43/d3dx11_43_main.c b/dlls/d3dx11_43/d3dx11_43_main.c
+index 00c1db3..6e90891 100644
+--- a/dlls/d3dx11_43/d3dx11_43_main.c
++++ b/dlls/d3dx11_43/d3dx11_43_main.c
+@@ -44,25 +44,3 @@ HRESULT WINAPI D3DX11FilterTexture(ID3D11DeviceContext *context, ID3D11Resource
+ 
+     return E_NOTIMPL;
+ }
+-
+-HRESULT WINAPI D3DX11GetImageInfoFromFileA(const char *filename, ID3DX11ThreadPump *pump, D3DX11_IMAGE_INFO *img_info,
+-        HRESULT *hresult)
+-{
+-    FIXME("filename %s, pump %p, img_info %p, hresult %p stub!\n", debugstr_a(filename), pump, img_info, hresult);
+-
+-    if (!filename)
+-        return E_FAIL;
+-
+-    return E_NOTIMPL;
+-}
+-
+-HRESULT WINAPI D3DX11GetImageInfoFromFileW(const WCHAR *filename, ID3DX11ThreadPump *pump, D3DX11_IMAGE_INFO *img_info,
+-        HRESULT *hresult)
+-{
+-    FIXME("filename %s, pump %p, img_info %p, hresult %p stub!\n", debugstr_w(filename), pump, img_info, hresult);
+-
+-    if (!filename)
+-        return E_FAIL;
+-
+-    return E_NOTIMPL;
+-}
+diff --git a/dlls/d3dx11_43/dxhelpers.h b/dlls/d3dx11_43/dxhelpers.h
+index 5be2ac9..1b31c2c 100644
+--- a/dlls/d3dx11_43/dxhelpers.h
++++ b/dlls/d3dx11_43/dxhelpers.h
+@@ -18,4 +18,6 @@
+ 
+ #include "d3dx_helpers.h"
+ 
++HRESULT load_file(const WCHAR *path, void **data, DWORD *size);
++
+ HRESULT get_image_info(const void *data, SIZE_T size, D3DX11_IMAGE_INFO *img_info);
+diff --git a/dlls/d3dx11_43/texture.c b/dlls/d3dx11_43/texture.c
+index 03e9303..5d4eaa4 100644
+--- a/dlls/d3dx11_43/texture.c
++++ b/dlls/d3dx11_43/texture.c
+@@ -170,6 +170,101 @@ static D3DX11_IMAGE_FILE_FORMAT d3dx11_image_file_format_from_d3dx_image_file_fo
+     }
+ }
+ 
++HRESULT WINAPI D3DX11GetImageInfoFromFileA(const char *src_file, ID3DX11ThreadPump *pump, D3DX11_IMAGE_INFO *info,
++        HRESULT *result)
++{
++    WCHAR *buffer;
++    int str_len;
++    HRESULT hr;
++
++    TRACE("src_file %s, pump %p, info %p, result %p.\n", debugstr_a(src_file), pump, info, result);
++
++    if (!src_file)
++        return E_FAIL;
++
++    str_len = MultiByteToWideChar(CP_ACP, 0, src_file, -1, NULL, 0);
++    if (!str_len)
++        return HRESULT_FROM_WIN32(GetLastError());
++
++    buffer = malloc(str_len * sizeof(*buffer));
++    if (!buffer)
++        return E_OUTOFMEMORY;
++
++    MultiByteToWideChar(CP_ACP, 0, src_file, -1, buffer, str_len);
++    hr = D3DX11GetImageInfoFromFileW(buffer, pump, info, result);
++
++    free(buffer);
++
++    return hr;
++}
++
++HRESULT WINAPI D3DX11GetImageInfoFromFileW(const WCHAR *src_file, ID3DX11ThreadPump *pump, D3DX11_IMAGE_INFO *info,
++        HRESULT *result)
++{
++    void *buffer = NULL;
++    DWORD size = 0;
++    HRESULT hr;
++
++    TRACE("src_file %s, pump %p, info %p, result %p.\n", debugstr_w(src_file), pump, info, result);
++
++    if (!src_file)
++        return E_FAIL;
++
++    if (pump)
++        FIXME("D3DX11 thread pump is currently unimplemented.\n");
++
++    if (SUCCEEDED((hr = load_file(src_file, &buffer, &size))))
++    {
++        hr = get_image_info(buffer, size, info);
++        free(buffer);
++    }
++    if (result)
++        *result = hr;
++    return hr;
++}
++
++HRESULT WINAPI D3DX11GetImageInfoFromResourceA(HMODULE module, const char *resource, ID3DX11ThreadPump *pump,
++        D3DX11_IMAGE_INFO *info, HRESULT *result)
++{
++    uint32_t size;
++    void *buffer;
++    HRESULT hr;
++
++    TRACE("module %p, resource %s, pump %p, info %p, result %p.\n",
++            module, debugstr_a(resource), pump, info, result);
++
++    if (pump)
++        FIXME("D3DX11 thread pump is currently unimplemented.\n");
++
++    if (FAILED((hr = d3dx_load_resource_a(module, resource, &buffer, &size))))
++        return hr;
++    hr = get_image_info(buffer, size, info);
++    if (result)
++        *result = hr;
++    return hr;
++}
++
++HRESULT WINAPI D3DX11GetImageInfoFromResourceW(HMODULE module, const WCHAR *resource, ID3DX11ThreadPump *pump,
++        D3DX11_IMAGE_INFO *info, HRESULT *result)
++{
++    uint32_t size;
++    void *buffer;
++    HRESULT hr;
++
++    TRACE("module %p, resource %s, pump %p, info %p, result %p.\n",
++            module, debugstr_w(resource), pump, info, result);
++
++    if (pump)
++        FIXME("D3DX11 thread pump is currently unimplemented.\n");
++
++    if (FAILED((hr = d3dx_load_resource_w(module, resource, &buffer, &size))))
++        return hr;
++    hr = get_image_info(buffer, size, info);
++    if (result)
++        *result = hr;
++    return hr;
++}
++
+ static HRESULT d3dx11_image_info_from_d3dx_image(D3DX11_IMAGE_INFO *info, struct d3dx_image *image)
+ {
+     D3DX11_IMAGE_FILE_FORMAT iff = d3dx11_image_file_format_from_d3dx_image_file_format(image->image_file_format);
+@@ -277,7 +372,7 @@ static void init_load_info(const D3DX11_IMAGE_LOAD_INFO *load_info, D3DX11_IMAGE
+ HRESULT load_texture_data(const void *data, SIZE_T size, D3DX11_IMAGE_LOAD_INFO *load_info,
+         D3D11_SUBRESOURCE_DATA **resource_data)
+ {
+-    uint32_t loaded_mip_level_count, max_mip_level_count;
++    uint32_t loaded_mip_level_count, max_mip_level_count, loaded_layer_count;
+     const struct pixel_format_desc *fmt_desc, *src_desc;
+     struct d3dx_subresource_data *sub_rsrcs = NULL;
+     D3DX11_IMAGE_INFO img_info;
+@@ -289,14 +384,6 @@ HRESULT load_texture_data(const void *data, SIZE_T size, D3DX11_IMAGE_LOAD_INFO
+         return E_FAIL;
+ 
+     *resource_data = NULL;
+-    if (!load_info->Filter || load_info->Filter == D3DX11_DEFAULT)
+-        load_info->Filter = D3DX11_FILTER_LINEAR;
+-    if (FAILED(hr = d3dx_validate_filter(load_info->Filter)))
+-    {
+-        WARN("Invalid filter argument %#x.\n", load_info->Filter);
+-        return hr;
+-    }
+-
+     hr = d3dx_image_init(data, size, &image, 0, D3DX_IMAGE_SUPPORT_DXT10);
+     if (FAILED(hr))
+         return E_FAIL;
+@@ -309,12 +396,11 @@ HRESULT load_texture_data(const void *data, SIZE_T size, D3DX11_IMAGE_LOAD_INFO
+         goto end;
+     }
+ 
+-    if ((!(img_info.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE) || img_info.ArraySize != 6)
+-            && img_info.ArraySize != 1)
++    loaded_layer_count = img_info.ArraySize;
++    if ((loaded_layer_count > 1) && (img_info.ResourceDimension == D3D11_RESOURCE_DIMENSION_TEXTURE3D))
+     {
+-        FIXME("img_info.ArraySize = %u not supported.\n", img_info.ArraySize);
+-        hr = E_NOTIMPL;
+-        goto end;
++        TRACE("Ignoring array size variable %u for 3D texture.\n", img_info.ArraySize);
++        loaded_layer_count = 1;
+     }
+ 
+     if (load_info->FirstMipLevel == D3DX11_DEFAULT || load_info->FirstMipLevel >= img_info.MipLevels)
+@@ -350,14 +436,31 @@ HRESULT load_texture_data(const void *data, SIZE_T size, D3DX11_IMAGE_LOAD_INFO
+         load_info->MipLevels = (load_info->MipLevels == D3DX11_FROM_FILE) ? img_info.MipLevels : max_mip_level_count;
+     load_info->MipLevels = min(max_mip_level_count, load_info->MipLevels);
+ 
++    if ((load_info->Width != image.size.width) || (load_info->Height != image.size.height)
++            || (load_info->Depth != image.size.depth) || (load_info->MipLevels != image.mip_levels)
++            || (fmt_desc->format != image.format))
++    {
++        if (!load_info->Filter || load_info->Filter == D3DX11_DEFAULT)
++            load_info->Filter = D3DX11_FILTER_LINEAR;
++        if (FAILED(hr = d3dx_validate_filter(load_info->Filter)))
++        {
++            WARN("Invalid filter argument %#x.\n", load_info->Filter);
++            goto end;
++        }
++    }
++    else
++    {
++        load_info->Filter = D3DX11_FILTER_NONE;
++    }
++
+     hr = d3dx_create_subresource_data_for_texture(load_info->Width, load_info->Height, load_info->Depth,
+-            load_info->MipLevels, img_info.ArraySize, fmt_desc, &sub_rsrcs);
++            load_info->MipLevels, loaded_layer_count, fmt_desc, &sub_rsrcs);
+     if (FAILED(hr))
+         goto end;
+ 
+     src_desc = get_d3dx_pixel_format_info(image.format);
+     loaded_mip_level_count = min(img_info.MipLevels - load_info->FirstMipLevel, load_info->MipLevels);
+-    for (i = 0; i < img_info.ArraySize; ++i)
++    for (i = 0; i < loaded_layer_count; ++i)
+     {
+         struct volume dst_size = { load_info->Width, load_info->Height, load_info->Depth };
+ 
+@@ -396,7 +499,7 @@ HRESULT load_texture_data(const void *data, SIZE_T size, D3DX11_IMAGE_LOAD_INFO
+         }
+ 
+         d3dx_get_mip_level_size(&base_level_size, base_level);
+-        for (i = 0; i < img_info.ArraySize; ++i)
++        for (i = 0; i < loaded_layer_count; ++i)
+         {
+             struct volume src_size, dst_size;
+ 
+@@ -524,51 +627,118 @@ static HRESULT create_texture(ID3D11Device *device, const void *data, SIZE_T siz
+     return hr;
+ }
+ 
+-HRESULT WINAPI D3DX11CreateShaderResourceViewFromMemory(ID3D11Device *device, const void *data,
+-        SIZE_T data_size, D3DX11_IMAGE_LOAD_INFO *load_info, ID3DX11ThreadPump *pump,
+-        ID3D11ShaderResourceView **view, HRESULT *hresult)
++HRESULT WINAPI D3DX11CreateTextureFromFileA(ID3D11Device *device, const char *src_file,
++        D3DX11_IMAGE_LOAD_INFO *load_info, ID3DX11ThreadPump *pump, ID3D11Resource **texture, HRESULT *hresult)
+ {
+-    FIXME("device %p, data %p, data_size %Iu, load_info %p, pump %p, view %p, hresult %p stub!\n",
+-            device, data, data_size, load_info, pump, view, hresult);
++    WCHAR *buffer;
++    int str_len;
++    HRESULT hr;
+ 
+-    return E_NOTIMPL;
+-}
++    TRACE("device %p, src_file %s, load_info %p, pump %p, texture %p, hresult %p.\n",
++            device, debugstr_a(src_file), load_info, pump, texture, hresult);
+ 
+-HRESULT WINAPI D3DX11CreateTextureFromFileA(ID3D11Device *device, const char *filename,
+-        D3DX11_IMAGE_LOAD_INFO *load_info, ID3DX11ThreadPump *pump, ID3D11Resource **texture,
+-        HRESULT *hresult)
+-{
+-    FIXME("device %p, filename %s, load_info %p, pump %p, texture %p, hresult %p stub.\n",
+-            device, debugstr_a(filename), load_info, pump, texture, hresult);
++    if (!device)
++        return E_INVALIDARG;
++    if (!src_file)
++        return E_FAIL;
+ 
+-    return E_NOTIMPL;
++    if (!(str_len = MultiByteToWideChar(CP_ACP, 0, src_file, -1, NULL, 0)))
++        return HRESULT_FROM_WIN32(GetLastError());
++
++    if (!(buffer = malloc(str_len * sizeof(*buffer))))
++        return E_OUTOFMEMORY;
++
++    MultiByteToWideChar(CP_ACP, 0, src_file, -1, buffer, str_len);
++    hr = D3DX11CreateTextureFromFileW(device, buffer, load_info, pump, texture, hresult);
++
++    free(buffer);
++
++    return hr;
+ }
+ 
+-HRESULT WINAPI D3DX11CreateTextureFromFileW(ID3D11Device *device, const WCHAR *filename,
+-        D3DX11_IMAGE_LOAD_INFO *load_info, ID3DX11ThreadPump *pump, ID3D11Resource **texture,
+-        HRESULT *hresult)
++HRESULT WINAPI D3DX11CreateTextureFromFileW(ID3D11Device *device, const WCHAR *src_file,
++        D3DX11_IMAGE_LOAD_INFO *load_info, ID3DX11ThreadPump *pump, ID3D11Resource **texture, HRESULT *hresult)
+ {
+-    FIXME("device %p, filename %s, load_info %p, pump %p, texture %p, hresult %p stub.\n",
+-            device, debugstr_w(filename), load_info, pump, texture, hresult);
++    void *buffer = NULL;
++    DWORD size = 0;
++    HRESULT hr;
+ 
+-    return E_NOTIMPL;
++    TRACE("device %p, src_file %s, load_info %p, pump %p, texture %p, hresult %p.\n",
++            device, debugstr_w(src_file), load_info, pump, texture, hresult);
++
++    if (!device)
++        return E_INVALIDARG;
++    if (!src_file)
++        return E_FAIL;
++
++    if (pump)
++        FIXME("D3DX11 thread pump is currently unimplemented.\n");
++
++    if (SUCCEEDED((hr = load_file(src_file, &buffer, &size))))
++    {
++        hr = create_texture(device, buffer, size, load_info, texture);
++        free(buffer);
++    }
++    if (hresult)
++        *hresult = hr;
++    return hr;
+ }
+ 
+ HRESULT WINAPI D3DX11CreateTextureFromResourceA(ID3D11Device *device, HMODULE module, const char *resource,
+         D3DX11_IMAGE_LOAD_INFO *load_info, ID3DX11ThreadPump *pump, ID3D11Resource **texture, HRESULT *hresult)
+ {
+-    FIXME("device %p, module %p, resource %s, load_info %p, pump %p, texture %p, hresult %p stub!\n",
++    uint32_t size;
++    void *buffer;
++    HRESULT hr;
++
++    TRACE("device %p, module %p, resource %s, load_info %p, pump %p, texture %p, hresult %p.\n",
+             device, module, debugstr_a(resource), load_info, pump, texture, hresult);
+ 
+-    return E_NOTIMPL;
++    if (!device)
++        return E_INVALIDARG;
++
++    if (pump)
++        FIXME("D3DX11 thread pump is currently unimplemented.\n");
++
++    if (FAILED((hr = d3dx_load_resource_a(module, resource, &buffer, &size))))
++        return hr;
++    hr = create_texture(device, buffer, size, load_info, texture);
++    if (hresult)
++        *hresult = hr;
++    return hr;
+ }
+ 
+ HRESULT WINAPI D3DX11CreateTextureFromResourceW(ID3D11Device *device, HMODULE module, const WCHAR *resource,
+         D3DX11_IMAGE_LOAD_INFO *load_info, ID3DX11ThreadPump *pump, ID3D11Resource **texture, HRESULT *hresult)
+ {
+-    FIXME("device %p, module %p, resource %s, load_info %p, pump %p, texture %p, hresult %p stub!\n",
++    uint32_t size;
++    void *buffer;
++    HRESULT hr;
++
++    TRACE("device %p, module %p, resource %s, load_info %p, pump %p, texture %p, hresult %p.\n",
+             device, module, debugstr_w(resource), load_info, pump, texture, hresult);
+ 
++    if (!device)
++        return E_INVALIDARG;
++
++    if (pump)
++        FIXME("D3DX11 thread pump is currently unimplemented.\n");
++
++    if (FAILED((hr = d3dx_load_resource_w(module, resource, &buffer, &size))))
++        return hr;
++    hr = create_texture(device, buffer, size, load_info, texture);
++    if (hresult)
++        *hresult = hr;
++    return hr;
++}
++
++HRESULT WINAPI D3DX11CreateShaderResourceViewFromMemory(ID3D11Device *device, const void *data,
++        SIZE_T data_size, D3DX11_IMAGE_LOAD_INFO *load_info, ID3DX11ThreadPump *pump,
++        ID3D11ShaderResourceView **view, HRESULT *hresult)
++{
++    FIXME("device %p, data %p, data_size %Iu, load_info %p, pump %p, view %p, hresult %p stub!\n",
++            device, data, data_size, load_info, pump, view, hresult);
++
+     return E_NOTIMPL;
+ }
+ 
+@@ -649,21 +819,3 @@ HRESULT WINAPI D3DX11GetImageInfoFromMemory(const void *src_data, SIZE_T src_dat
+         *hresult = hr;
+     return hr;
+ }
+-
+-HRESULT WINAPI D3DX11GetImageInfoFromResourceA(HMODULE module, const char *resource, ID3DX11ThreadPump *pump,
+-        D3DX11_IMAGE_INFO *info, HRESULT *result)
+-{
+-    FIXME("module %p, resource %s, pump %p, info %p, result %p stub!.\n", module, debugstr_a(resource), pump, info,
+-            result);
+-
+-    return E_NOTIMPL;
+-}
+-
+-HRESULT WINAPI D3DX11GetImageInfoFromResourceW(HMODULE module, const WCHAR *resource, ID3DX11ThreadPump *pump,
+-        D3DX11_IMAGE_INFO *info, HRESULT *result)
+-{
+-    FIXME("module %p, resource %s, pump %p, info %p, result %p stub!.\n", module, debugstr_w(resource), pump, info,
+-            result);
+-
+-    return E_NOTIMPL;
+-}
+diff --git a/dlls/d3dx11_43/threadpump.c b/dlls/d3dx11_43/threadpump.c
+new file mode 100644
+index 0000000..4746ca6
+--- /dev/null
++++ b/dlls/d3dx11_43/threadpump.c
+@@ -0,0 +1,524 @@
++/*
++ * Copyright 2016 Andrey Gusev
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++/* Thread-pump implementation adapted from Wine d3dx10_43/async.c.
++ * Keep this LGPL code in Wine; EMBER_D3DX11_THREAD_PUMP=1 opts in.
++ */
++#define COBJMACROS
++#include "initguid.h"
++#include "d3dx11.h"
++#include "winternl.h"
++#include "wine/debug.h"
++#include "wine/list.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(d3dx);
++
++struct work_item
++{
++    struct list entry;
++
++    ID3DX11DataLoader *loader;
++    ID3DX11DataProcessor *processor;
++    HRESULT *result;
++    void **object;
++};
++
++static inline void work_item_free(struct work_item *work_item, BOOL cancel)
++{
++    ID3DX11DataLoader_Destroy(work_item->loader);
++    ID3DX11DataProcessor_Destroy(work_item->processor);
++    if (cancel && work_item->result)
++        *work_item->result = S_FALSE;
++    free(work_item);
++}
++
++#define THREAD_PUMP_EXITING UINT_MAX
++struct thread_pump
++{
++    ID3DX11ThreadPump ID3DX11ThreadPump_iface;
++    LONG refcount;
++
++    LONG processing_count;
++
++    SRWLOCK io_lock;
++    CONDITION_VARIABLE io_cv;
++    unsigned int io_count;
++    struct list io_queue;
++
++    SRWLOCK proc_lock;
++    CONDITION_VARIABLE proc_cv;
++    unsigned int proc_count;
++    struct list proc_queue;
++
++    SRWLOCK device_lock;
++    unsigned int device_count;
++    struct list device_queue;
++
++    unsigned int thread_count;
++    HANDLE threads[1];
++};
++
++static inline struct thread_pump *impl_from_ID3DX11ThreadPump(ID3DX11ThreadPump *iface)
++{
++    return CONTAINING_RECORD(iface, struct thread_pump, ID3DX11ThreadPump_iface);
++}
++
++static HRESULT WINAPI thread_pump_QueryInterface(ID3DX11ThreadPump *iface, REFIID riid, void **out)
++{
++    TRACE("iface %p, riid %s, out %p.\n", iface, debugstr_guid(riid), out);
++
++    if (IsEqualGUID(riid, &IID_ID3DX11ThreadPump)
++            || IsEqualGUID(riid, &IID_IUnknown))
++    {
++        ID3DX11ThreadPump_AddRef(iface);
++        *out = iface;
++        return S_OK;
++    }
++
++    WARN("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(riid));
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++
++static ULONG WINAPI thread_pump_AddRef(ID3DX11ThreadPump *iface)
++{
++    struct thread_pump *thread_pump = impl_from_ID3DX11ThreadPump(iface);
++    ULONG refcount = InterlockedIncrement(&thread_pump->refcount);
++
++    TRACE("%p increasing refcount to %lu.\n", iface, refcount);
++
++    return refcount;
++}
++
++static ULONG WINAPI thread_pump_Release(ID3DX11ThreadPump *iface)
++{
++    struct thread_pump *thread_pump = impl_from_ID3DX11ThreadPump(iface);
++    ULONG refcount = InterlockedDecrement(&thread_pump->refcount);
++    struct work_item *item, *next;
++    struct list list;
++    unsigned int i;
++
++    TRACE("%p decreasing refcount to %lu.\n", iface, refcount);
++
++    if (!refcount)
++    {
++        AcquireSRWLockExclusive(&thread_pump->io_lock);
++        thread_pump->io_count = THREAD_PUMP_EXITING;
++        ReleaseSRWLockExclusive(&thread_pump->io_lock);
++        WakeAllConditionVariable(&thread_pump->io_cv);
++
++        AcquireSRWLockExclusive(&thread_pump->proc_lock);
++        thread_pump->proc_count = THREAD_PUMP_EXITING;
++        ReleaseSRWLockExclusive(&thread_pump->proc_lock);
++        WakeAllConditionVariable(&thread_pump->proc_cv);
++
++        AcquireSRWLockExclusive(&thread_pump->device_lock);
++        thread_pump->device_count = THREAD_PUMP_EXITING;
++        ReleaseSRWLockExclusive(&thread_pump->device_lock);
++
++        for (i = 0; i < thread_pump->thread_count; ++i)
++        {
++            if (!thread_pump->threads[i])
++                continue;
++
++            WaitForSingleObject(thread_pump->threads[i], INFINITE);
++            CloseHandle(thread_pump->threads[i]);
++        }
++
++        list_init(&list);
++        list_move_tail(&list, &thread_pump->io_queue);
++        list_move_tail(&list, &thread_pump->proc_queue);
++        list_move_tail(&list, &thread_pump->device_queue);
++        LIST_FOR_EACH_ENTRY_SAFE(item, next, &list, struct work_item, entry)
++        {
++            list_remove(&item->entry);
++            work_item_free(item, TRUE);
++        }
++
++        free(thread_pump);
++    }
++
++    return refcount;
++}
++
++static HRESULT WINAPI thread_pump_AddWorkItem(ID3DX11ThreadPump *iface, ID3DX11DataLoader *loader,
++        ID3DX11DataProcessor *processor, HRESULT *result, void **object)
++{
++    struct thread_pump *thread_pump = impl_from_ID3DX11ThreadPump(iface);
++    struct work_item *work_item;
++
++    TRACE("iface %p, loader %p, processor %p, result %p, object %p.\n",
++            iface, loader, processor, result, object);
++
++    work_item = malloc(sizeof(*work_item));
++    if (!work_item)
++        return E_OUTOFMEMORY;
++
++    work_item->loader = loader;
++    work_item->processor = processor;
++    work_item->result = result;
++    work_item->object = object;
++
++    if (object)
++        *object = NULL;
++
++    InterlockedIncrement(&thread_pump->processing_count);
++    AcquireSRWLockExclusive(&thread_pump->io_lock);
++    ++thread_pump->io_count;
++    list_add_tail(&thread_pump->io_queue, &work_item->entry);
++    ReleaseSRWLockExclusive(&thread_pump->io_lock);
++    WakeConditionVariable(&thread_pump->io_cv);
++    return S_OK;
++}
++
++static UINT WINAPI thread_pump_GetWorkItemCount(ID3DX11ThreadPump *iface)
++{
++    struct thread_pump *thread_pump = impl_from_ID3DX11ThreadPump(iface);
++    UINT ret;
++
++    TRACE("iface %p.\n", iface);
++
++    AcquireSRWLockExclusive(&thread_pump->device_lock);
++    ret = InterlockedCompareExchange(&thread_pump->processing_count, 0, 0) + thread_pump->device_count;
++    ReleaseSRWLockExclusive(&thread_pump->device_lock);
++    return ret;
++}
++
++static HRESULT WINAPI thread_pump_WaitForAllItems(ID3DX11ThreadPump *iface)
++{
++    struct thread_pump *thread_pump = impl_from_ID3DX11ThreadPump(iface);
++    HRESULT hr;
++    LONG v;
++
++    TRACE("iface %p.\n", iface);
++
++    for (;;)
++    {
++        if (FAILED((hr = ID3DX11ThreadPump_ProcessDeviceWorkItems(iface, UINT_MAX))))
++            return hr;
++
++        AcquireSRWLockExclusive(&thread_pump->device_lock);
++        if (thread_pump->device_count)
++        {
++            ReleaseSRWLockExclusive(&thread_pump->device_lock);
++            continue;
++        }
++        v = InterlockedCompareExchange(&thread_pump->processing_count, 0, 0);
++        ReleaseSRWLockExclusive(&thread_pump->device_lock);
++        if (!v)
++            break;
++
++        RtlWaitOnAddress(&thread_pump->processing_count, &v, sizeof(v), NULL);
++    }
++
++    return S_OK;
++}
++
++static HRESULT WINAPI thread_pump_ProcessDeviceWorkItems(ID3DX11ThreadPump *iface, UINT count)
++{
++    struct thread_pump *thread_pump = impl_from_ID3DX11ThreadPump(iface);
++    struct work_item *work_item;
++    HRESULT hr;
++    UINT i;
++
++    TRACE("iface %p, count %u.\n", iface, count);
++
++    for (i = 0; i < count; ++i)
++    {
++        AcquireSRWLockExclusive(&thread_pump->device_lock);
++        if (!thread_pump->device_count)
++        {
++            ReleaseSRWLockExclusive(&thread_pump->device_lock);
++            break;
++        }
++
++        --thread_pump->device_count;
++        work_item = LIST_ENTRY(list_head(&thread_pump->device_queue), struct work_item, entry);
++        list_remove(&work_item->entry);
++        ReleaseSRWLockExclusive(&thread_pump->device_lock);
++
++        hr = ID3DX11DataProcessor_CreateDeviceObject(work_item->processor, work_item->object);
++        if (work_item->result)
++            *work_item->result = hr;
++        work_item_free(work_item, FALSE);
++    }
++
++    return S_OK;
++}
++
++static void purge_list(struct list *list, LONG *count)
++{
++    struct work_item *work_item;
++
++    while (!list_empty(list))
++    {
++        work_item = LIST_ENTRY(list_head(list), struct work_item, entry);
++        list_remove(&work_item->entry);
++        work_item_free(work_item, TRUE);
++
++        if (count && !InterlockedDecrement(count))
++            RtlWakeAddressAll(count);
++    }
++}
++
++static HRESULT WINAPI thread_pump_PurgeAllItems(ID3DX11ThreadPump *iface)
++{
++    struct thread_pump *thread_pump = impl_from_ID3DX11ThreadPump(iface);
++    LONG v;
++
++    TRACE("iface %p.\n", iface);
++
++    for (;;)
++    {
++        AcquireSRWLockExclusive(&thread_pump->io_lock);
++        purge_list(&thread_pump->io_queue, &thread_pump->processing_count);
++        thread_pump->io_count = 0;
++        ReleaseSRWLockExclusive(&thread_pump->io_lock);
++
++        AcquireSRWLockExclusive(&thread_pump->proc_lock);
++        purge_list(&thread_pump->proc_queue, &thread_pump->processing_count);
++        thread_pump->proc_count = 0;
++        ReleaseSRWLockExclusive(&thread_pump->proc_lock);
++
++        AcquireSRWLockExclusive(&thread_pump->device_lock);
++        purge_list(&thread_pump->device_queue, NULL);
++        thread_pump->device_count = 0;
++        v = InterlockedCompareExchange(&thread_pump->processing_count, 0, 0);
++        ReleaseSRWLockExclusive(&thread_pump->device_lock);
++        if (!v)
++            break;
++
++        RtlWaitOnAddress(&thread_pump->processing_count, &v, sizeof(v), NULL);
++    }
++
++    return S_OK;
++}
++
++static HRESULT WINAPI thread_pump_GetQueueStatus(ID3DX11ThreadPump *iface,
++        UINT *io_queue, UINT *process_queue, UINT *device_queue)
++{
++    struct thread_pump *thread_pump = impl_from_ID3DX11ThreadPump(iface);
++
++    TRACE("iface %p, io_queue %p, process_queue %p, device_queue %p.\n",
++            iface, io_queue, process_queue, device_queue);
++
++    AcquireSRWLockExclusive(&thread_pump->io_lock);
++    *io_queue = thread_pump->io_count;
++    ReleaseSRWLockExclusive(&thread_pump->io_lock);
++    AcquireSRWLockExclusive(&thread_pump->proc_lock);
++    *process_queue = thread_pump->proc_count;
++    ReleaseSRWLockExclusive(&thread_pump->proc_lock);
++    AcquireSRWLockExclusive(&thread_pump->device_lock);
++    *device_queue = thread_pump->device_count;
++    ReleaseSRWLockExclusive(&thread_pump->device_lock);
++    return S_OK;
++}
++
++static const ID3DX11ThreadPumpVtbl thread_pump_vtbl =
++{
++    thread_pump_QueryInterface,
++    thread_pump_AddRef,
++    thread_pump_Release,
++    thread_pump_AddWorkItem,
++    thread_pump_GetWorkItemCount,
++    thread_pump_WaitForAllItems,
++    thread_pump_ProcessDeviceWorkItems,
++    thread_pump_PurgeAllItems,
++    thread_pump_GetQueueStatus
++};
++
++static DWORD WINAPI io_thread(void *arg)
++{
++    struct thread_pump *thread_pump = arg;
++    struct work_item *work_item;
++    HRESULT hr;
++
++    TRACE("%p thread started.\n", thread_pump);
++
++    for (;;)
++    {
++        AcquireSRWLockExclusive(&thread_pump->io_lock);
++
++        while (!thread_pump->io_count)
++            SleepConditionVariableSRW(&thread_pump->io_cv, &thread_pump->io_lock, INFINITE, 0);
++
++        if (thread_pump->io_count == THREAD_PUMP_EXITING)
++        {
++            ReleaseSRWLockExclusive(&thread_pump->io_lock);
++            return 0;
++        }
++
++        --thread_pump->io_count;
++        work_item = LIST_ENTRY(list_head(&thread_pump->io_queue), struct work_item, entry);
++        list_remove(&work_item->entry);
++        ReleaseSRWLockExclusive(&thread_pump->io_lock);
++
++        if (FAILED(hr = ID3DX11DataLoader_Load(work_item->loader)))
++        {
++            if (work_item->result)
++                *work_item->result = hr;
++            work_item_free(work_item, FALSE);
++            if (!InterlockedDecrement(&thread_pump->processing_count))
++                RtlWakeAddressAll(&thread_pump->processing_count);
++            continue;
++        }
++
++        AcquireSRWLockExclusive(&thread_pump->proc_lock);
++        if (thread_pump->proc_count == THREAD_PUMP_EXITING)
++        {
++            ReleaseSRWLockExclusive(&thread_pump->proc_lock);
++            work_item_free(work_item, TRUE);
++            return 0;
++        }
++
++        list_add_tail(&thread_pump->proc_queue, &work_item->entry);
++        ++thread_pump->proc_count;
++        ReleaseSRWLockExclusive(&thread_pump->proc_lock);
++        WakeConditionVariable(&thread_pump->proc_cv);
++    }
++    return 0;
++}
++
++static DWORD WINAPI proc_thread(void *arg)
++{
++    struct thread_pump *thread_pump = arg;
++    struct work_item *work_item;
++    SIZE_T size;
++    void *data;
++    HRESULT hr;
++
++    TRACE("%p thread started.\n", thread_pump);
++
++    for (;;)
++    {
++        AcquireSRWLockExclusive(&thread_pump->proc_lock);
++
++        while (!thread_pump->proc_count)
++            SleepConditionVariableSRW(&thread_pump->proc_cv, &thread_pump->proc_lock, INFINITE, 0);
++
++        if (thread_pump->proc_count == THREAD_PUMP_EXITING)
++        {
++            ReleaseSRWLockExclusive(&thread_pump->proc_lock);
++            return 0;
++        }
++
++        --thread_pump->proc_count;
++        work_item = LIST_ENTRY(list_head(&thread_pump->proc_queue), struct work_item, entry);
++        list_remove(&work_item->entry);
++        ReleaseSRWLockExclusive(&thread_pump->proc_lock);
++
++        if (FAILED(hr = ID3DX11DataLoader_Decompress(work_item->loader, &data, &size)))
++        {
++            if (work_item->result)
++                *work_item->result = hr;
++            work_item_free(work_item, FALSE);
++            if (!InterlockedDecrement(&thread_pump->processing_count))
++                RtlWakeAddressAll(&thread_pump->processing_count);
++            continue;
++        }
++
++        if (FAILED(hr = ID3DX11DataProcessor_Process(work_item->processor, data, size)))
++        {
++            if (work_item->result)
++                *work_item->result = hr;
++            work_item_free(work_item, FALSE);
++            if (!InterlockedDecrement(&thread_pump->processing_count))
++                RtlWakeAddressAll(&thread_pump->processing_count);
++            continue;
++        }
++
++        AcquireSRWLockExclusive(&thread_pump->device_lock);
++        if (thread_pump->device_count == THREAD_PUMP_EXITING)
++        {
++            ReleaseSRWLockExclusive(&thread_pump->device_lock);
++            work_item_free(work_item, TRUE);
++            return 0;
++        }
++
++        list_add_tail(&thread_pump->device_queue, &work_item->entry);
++        ++thread_pump->device_count;
++        InterlockedDecrement(&thread_pump->processing_count);
++        RtlWakeAddressAll(&thread_pump->processing_count);
++        ReleaseSRWLockExclusive(&thread_pump->device_lock);
++    }
++    return 0;
++}
++
++HRESULT WINAPI D3DX11CreateThreadPump(UINT io_threads, UINT proc_threads, ID3DX11ThreadPump **pump)
++{
++    struct thread_pump *object;
++    char enabled[2];
++    ULONG_PTR args[2];
++    unsigned int i;
++
++    /* Preserve the original unimplemented export unless explicitly enabled. */
++    if (GetEnvironmentVariableA("EMBER_D3DX11_THREAD_PUMP", enabled, sizeof(enabled)) != 1
++            || enabled[0] != '1')
++    {
++        args[0] = (ULONG_PTR)"d3dx11_43.dll";
++        args[1] = (ULONG_PTR)"D3DX11CreateThreadPump";
++        for (;;) RaiseException(EXCEPTION_WINE_STUB, EXCEPTION_NONCONTINUABLE, 2, args);
++    }
++
++    TRACE("io_threads %u, proc_threads %u, pump %p.\n", io_threads, proc_threads, pump);
++
++    if (!pump)
++        return E_INVALIDARG;
++    *pump = NULL;
++
++    if (io_threads >= 1024 || proc_threads >= 1024)
++        return E_FAIL;
++
++    if (!io_threads)
++        io_threads = 1;
++    if (!proc_threads)
++    {
++        SYSTEM_INFO info;
++
++        GetSystemInfo(&info);
++        proc_threads = max(1, info.dwNumberOfProcessors);
++    }
++
++    if (!(object = calloc(1, FIELD_OFFSET(struct thread_pump, threads[io_threads + proc_threads]))))
++        return E_OUTOFMEMORY;
++
++    object->ID3DX11ThreadPump_iface.lpVtbl = &thread_pump_vtbl;
++    object->refcount = 1;
++    InitializeSRWLock(&object->io_lock);
++    InitializeConditionVariable(&object->io_cv);
++    list_init(&object->io_queue);
++    InitializeSRWLock(&object->proc_lock);
++    InitializeConditionVariable(&object->proc_cv);
++    list_init(&object->proc_queue);
++    InitializeSRWLock(&object->device_lock);
++    list_init(&object->device_queue);
++    object->thread_count = io_threads + proc_threads;
++
++    for (i = 0; i < object->thread_count; ++i)
++    {
++        object->threads[i] = CreateThread(NULL, 0, i < io_threads ? io_thread : proc_thread, object, 0, NULL);
++        if (!object->threads[i])
++        {
++            ID3DX11ThreadPump_Release(&object->ID3DX11ThreadPump_iface);
++            return E_FAIL;
++        }
++    }
++
++    *pump = &object->ID3DX11ThreadPump_iface;
++    return S_OK;
++}

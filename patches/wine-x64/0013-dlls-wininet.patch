@@ -1,0 +1,29 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 13/17] dlls-wininet: Ember changes
+
+Base: Wine 11.0
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/wininet/internet.c b/dlls/wininet/internet.c
+index aee0b09..c1513d0 100644
+--- a/dlls/wininet/internet.c
++++ b/dlls/wininet/internet.c
+@@ -55,6 +55,9 @@
+ #include "internet.h"
+ #include "resource.h"
+ 
++#define EMBER_BLOCK_MODULE "wininet"
++#include "wine/ember_blocklist.h"
++
+ WINE_DEFAULT_DEBUG_CHANNEL(wininet);
+ 
+ typedef struct
+@@ -1693,6 +1696,8 @@ HINTERNET WINAPI InternetConnectW(HINTERNET hInternet,
+         return NULL;
+     }
+ 
++    if (ember_host_deniedW(lpszServerName)) { SetLastError(ERROR_INTERNET_NAME_NOT_RESOLVED); return NULL; }
++
+     hIC = (appinfo_t*)get_handle_object( hInternet );
+     if ( (hIC == NULL) || (hIC->hdr.htype != WH_HINIT) )
+     {

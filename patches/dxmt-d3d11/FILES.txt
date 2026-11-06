@@ -1,6 +1,6 @@
 # dxmt-d3d11 — base: DXMT 7c8dee1 with submodules
-#
-# changed 122 files (new 51)
+# d3d11.dll (x86_64, arm64ec)
+# changed 126 files (new 55)
 M .clang-format
 M .github/ISSUE_TEMPLATE/bug-tracking.md
 M .github/ISSUE_TEMPLATE/don-t-create-new-issue-unless-you-are-told-to-do-.md
@@ -68,11 +68,15 @@ A src/dxmt/ember_fg_hook.hpp
 A src/dxmt/ember_fg_late.hpp
 A src/dxmt/ember_fg_smooth_hold.hpp
 A src/dxmt/ember_hud_font.h
+A src/dxmt/ember_lift.cpp
+A src/dxmt/ember_lift.hpp
 A src/dxmt/ember_neural.cpp
 A src/dxmt/ember_neural.hpp
 A src/dxmt/ember_pace_policy.hpp
 A src/dxmt/ember_present_drop.hpp
 A src/dxmt/ember_spark.hpp
+A src/dxmt/ember_stoke_stats.cpp
+A src/dxmt/ember_stoke_stats.hpp
 M src/dxmt/meson.build
 M src/nvapi/nvapi.cpp
 M src/nvngx/nvngx.cpp

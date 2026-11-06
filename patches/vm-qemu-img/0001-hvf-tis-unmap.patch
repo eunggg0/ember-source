@@ -1,0 +1,22 @@
+--- a/accel/hvf/hvf-all.c
++++ b/accel/hvf/hvf-all.c
+@@ -120,7 +120,18 @@
+     if (!add) {
+         trace_hvf_vm_unmap(gpa, size);
+         ret = hv_vm_unmap(gpa, size);
+-        assert_hvf_ok(ret);
++        /*
++         * Non-RAM, non-ROMD MMIO must trap rather than map as RAM. An
++         * unaligned MMIO section (e.g. TPM TIS size 0x5000 on a 16K host)
++         * cannot have a matching HVF mapping and HVF rejects its unmap.
++         * Keep aligned MMIO, RAM/ROMD and all other failures fatal.
++         */
++        if (ret != HV_BAD_ARGUMENT || memory_region_is_ram(area) ||
++            memory_region_is_romd(area) ||
++            (QEMU_IS_ALIGNED(size, page_size) &&
++             QEMU_IS_ALIGNED(gpa, page_size))) {
++            assert_hvf_ok(ret);
++        }
+         return;
+     }
+ 

@@ -1,0 +1,37 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 12/46] dlls-mfplat: Ember changes
+
+Base: Wine 11.18
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/mfplat/main.c b/dlls/mfplat/main.c
+index 0738ba6..f9b4d79 100644
+--- a/dlls/mfplat/main.c
++++ b/dlls/mfplat/main.c
+@@ -6232,7 +6232,7 @@ static HRESULT resolver_get_bytestream_url_hint(IMFByteStream *stream, WCHAR con
+     DWORD length = 0, caps = 0;
+     unsigned int i, j;
+     QWORD position;
+-    HRESULT hr;
++    HRESULT hr, restore_hr;
+ 
+     *url = NULL;
+ 
+@@ -6254,10 +6254,14 @@ static HRESULT resolver_get_bytestream_url_hint(IMFByteStream *stream, WCHAR con
+ 
+     if (FAILED(hr = IMFByteStream_GetCurrentPosition(stream, &position)))
+         return hr;
+-    if (position && FAILED(hr = IMFByteStream_SetCurrentPosition(stream, 0)))
+-        return hr;
+-    if (FAILED(hr = IMFByteStream_Read(stream, buffer, sizeof(buffer), &length)))
++    /* An embedded media stream starts at the caller's current position. Probe
++     * without consuming bytes, so the selected handler sees the same origin. */
++    hr = IMFByteStream_Read(stream, buffer, sizeof(buffer), &length);
++    restore_hr = IMFByteStream_SetCurrentPosition(stream, position);
++    if (FAILED(hr))
+         return hr;
++    if (FAILED(restore_hr))
++        return restore_hr;
+ 
+     if (length < sizeof(buffer))
+         return S_OK;

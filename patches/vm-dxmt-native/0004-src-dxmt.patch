@@ -1,0 +1,2109 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 4/7] src-dxmt: Ember changes
+
+Base: utmapp/dxmt 66e27f37 (GitHub archive)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/src/dxmt/dxmt_command.cpp b/src/dxmt/dxmt_command.cpp
+index 7e2a1dd..b8e3a0d 100644
+--- a/src/dxmt/dxmt_command.cpp
++++ b/src/dxmt/dxmt_command.cpp
+@@ -41,6 +41,8 @@ EmulatedCommandContext::EmulatedCommandContext(WMT::Device device, InternalComma
+   CREATE_PIPELINE(clear_texture_2d_array_float);
+   CREATE_PIPELINE(clear_texture_3d_float);
+   CREATE_PIPELINE(clear_texture_buffer_float);
++  CREATE_PIPELINE(so_scan);
++  CREATE_PIPELINE(so_write);
+ 
+ 
+   auto gs_draw_arguments_marshal_vs = library.newFunction("gs_draw_arguments_marshal");
+@@ -70,6 +72,52 @@ EmulatedCommandContext::setComputePipelineState(WMT::ComputePipelineState state,
+   cmd.threadgroup_size = threadgroup_size;
+ }
+ 
++void
++EmulatedCommandContext::StreamOutput(const StreamOutputPass &s) {
++  if (!so_scan_pipeline || !so_write_pipeline)
++    return;
++  auto bind = [&](WMT::Buffer buffer, uint64_t offset, uint8_t index) {
++    if (buffer)
++      setComputeBuffer(buffer, offset, index);
++    else
++      setComputeBuffer(s.state, s.state_offset, index);
++  };
++  // One threadgroup: per-patch counts from the records, their prefix sum, the
++  // clamp at the buffers, the filled sizes and the queries.
++  setComputePipelineState(so_scan_pipeline, {256, 1, 1});
++  bind(s.patch_offsets, s.patch_offsets_offset, 0);
++  bind(s.records, s.records_offset, 1);
++  bind(s.counters, s.counters_offset, 2);
++  bind(s.state, s.state_offset, 3);
++  setComputeBytes(&s.params, sizeof(s.params), 4);
++  for (unsigned i = 0; i < 4; i++)
++    bind(s.filled[i], s.filled_offset[i], 5 + i);
++  for (unsigned i = 0; i < 4; i++)
++    bind(s.queries[i], s.queries_offset[i], 9 + i);
++  dispatchThreads({256, 1, 1});
++  {
++    auto &cmd = ctx.encodeComputeCommand<wmtcmd_compute_memory_barrier>();
++    cmd.type = WMTComputeCommandMemoryBarrier;
++    cmd.scope = WMTBarrierScopeBuffers;
++  }
++  // A thread per workload record.
++  setComputePipelineState(so_write_pipeline, {64, 1, 1});
++  bind(s.records, s.records_offset, 0);
++  bind(s.patch_offsets, s.patch_offsets_offset, 1);
++  bind(s.counters, s.counters_offset, 2);
++  bind(s.state, s.state_offset, 3);
++  setComputeBytes(&s.params, sizeof(s.params), 4);
++  for (unsigned i = 0; i < 4; i++)
++    bind(s.targets[i], s.targets_offset[i], 5 + i);
++  bind(s.vertices, s.vertices_offset, 9);
++  bind(s.indices, s.indices_offset, 10);
++  if (s.element_bytes)
++    setComputeBytes(s.elements, s.element_bytes, 11);
++  else
++    bind({}, 0, 11);
++  dispatchThreads({std::max(s.params.record_capacity, 1u), 1, 1});
++}
++
+ void EmulatedCommandContext::dispatchThreads(const WMTSize &grid_size) {
+   auto &cmd = ctx.encodeComputeCommand<wmtcmd_compute_dispatch>();
+   cmd.type = WMTComputeCommandDispatchThreads;
+diff --git a/src/dxmt/dxmt_command.hpp b/src/dxmt/dxmt_command.hpp
+index bb1b790..0c9e227 100644
+--- a/src/dxmt/dxmt_command.hpp
++++ b/src/dxmt/dxmt_command.hpp
+@@ -174,6 +174,35 @@ public:
+     encoder.setVertexBuffer({}, 0, kCustomBufferArgumentIndex0);
+   }
+ 
++  /* AnyOS: domain shader stream output -- so_scan then so_write over what the
++   * tessellation pass streamed (dxmt_command_constants.hpp).  A buffer left
++   * empty is replaced by `state` (never accessed: slot_mask/query_count). */
++  struct StreamOutputPass {
++    DXMTStreamOutputDraw params;
++    const void *elements;
++    uint32_t element_bytes;
++    WMT::Buffer patch_offsets;
++    uint64_t patch_offsets_offset;
++    WMT::Buffer records;
++    uint64_t records_offset;
++    WMT::Buffer counters;
++    uint64_t counters_offset;
++    WMT::Buffer state;
++    uint64_t state_offset;
++    WMT::Buffer vertices;
++    uint64_t vertices_offset;
++    WMT::Buffer indices;
++    uint64_t indices_offset;
++    WMT::Buffer filled[4];
++    uint64_t filled_offset[4];
++    WMT::Buffer targets[4];
++    uint64_t targets_offset[4];
++    WMT::Buffer queries[4];
++    uint64_t queries_offset[4];
++  };
++
++  void StreamOutput(const StreamOutputPass &pass);
++
+ private:
+   void setComputePipelineState(WMT::ComputePipelineState state, const WMTSize &threadgroup_size);
+ 
+@@ -199,6 +228,8 @@ private:
+   WMT::Reference<WMT::ComputePipelineState> clear_texture_2d_array_float_pipeline;
+   WMT::Reference<WMT::ComputePipelineState> clear_texture_3d_float_pipeline;
+   WMT::Reference<WMT::ComputePipelineState> clear_texture_buffer_float_pipeline;
++  WMT::Reference<WMT::ComputePipelineState> so_scan_pipeline;
++  WMT::Reference<WMT::ComputePipelineState> so_write_pipeline;
+ 
+   WMT::Reference<WMT::RenderPipelineState> gs_draw_arguments_marshal;
+   WMT::Reference<WMT::RenderPipelineState> ts_draw_arguments_marshal;
+diff --git a/src/dxmt/dxmt_command.metal b/src/dxmt/dxmt_command.metal
+index 0da3614..e677990 100644
+--- a/src/dxmt/dxmt_command.metal
++++ b/src/dxmt/dxmt_command.metal
+@@ -629,3 +629,137 @@ struct DXMTClearUintMetadata {
+ [[kernel]] void tile_barrier(ushort2 pos [[thread_position_in_threadgroup]]) {
+   // empty
+ }
++
++
++// ---------------------------------------------------------------------------
++// AnyOS: domain shader stream output.  counters[12] is the number of workload
++// records the tessellation pass wrote (uint4: patch, first primitive within
++// the patch, first index, primitive count), counters[14] is set when one of
++// its stream buffers was too small.
++
++#include <metal_atomic>
++#include <metal_integer>
++
++[[kernel]] void so_scan(
++    device uint *patch_offsets [[buffer(0)]],
++    device const uint4 *records [[buffer(1)]],
++    device const uint *counters [[buffer(2)]],
++    device DXMTStreamOutputState &state [[buffer(3)]],
++    constant DXMTStreamOutputDraw &p [[buffer(4)]],
++    device uint *filled0 [[buffer(5)]],
++    device uint *filled1 [[buffer(6)]],
++    device uint *filled2 [[buffer(7)]],
++    device uint *filled3 [[buffer(8)]],
++    device atomic_uint *query0 [[buffer(9)]],
++    device atomic_uint *query1 [[buffer(10)]],
++    device atomic_uint *query2 [[buffer(11)]],
++    device atomic_uint *query3 [[buffer(12)]],
++    uint tid [[thread_position_in_threadgroup]],
++    uint tg [[threads_per_threadgroup]]
++) {
++  threadgroup uint partial[1024];
++  threadgroup uint total;
++  uint patches = p.patch_count;
++  for (uint i = tid; i < patches; i += tg)
++    patch_offsets[i] = 0;
++  threadgroup_barrier(mem_flags::mem_device);
++  uint record_count = min(counters[12], p.record_capacity);
++  for (uint i = tid; i < record_count; i += tg) {
++    uint4 r = records[i];
++    if (r.x < patches)
++      atomic_fetch_add_explicit((device atomic_uint *)&patch_offsets[r.x], r.w, memory_order_relaxed);
++  }
++  threadgroup_barrier(mem_flags::mem_device);
++  uint chunk = (patches + tg - 1) / tg;
++  uint begin = min(tid * chunk, patches);
++  uint end = min(begin + chunk, patches);
++  uint sum = 0;
++  for (uint i = begin; i < end; i++)
++    sum += patch_offsets[i];
++  partial[tid] = sum;
++  threadgroup_barrier(mem_flags::mem_threadgroup);
++  if (tid == 0) {
++    uint acc = 0;
++    for (uint i = 0; i < tg; i++) {
++      uint v = partial[i];
++      partial[i] = acc;
++      acc += v;
++    }
++    total = acc;
++  }
++  threadgroup_barrier(mem_flags::mem_threadgroup);
++  uint acc = partial[tid];
++  for (uint i = begin; i < end; i++) {
++    uint v = patch_offsets[i];
++    patch_offsets[i] = acc;
++    acc += v;
++  }
++  if (tid != 0)
++    return;
++  device uint *filled[4] = {filled0, filled1, filled2, filled3};
++  uint needed = total;
++  uint written = needed;
++  uint base[4] = {0, 0, 0, 0};
++  for (uint s = 0; s < 4; s++) {
++    if (!(p.slot_mask & (1u << s)))
++      continue;
++    base[s] = *filled[s];
++    uint per = p.stride[s] * p.vertices_per_primitive;
++    uint capacity = (per && base[s] < p.buffer_size[s]) ? (p.buffer_size[s] - base[s]) / per : 0;
++    written = min(written, capacity);
++  }
++  for (uint s = 0; s < 4; s++) {
++    state.base[s] = base[s];
++    if (p.slot_mask & (1u << s))
++      *filled[s] = base[s] + written * p.stride[s] * p.vertices_per_primitive;
++  }
++  state.written = written;
++  state.needed = needed;
++  state.overflow = counters[14];
++  device atomic_uint *queries[4] = {query0, query1, query2, query3};
++  for (uint q = 0; q < p.query_count && q < 4; q++) {
++    atomic_fetch_add_explicit(&queries[q][0], written, memory_order_relaxed);
++    atomic_fetch_add_explicit(&queries[q][1], needed, memory_order_relaxed);
++  }
++}
++
++[[kernel]] void so_write(
++    device const uint4 *records [[buffer(0)]],
++    device const uint *patch_offsets [[buffer(1)]],
++    device const uint *counters [[buffer(2)]],
++    device const DXMTStreamOutputState &state [[buffer(3)]],
++    constant DXMTStreamOutputDraw &p [[buffer(4)]],
++    device uint *so0 [[buffer(5)]],
++    device uint *so1 [[buffer(6)]],
++    device uint *so2 [[buffer(7)]],
++    device uint *so3 [[buffer(8)]],
++    device const uint4 *vertices [[buffer(9)]],
++    device const uint *indices [[buffer(10)]],
++    constant uint4 *elements [[buffer(11)]],
++    uint tid [[thread_position_in_grid]]
++) {
++  uint record_count = min(counters[12], p.record_capacity);
++  if (tid >= record_count)
++    return;
++  uint4 r = records[tid];
++  if (r.x >= p.patch_count)
++    return;
++  device uint *so[4] = {so0, so1, so2, so3};
++  uint first = patch_offsets[r.x] + r.y;
++  uint vpp = p.vertices_per_primitive;
++  for (uint k = 0; k < r.w; k++) {
++    uint g = first + k;
++    if (g >= state.written)
++      break;
++    for (uint v = 0; v < vpp; v++) {
++      device const uint4 *regs = vertices + indices[r.z + k * vpp + v] * p.registers;
++      for (uint e = 0; e < p.element_count; e++) {
++        uint4 el = elements[e];
++        if (el.x >= p.registers || el.z > 3 || !(p.slot_mask & (1u << el.z)))
++          continue;
++        uint byte = state.base[el.z] + (g * vpp + v) * p.stride[el.z] + el.w;
++        so[el.z][byte >> 2] = regs[el.x][el.y];
++      }
++    }
++  }
++}
+diff --git a/src/dxmt/dxmt_command_constants.hpp b/src/dxmt/dxmt_command_constants.hpp
+index 3090b83..1fb8876 100644
+--- a/src/dxmt/dxmt_command_constants.hpp
++++ b/src/dxmt/dxmt_command_constants.hpp
+@@ -18,4 +18,34 @@ constexpr CONSTANT auto kPresentFCIndex_WithHDRMetadata = 0x102;
+ constexpr CONSTANT auto kPresentFCIndex_BackbufferIsMS = 0x104;
+ constexpr CONSTANT auto kPresentFCIndex_GammaEnabled = 0x105;
+ 
++/* AnyOS: domain shader stream output (so_scan and so_write in
++ * dxmt_command.metal).  The tessellation pipeline streams the domain shader's
++ * vertices, indices and one record per workload (air_tessellation.metal);
++ * so_scan turns the records into per-patch primitive offsets, clamps at the
++ * bound buffers and advances their filled sizes and the active SO queries;
++ * so_write stores every primitive's declared components at
++ * base + (patch offset + primitive within the patch) * vertices. */
++constexpr CONSTANT unsigned kStreamOutputMaxQueries = 4;
++
++struct DXMTStreamOutputDraw {
++  unsigned patch_count;
++  unsigned vertices_per_primitive;
++  unsigned slot_mask; /* bound buffers with a stride */
++  unsigned query_count;
++  unsigned buffer_size[4];
++  unsigned stride[4];
++  unsigned element_count;
++  unsigned registers; /* streamed registers per vertex */
++  unsigned record_capacity;
++  unsigned padding;
++};
++
++struct DXMTStreamOutputState {
++  unsigned written;
++  unsigned needed;
++  unsigned overflow;
++  unsigned padding;
++  unsigned base[4]; /* byte offset of this draw's first vertex in each buffer */
++};
++
+ } // namespace dxmt
+diff --git a/src/dxmt/dxmt_command_queue.cpp b/src/dxmt/dxmt_command_queue.cpp
+index 89ffc37..a40070f 100644
+--- a/src/dxmt/dxmt_command_queue.cpp
++++ b/src/dxmt/dxmt_command_queue.cpp
+@@ -81,6 +81,10 @@ CommandQueue::~CommandQueue() {
+   ready_for_commit.notify_one();
+   SharedEventListener_destroy(shared_event_listener);
+   encodeThread.join();
++  /* Ember sharedorder-1030: no command buffer may keep waiting on the bridge
++   * while the finish thread drains. */
++  if (xsync_bridge_)
++    xsync_bridge_->shutdown();
+   finishThread.join();
+   for (unsigned i = 0; i < kCommandChunkCount; i++) {
+     auto &chunk = chunks[i];
+@@ -198,8 +202,34 @@ CommandQueue::WaitForFinishThread() {
+       chunk.attached_cmdbuf.waitUntilCompleted();
+     }
+     if (chunk.attached_cmdbuf.status() == WMTCommandBufferStatusError) {
+-      ERR("Device error at frame ", chunk.frame_, ": ", chunk.attached_cmdbuf.error().description().getUTF8String());
++      std::string desc = chunk.attached_cmdbuf.error().description().getUTF8String();
++      ERR("Device error at frame ", chunk.frame_, " (pid ", XSyncPid(), "): ", desc);
++      /* Ember: the failed command buffer's signals never ran.  Signal them
++       * from the CPU (never backwards) so guest fences retire now instead of
++       * at the render server's 30 s device-lost budget. */
++      if (XSyncGpuErrorSignalEnabled()) {
++        unsigned forced = 0;
++        for (auto &sig : chunk.xsync_result.signals) {
++          if (MTLSharedEvent_signaledValue(sig.event) < sig.value) {
++            MTLSharedEvent_signalValue(sig.event, sig.value);
++            forced++;
++          }
++        }
++        if (event.signaledValue() < chunk.chunk_event_id) {
++          event.signalValue(chunk.chunk_event_id);
++          forced++;
++        }
++        if (forced)
++          ERR("Ember: forced ", forced, " event signal(s) of the failed command buffer (pid ", XSyncPid(), ")");
++      }
++      XSyncReportGpuError(chunk.frame_, desc.c_str());
+     }
++    if (chunk.xsync_result.wait_value && xsync_bridge_)
++      xsync_bridge_->noteGpuStart(chunk.xsync_result.wait_value, chunk.attached_cmdbuf.gpuStartTime());
++    /* Ember sharedorder-1030: completed (or failed): other processes may go. */
++    if (!chunk.xsync_result.tickets.empty())
++      XSyncPublish(chunk.xsync_result.tickets);
++    chunk.xsync_result.clear();
+     if (auto logs = chunk.attached_cmdbuf.logs()) {
+       for (auto &log : logs.elements()) {
+         ERR("Frame ", chunk.frame_, ": ", log.description().getUTF8String());
+diff --git a/src/dxmt/dxmt_command_queue.hpp b/src/dxmt/dxmt_command_queue.hpp
+index e109af7..9f126a8 100644
+--- a/src/dxmt/dxmt_command_queue.hpp
++++ b/src/dxmt/dxmt_command_queue.hpp
+@@ -30,6 +30,7 @@
+ #include "dxmt_resource_initializer.hpp"
+ #include "dxmt_ring_bump_allocator.hpp"
+ #include "dxmt_statistics.hpp"
++#include "dxmt_xsync.hpp"
+ #include "log/log.hpp"
+ #include "thread.hpp"
+ #include "util_cpu_fence.hpp"
+@@ -38,6 +39,7 @@
+ #include <cstdint>
+ #include <cstdlib>
+ #include <span>
++#include <memory>
+ 
+ namespace dxmt {
+ 
+@@ -117,6 +119,7 @@ public:
+     attached_cmdbuf = cmdbuf;
+     auto t1 = clock::now();
+     readback = enc.flushCommands(cmdbuf, chunk_id, chunk_event_id);
++    enc.takeXSyncResult(xsync_result);
+     auto t2 = clock::now();
+     statistics.encode_prepare_interval += (t1 - t0);
+     statistics.encode_flush_interval += (t2 - t1);
+@@ -128,6 +131,8 @@ public:
+   uint64_t signal_frame_latency_fence_;
+   QueryReadbacks readback;
+   uint64_t resource_initializer_event_id;
++  /* Ember sharedorder-1030: tickets to publish / events to CPU-signal on failure. */
++  XSyncChunkResult xsync_result;
+ 
+ private:
+   CommandQueue *queue;
+@@ -143,6 +148,13 @@ public:
+ 
+   void
+   reset() noexcept {
++    /* Tickets are published before reset (finish thread); anything left
++     * here belongs to a chunk that never ran -- publish it anyway so no
++     * other process waits for it.  Must precede ref_tracker.clear(): the
++     * slots live as long as their (retained) allocations. */
++    if (!xsync_result.tickets.empty())
++      XSyncPublish(xsync_result.tickets);
++    xsync_result.clear();
+     signal_frame_latency_fence_ = ~0ull;
+     readback = {};
+     list_enc.reset();
+@@ -180,6 +192,9 @@ private:
+   obj_handle_t shared_event_listener;
+   dxmt::thread event_listener_thread;
+ 
++  /* Ember sharedorder-1030: created on first use by the encode thread. */
++  std::unique_ptr<XSyncBridge> xsync_bridge_;
++
+   friend class CommandChunk;
+   uint64_t
+   GetNextEncoderId() {
+@@ -242,6 +257,14 @@ public:
+     return shared_event_listener;
+   }
+ 
++  /* Encode thread only (and the destructor after it joined). */
++  XSyncBridge &
++  XSyncBridgeGet() {
++    if (unlikely(!xsync_bridge_))
++      xsync_bridge_ = std::make_unique<XSyncBridge>(device);
++    return *xsync_bridge_;
++  }
++
+   /**
+   This is not thread-safe!
+   CurrentChunk & CommitCurrentChunk should be called on the same thread
+diff --git a/src/dxmt/dxmt_context.cpp b/src/dxmt/dxmt_context.cpp
+index 265a157..5b25f0d 100644
+--- a/src/dxmt/dxmt_context.cpp
++++ b/src/dxmt/dxmt_context.cpp
+@@ -155,7 +155,8 @@ ArgumentEncodingContext::encodeStreamOutputBuffers<PipelineKind::Ordinary>(uint6
+ template <>
+ void
+ ArgumentEncodingContext::encodeStreamOutputBuffers<PipelineKind::Tessellation>(uint64_t offset) {
+-  ERR("unimplemented stream output from tessellation pipeline");
++  // AnyOS: domain shader stream output is written after the draw by the
++  // so_scan/so_write kernels from streamOutputBinding(); nothing to encode.
+ }
+ template <>
+ void
+@@ -255,8 +256,10 @@ ArgumentEncodingContext::encodeConstantBuffers(const MTL_SHADER_REFLECTION *refl
+       cmd.type = WMTRenderCommandSetObjectBufferOffset;
+     } else if constexpr (stage == PipelineStage::Domain) {
+       cmd.type = WMTRenderCommandSetMeshBufferOffset;
++      tess_gs_mesh_offset[0][0] = cmd.offset;
+     } else if constexpr (stage == PipelineStage::Geometry) {
+       cmd.type = WMTRenderCommandSetMeshBufferOffset;
++      tess_gs_mesh_offset[1][0] = cmd.offset;
+     } else {
+       assert(0 && "Not implemented or unreachable");
+     }
+@@ -443,8 +446,10 @@ ArgumentEncodingContext::encodeShaderResources(
+       cmd.type = WMTRenderCommandSetObjectBufferOffset;
+     } else if constexpr (stage == PipelineStage::Domain) {
+       cmd.type = WMTRenderCommandSetMeshBufferOffset;
++      tess_gs_mesh_offset[0][1] = cmd.offset;
+     } else if constexpr (stage == PipelineStage::Geometry) {
+       cmd.type = WMTRenderCommandSetMeshBufferOffset;
++      tess_gs_mesh_offset[1][1] = cmd.offset;
+     } else {
+       assert(0 && "Not implemented or unreachable");
+     }
+@@ -475,8 +480,8 @@ ArgumentEncodingContext::clearColor(Rc<Texture> &&texture, uint64_t viewId, unsi
+   encoder_info->color = color;
+   SanitizeRTVClearColor(texture->pixelFormat(viewId), encoder_info->color);
+   encoder_info->array_length = arrayLength;
+-  encoder_info->width = texture->width();
+-  encoder_info->height = texture->height();
++  encoder_info->width = texture->width(viewId);
++  encoder_info->height = texture->height(viewId);
+   encoder_current = encoder_info;
+ 
+   encoder_info->attachment = access(texture, viewId, ResourceAccess::Write);
+@@ -499,8 +504,8 @@ ArgumentEncodingContext::clearDepthStencil(
+   encoder_info->clear_dsv = flag & DepthStencilPlanarFlags(texture->pixelFormat());
+   encoder_info->depth_stencil = {depth, stencil};
+   encoder_info->array_length = arrayLength;
+-  encoder_info->width = texture->width();
+-  encoder_info->height = texture->height();
++  encoder_info->width = texture->width(viewId);
++  encoder_info->height = texture->height(viewId);
+   encoder_current = encoder_info;
+ 
+   encoder_info->attachment = access(texture, viewId, ResourceAccess::Write);
+@@ -859,6 +864,67 @@ ArgumentEncodingContext::$$setEncodingContext(uint64_t seq_id, uint64_t frame_id
+ 
+ constexpr unsigned kEncoderOptimizerThreshold = 64;
+ 
++/* Ember sharedorder-1030: snapshot what the other processes' lanes must reach
++ * (all snapshots before any own ticket: no same-texture wait cycles), then
++ * take this chunk's tickets.  Returns the bridge event value to wait for, or 0. */
++bool
++ArgumentEncodingContext::emberCopyIsDead(Rc<Texture> const &dst, Rc<Texture> const &src, bool whole_surface) {
++  auto *slot = dst->current()->xsync;
++  if (likely(!slot) || !whole_surface || !XSyncDeadCopyEnabled() || !XSyncCopyIsDead(slot, src->current()->xsync))
++    return false;
++  queue_.XSyncBridgeGet().stats.dead_copies.fetch_add(1, std::memory_order_relaxed);
++  return true;
++}
++
++uint64_t
++ArgumentEncodingContext::prepareXSync() {
++  const auto &cfg = XSyncGetConfig();
++  std::vector<XSyncWaitItem> items;
++  uint64_t skipped = 0;
++  for (auto &a : xsync_accesses_)
++    skipped += XSyncCollectWaits(a, cfg.mode, items);
++  for (auto &a : xsync_accesses_)
++    XSyncAssignTickets(a, xsync_result_.tickets);
++  xsync_accesses_.clear();
++
++  auto &bridge = queue_.XSyncBridgeGet();
++  bridge.stats.chunks.fetch_add(1, std::memory_order_relaxed);
++  if (skipped)
++    bridge.stats.quarantine_skips.fetch_add(skipped, std::memory_order_relaxed);
++  uint64_t value = 0;
++  if (!items.empty()) {
++    uint64_t war = 0, raw = 0;
++    for (auto &it : items)
++      (it.write ? raw : war)++;
++    bridge.stats.war_items.fetch_add(war, std::memory_order_relaxed);
++    bridge.stats.raw_items.fetch_add(raw, std::memory_order_relaxed);
++    bridge.stats.wait_chunks.fetch_add(1, std::memory_order_relaxed);
++    value = bridge.submit(std::move(items), xsync_result_.tickets);
++    xsync_result_.wait_value = value;
++  }
++
++  if (cfg.log_s) {
++    const uint64_t now = XSyncNowNs();
++    if (!xsync_last_log_ns_)
++      xsync_last_log_ns_ = now;
++    else if (now - xsync_last_log_ns_ >= (uint64_t)cfg.log_s * 1000000000ull) {
++      xsync_last_log_ns_ = now;
++      auto &st = bridge.stats;
++      uint64_t chunks = st.chunks.exchange(0), wc = st.wait_chunks.exchange(0), war = st.war_items.exchange(0),
++               raw = st.raw_items.exchange(0), wd = st.waits_done.exchange(0), wus = st.wait_us_total.exchange(0),
++               wmax = st.wait_us_max.exchange(0), to = st.timeouts.load(), dead = st.dead_owner.load(),
++               cyc = st.cycles.load(), qs = st.quarantine_skips.exchange(0);
++      const uint64_t stn = st.gpu_stall_n.exchange(0), stus = st.gpu_stall_us_total.exchange(0),
++                     stmax = st.gpu_stall_us_max.exchange(0), dc = st.dead_copies.exchange(0);
++      WARN("sharedorder: pid=", XSyncPid(), " last ", cfg.log_s, "s: chunks=", chunks, " gpu_waits=", wc,
++           " war_items=", war, " raw_items=", raw, " wait_avg_us=", wd ? wus / wd : 0, " wait_max_us=", wmax,
++           " timeouts_total=", to, " dead_owner_total=", dead, " cycles_total=", cyc, " quarantine_skips=", qs,
++           " gpu_stall_n=", stn, " gpu_stall_ms_ub=", stus / 1000, " gpu_stall_max_us=", stmax, " dead_copies=", dc);
++    }
++  }
++  return value;
++}
++
+ QueryReadbacks
+ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId, uint64_t event_seq_id) {
+   assert(!encoder_current);
+@@ -878,6 +944,27 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+     assert(encoder_index == encoder_count);
+   }
+ 
++  /* Ember sharedorder-1030: cross-process order for shm shared textures. */
++  uint64_t xsync_wait_value = 0;
++  bool xsync_pending_emit = false;
++  if (unlikely(!xsync_accesses_.empty())) {
++    xsync_wait_value = prepareXSync();
++    if (xsync_wait_value) {
++      bool any_touch = false;
++      for (unsigned i = 0; i < encoder_count; i++) {
++        if (encoders[i]->xsync_touch) {
++          any_touch = true;
++          break;
++        }
++      }
++      if (xsync_at_start_ || !any_touch)
++        cmdbuf.encodeWaitForEvent(queue_.XSyncBridgeGet().event(), xsync_wait_value);
++      else
++        xsync_pending_emit = true;
++    }
++  }
++  xsync_at_start_ = false;
++
+   if (encoder_count > 1) {
+     unsigned j, i;
+     for (j = encoder_count - 2; j != ~0u; j--) {
+@@ -917,6 +1004,12 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+ 
+   while (encoder_index) {
+     auto current = encoders[encoder_count - encoder_index];
++    if (unlikely(xsync_pending_emit) && current->xsync_touch) {
++      /* Right before the first encoder touching an ordered texture: work
++       * ahead of it in this command buffer does not wait. */
++      cmdbuf.encodeWaitForEvent(queue_.XSyncBridgeGet().event(), xsync_wait_value);
++      xsync_pending_emit = false;
++    }
+     switch (current->type) {
+     case EncoderType::Render: {
+       auto data = static_cast<RenderEncoderData *>(current);
+@@ -1193,6 +1286,10 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+     case EncoderType::SignalEvent: {
+       auto data = static_cast<SignalEventData *>(current);
+       cmdbuf.encodeSignalEvent(data->event, data->value);
++      /* Ember: remember it; if this command buffer fails the finish thread
++       * signals it from the CPU so the guest is not left waiting 30 s. */
++      NSObject_retain(data->event.handle);
++      xsync_result_.signals.push_back({data->event.handle, data->value});
+       data->~SignalEventData();
+       break;
+     }
+diff --git a/src/dxmt/dxmt_context.hpp b/src/dxmt/dxmt_context.hpp
+index c1f6f6c..62331f1 100644
+--- a/src/dxmt/dxmt_context.hpp
++++ b/src/dxmt/dxmt_context.hpp
+@@ -28,6 +28,7 @@
+ #include "dxmt_residency.hpp"
+ #include "dxmt_sampler.hpp"
+ #include "dxmt_scaler.hpp"
++#include "dxmt_xsync.hpp"
+ #include "dxmt_statistics.hpp"
+ #include "dxmt_texture.hpp"
+ #include "log/log.hpp"
+@@ -103,6 +104,10 @@ struct StreamOutputBinding {
+   Rc<Buffer> buffer;
+   uint64_t offset;
+   Rc<Buffer> counter;
++  /* AnyOS: the buffer's filled size (bytes), set by SOSetTargets with an
++   * offset and advanced on the GPU by domain-shader stream output */
++  Rc<Counter> filled;
++  uint64_t size = 0;
+ };
+ 
+ enum class EncoderType {
+@@ -127,6 +132,9 @@ struct EncoderData {
+   FenceSet fence_wait;
+   FenceSet fence_update;
+   EncoderBarrierState barrier_state;
++  /* Ember sharedorder-1030: this encoder touches a cross-process ordered
++   * texture; the chunk's shared-order wait (if any) goes before it. */
++  bool xsync_touch = false;
+ };
+ 
+ struct GSDispatchArgumentsMarshal {
+@@ -376,6 +384,8 @@ public:
+   access(Rc<Texture> const &texture, unsigned level, unsigned slice, int flags) {
+     auto allocation = texture->current();
+     retainAllocation(allocation);
++    if (unlikely(allocation->xsync != nullptr))
++      noteXSync(allocation->xsync, flags);
+     if (!allocation->flags().test(TextureAllocationFlag::GpuReadonly)) {
+       if (likely(allocation->flags().test(TextureAllocationFlag::ShaderReadonly))) {
+         track<stage>(allocation->fenceTrackers[0], flags);
+@@ -393,6 +403,8 @@ public:
+     assert(viewId);
+     auto allocation = texture->current();
+     retainAllocation(allocation);
++    if (unlikely(allocation->xsync != nullptr))
++      noteXSync(allocation->xsync, flags);
+     auto &view = texture->view(viewId, allocation);
+     if (!allocation->flags().test(TextureAllocationFlag::GpuReadonly)) {
+       if (likely(allocation->flags().test(TextureAllocationFlag::ShaderReadonly))) {
+@@ -492,6 +504,36 @@ public:
+     entry.offset = offset;
+   }
+ 
++  void bindStreamOutputFilledSize(unsigned slot, Rc<Counter> &&filled, uint64_t size) {
++    auto &entry = so_[slot];
++    entry.filled = std::move(filled);
++    entry.size = size;
++  }
++
++  StreamOutputBinding &streamOutputBinding(unsigned slot) {
++    return so_[slot];
++  }
++
++  void
++  beginStreamOutputQuery(Rc<StreamOutputQuery> &&query) {
++    so_queries_.push_back(std::move(query));
++  }
++
++  void
++  endStreamOutputQuery(Rc<StreamOutputQuery> &&query) {
++    for (auto it = so_queries_.begin(); it != so_queries_.end(); ++it) {
++      if (it->ptr() == query.ptr()) {
++        so_queries_.erase(it);
++        break;
++      }
++    }
++  }
++
++  std::vector<Rc<StreamOutputQuery>> &
++  streamOutputQueries() {
++    return so_queries_;
++  }
++
+   void
+   bindVertexBuffer(unsigned slot, unsigned offset, unsigned stride, Rc<Buffer> &&buffer) {
+     auto &entry = vbuf_[slot];
+@@ -804,6 +846,46 @@ public:
+ 
+   QueryReadbacks flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId, uint64_t event_seq_id);
+ 
++  /* Ember sharedorder-1030 */
++  void
++  noteXSync(XSyncSlot *slot, int flags) {
++    int rw = ((flags & ResourceAccess::Read) ? 1 : 0) |
++             ((flags & (ResourceAccess::Write | ResourceAccess::UAV)) ? 2 : 0);
++    if (!rw)
++      rw = 1;
++    if (rw & 1)
++      slot->local_read = true; /* vmzero-1031 */
++    bool found = false;
++    for (auto &a : xsync_accesses_) {
++      if (a.slot == slot) {
++        a.rw |= rw;
++        found = true;
++        break;
++      }
++    }
++    if (!found)
++      xsync_accesses_.push_back({slot, rw});
++    if (encoder_current)
++      encoder_current->xsync_touch = true;
++    else
++      xsync_at_start_ = true;
++  }
++
++  /* vmzero-1031 EMBER_VMZ_DEADCOPY: nobody can read this copy's destination.
++   * Read before enc.access, so the chunk takes no ticket on either side. */
++  bool emberCopyIsDead(Rc<Texture> const &dst, Rc<Texture> const &src, bool whole_surface);
++
++  /* Moves the finished chunk's tickets/signals out (encode thread). */
++  void
++  takeXSyncResult(XSyncChunkResult &out) {
++    std::swap(out.tickets, xsync_result_.tickets);
++    std::swap(out.signals, xsync_result_.signals);
++    out.wait_value = xsync_result_.wait_value;
++    xsync_result_.wait_value = 0;
++    xsync_result_.tickets.clear();
++    xsync_result_.signals.clear();
++  }
++
+   uint64_t currentSeqId() {return seq_id_;}
+ 
+   uint64_t currentFrameId() {return frame_id_;}
+@@ -862,6 +944,34 @@ public:
+   uint32_t tess_num_output_control_point_element;
+   uint32_t tess_threads_per_patch;
+ 
++  /* AnyOS: tessellation followed by a geometry shader.  The tessellation
++   * pipeline streams the domain shader's output (tess_stream_pso) and the
++   * geometry pipeline draws it (tess_gs_pso); both bind their tables at the
++   * mesh stage, so the last encoded offsets of the domain [0] and geometry
++   * [1] stages' constant buffers [.][0] and argument tables [.][1] are kept
++   * to switch between them inside one draw (~0: not encoded). */
++  WMT::RenderPipelineState tess_stream_pso = {};
++  WMT::RenderPipelineState tess_gs_pso = {};
++  uint64_t tess_gs_mesh_offset[2][2] = {{~0ull, ~0ull}, {~0ull, ~0ull}};
++
++  /* AnyOS: domain shader stream output -- what the tessellation pass of a
++   * stream-output draw streamed, for the so_scan/so_write pass after it. */
++  struct TessStreamOutputPending {
++    AllocatedTempBufferSlice vertices;
++    AllocatedTempBufferSlice indices;
++    AllocatedTempBufferSlice records;
++    WMT::Buffer counters;
++    uint64_t counters_offset;
++    uint32_t patch_count;
++    uint32_t registers;
++    uint32_t record_capacity;
++    uint32_t vertices_per_primitive;
++    bool valid = false;
++  } tess_so_pending;
++  /* RasterizedStream 0: the rasterizing pipeline drawn before the stream
++   * pass (tess_stream_pso) of the same draw */
++  WMT::RenderPipelineState tess_so_raster_pso = {};
++
+   EmulatedCommandContext emulated_cmd;
+   ClearRenderTargetContext clear_rt_cmd;
+   DepthStencilBlitContext blit_depth_stencil_cmd;
+@@ -914,6 +1024,13 @@ private:
+   uint64_t seq_id_;
+   uint64_t frame_id_;
+ 
++  /* Ember sharedorder-1030: per-chunk state, encode thread only. */
++  std::vector<XSyncAccess> xsync_accesses_;
++  bool xsync_at_start_ = false;
++  XSyncChunkResult xsync_result_;
++  uint64_t xsync_last_log_ns_ = 0;
++  uint64_t prepareXSync();
++
+   struct chunk {
+     void *ptr;
+     size_t underused_times;
+@@ -940,6 +1057,7 @@ private:
+ 
+   VisibilityResultOffsetBumpState vro_state_;
+   std::vector<Rc<VisibilityResultQuery>> pending_queries_;
++  std::vector<Rc<StreamOutputQuery>> so_queries_; // AnyOS: active SO statistics queries
+   unsigned active_visibility_query_count_ = 0;
+   Flags<FeatureCompatibility> compatibility_flag_;
+   TimestampQueryState timestamp_state_;
+diff --git a/src/dxmt/dxmt_occlusion_query.hpp b/src/dxmt/dxmt_occlusion_query.hpp
+index a7ba78a..c715f3e 100644
+--- a/src/dxmt/dxmt_occlusion_query.hpp
++++ b/src/dxmt/dxmt_occlusion_query.hpp
+@@ -208,6 +208,50 @@ public:
+  * TODO: rename the whole file to dxmt_query.hpp
+  */
+ 
++/**
++ * AnyOS: D3D11 stream-output statistics.  Every domain-shader stream-output
++ * draw (so_scan) adds the primitives it wrote and needed to each active
++ * query's two counters; the CPU reads them once the event after End has been
++ * signaled.
++ */
++class StreamOutputQuery {
++public:
++  StreamOutputQuery(WMT::Device device) {
++    info_.options = WMTResourceHazardTrackingModeUntracked;
++    info_.memory.set(nullptr);
++    info_.length = 16;
++    buffer_ = device.newBuffer(info_);
++    if (auto values = (uint32_t *)info_.memory.get())
++      values[0] = values[1] = values[2] = values[3] = 0;
++  }
++
++  void
++  incRef() {
++    refcount_.fetch_add(1u, std::memory_order_acquire);
++  }
++  void
++  decRef() {
++    if (refcount_.fetch_sub(1u, std::memory_order_release) == 1u)
++      delete this;
++  }
++
++  WMT::Buffer
++  buffer() {
++    return buffer_;
++  }
++
++  /* [0] primitives written, [1] primitives needed */
++  const volatile uint32_t *
++  values() {
++    return (const volatile uint32_t *)info_.memory.get();
++  }
++
++private:
++  WMTBufferInfo info_;
++  WMT::Reference<WMT::Buffer> buffer_;
++  std::atomic<uint32_t> refcount_ = {0u};
++};
++
+ class TimestampQuery {
+ public:
+   void
+diff --git a/src/dxmt/dxmt_texture.cpp b/src/dxmt/dxmt_texture.cpp
+index c83b01f..a0d022c 100644
+--- a/src/dxmt/dxmt_texture.cpp
++++ b/src/dxmt/dxmt_texture.cpp
+@@ -17,6 +17,7 @@
+  */
+ 
+ #include "dxmt_texture.hpp"
++#include "dxmt_xsync.hpp"
+ #include "dxmt_residency.hpp"
+ #include "wsi_platform.hpp"
+ #include <atomic>
+@@ -90,6 +91,14 @@ TextureAllocation::TextureAllocation(
+ 
+ void
+ TextureAllocation::free(){
++  if (xsync) {
++    XSyncRelease(xsync);
++    xsync = nullptr;
++  }
++  if (ember_surface) {
++    XSyncSurfaceReleaseLater(ember_surface);
++    ember_surface = nullptr;
++  }
+ #ifdef __i386__
+   wsi::aligned_free(mappedMemory);
+ #endif
+diff --git a/src/dxmt/dxmt_texture.hpp b/src/dxmt/dxmt_texture.hpp
+index 086d716..1ad5239 100644
+--- a/src/dxmt/dxmt_texture.hpp
++++ b/src/dxmt/dxmt_texture.hpp
+@@ -83,6 +83,7 @@ struct TextureViewKey {
+ 
+ class Texture;
+ class TextureAllocation;
++struct XSyncSlot; /* Ember sharedorder-1030: cross-process order page (dxmt_xsync.hpp) */
+ 
+ class TextureView {
+ public:
+@@ -149,6 +150,10 @@ public:
+   uint64_t gpuResourceID;
+   mach_port_t machPort;
+   small_vector<GenericAccessTracker, 1> fenceTrackers;
++  /* Ember sharedorder-1030: non-null for a shm shared texture that joined
++   * the cross-process order page; owned (released in free()). */
++  XSyncSlot *xsync = nullptr;
++  void *ember_surface = nullptr; /* vmzero-1031: retained IOSurfaceRef behind the buffer */
+ 
+ private:
+   TextureAllocation(
+diff --git a/src/dxmt/dxmt_xsync.cpp b/src/dxmt/dxmt_xsync.cpp
+new file mode 100644
+index 0000000..ecde5a2
+--- /dev/null
++++ b/src/dxmt/dxmt_xsync.cpp
+@@ -0,0 +1,864 @@
++/*
++ * Ember sharedorder-1030 -- see dxmt_xsync.hpp for the model.
++ */
++
++#include "dxmt_xsync.hpp"
++
++#include <algorithm>
++#include <cerrno>
++#include <cstdlib>
++#include <cstring>
++#include <ctime>
++#include <mutex>
++#include <string>
++
++#include "log/log.hpp"
++#include "util_env.hpp"
++
++#if defined(__APPLE__) && !defined(_WIN32)
++#include <CoreFoundation/CoreFoundation.h>
++#include <IOSurface/IOSurfaceRef.h>
++#include <dispatch/dispatch.h>
++#include <pthread.h>
++#include <signal.h>
++#include <sys/mman.h>
++#include <sys/qos.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++/* libsystem_kernel; the same calls libc++ uses for std::atomic::wait.  The
++ * SHARED variant keys the wait on the VM object, so it works across
++ * processes on a MAP_SHARED mapping. */
++extern "C" int __ulock_wait(uint32_t operation, void *addr, uint64_t value, uint32_t timeout_us);
++extern "C" int __ulock_wake(uint32_t operation, void *addr, uint64_t wake_value);
++#define XSYNC_UL_COMPARE_AND_WAIT_SHARED 3u
++#define XSYNC_ULF_WAKE_ALL 0x00000100u
++#define XSYNC_ULF_NO_ERRNO 0x01000000u
++#define XSYNC_ENABLED 1
++#else
++#define XSYNC_ENABLED 0
++#endif
++
++namespace dxmt {
++
++uint64_t
++XSyncNowNs() {
++  struct timespec ts;
++  clock_gettime(CLOCK_MONOTONIC, &ts);
++  return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
++}
++
++int
++XSyncPid() {
++#if XSYNC_ENABLED
++  return (int)getpid();
++#else
++  return 0;
++#endif
++}
++
++static std::atomic<XSyncGpuErrorCallback> g_gpu_error_cb{nullptr};
++static std::atomic<void *> g_gpu_error_user{nullptr};
++
++void
++XSyncSetGpuErrorCallback(XSyncGpuErrorCallback cb, void *user) {
++  g_gpu_error_user.store(user, std::memory_order_release);
++  g_gpu_error_cb.store(cb, std::memory_order_release);
++}
++
++/* This process's attached slots (cycle check, GPU-error quarantine). */
++static std::mutex g_slots_mutex;
++static std::vector<XSyncSlot *> g_slots;
++
++static void xsync_quarantine(XSyncPageShm *page, uint64_t until_ns);
++
++void
++XSyncReportGpuError(uint64_t frame, const char *description) {
++  /* A GPU error (hang, victim, ignored) makes this process's completion
++   * timing meaningless for a while: stop others (and us) from GPU-waiting on
++   * our textures so a recovering GPU cannot cascade into the guest. */
++  const uint32_t q = XSyncGetConfig().gpu_error_quarantine_ms;
++  if (q && XSyncGetConfig().mode != XSyncOff) {
++    const uint64_t until = XSyncNowNs() + (uint64_t)q * 1000000ull;
++    std::lock_guard<std::mutex> lock(g_slots_mutex);
++    for (auto *slot : g_slots)
++      xsync_quarantine(slot->page, until);
++  }
++  auto cb = g_gpu_error_cb.load(std::memory_order_acquire);
++  if (cb)
++    cb(g_gpu_error_user.load(std::memory_order_acquire), frame, description ? description : "");
++}
++
++bool
++XSyncGpuErrorSignalEnabled() {
++  static const bool enabled = env::getEnvVar("NPT_GPU_ERROR_SIGNAL") != "0";
++  return enabled;
++}
++
++static uint32_t
++xsync_env_u32(const char *name, uint32_t def, uint32_t lo, uint32_t hi) {
++  std::string v = env::getEnvVar(name);
++  if (v.empty())
++    return def;
++  char *end = nullptr;
++  unsigned long x = strtoul(v.c_str(), &end, 10);
++  if (end == v.c_str())
++    return def;
++  return (uint32_t)std::clamp<unsigned long>(x, lo, hi);
++}
++
++const XSyncConfig &
++XSyncGetConfig() {
++  static const XSyncConfig config = []() {
++    XSyncConfig c{};
++    std::string m = env::getEnvVar("NPT_SHARED_ORDER");
++    if (m.empty() || m == "1" || m == "on" || m == "both")
++      c.mode = XSyncBoth;
++    else if (m == "war")
++      c.mode = XSyncWAR;
++    else if (m == "raw")
++      c.mode = XSyncRAW;
++    else
++      c.mode = XSyncOff;
++#if !XSYNC_ENABLED
++    c.mode = XSyncOff;
++#endif
++    c.timeout_ms = xsync_env_u32("NPT_SHARED_ORDER_TIMEOUT_MS", 100, 5, 5000);
++    c.quarantine_ms = xsync_env_u32("NPT_SHARED_ORDER_QUARANTINE_MS", 1000, 0, 60000);
++    c.gpu_error_quarantine_ms = xsync_env_u32("NPT_SHARED_ORDER_GPUERR_MS", 2000, 0, 60000);
++    c.log_s = xsync_env_u32("NPT_SHARED_ORDER_LOG_S", 10, 0, 3600);
++    WARN("Ember sharedorder-1030: pid=", XSyncPid(), " mode=",
++         c.mode == XSyncBoth  ? "war+raw"
++         : c.mode == XSyncWAR ? "war"
++         : c.mode == XSyncRAW ? "raw"
++                              : "off",
++         " timeout_ms=", c.timeout_ms, " quarantine_ms=", c.quarantine_ms, " gpuerr_ms=",
++         c.gpu_error_quarantine_ms, " log_s=", c.log_s, " (v2)");
++    return c;
++  }();
++  return config;
++}
++
++uint64_t
++XSyncExporterExtraBytes(uint64_t page_size) {
++  if (XSyncGetConfig().mode == XSyncOff)
++    return 0;
++  return page_size;
++}
++
++#if XSYNC_ENABLED
++
++static std::atomic<uint32_t> g_owner_serial{0};
++
++static void
++xsync_quarantine(XSyncPageShm *page, uint64_t until_ns) {
++  uint64_t cur = page->quarantine_until_ns.load(std::memory_order_relaxed);
++  while (cur < until_ns &&
++         !page->quarantine_until_ns.compare_exchange_weak(cur, until_ns, std::memory_order_relaxed)) {
++  }
++}
++
++static inline bool
++xsync_owner_dead(uint64_t owner) {
++  pid_t pid = (pid_t)(owner >> 32);
++  if (pid <= 0)
++    return true;
++  if (pid == getpid())
++    return false;
++  return kill(pid, 0) != 0 && errno == ESRCH;
++}
++
++static inline void
++xsync_wake(XSyncPageShm *page) {
++  if (page->waiters.load(std::memory_order_seq_cst) == 0)
++    return;
++  page->wake.fetch_add(1, std::memory_order_seq_cst);
++  __ulock_wake(XSYNC_UL_COMPARE_AND_WAIT_SHARED | XSYNC_ULF_WAKE_ALL | XSYNC_ULF_NO_ERRNO, &page->wake, 0);
++}
++
++/* Mark every issued command buffer of the lane done (released or dead owner). */
++static inline void
++xsync_lane_settle(XSyncLaneShm &lane) {
++  lane.r_done.store(lane.r_issued.load(std::memory_order_acquire), std::memory_order_release);
++  lane.w_done.store(lane.w_issued.load(std::memory_order_acquire), std::memory_order_release);
++}
++
++XSyncSlot *
++XSyncAttach(int fd, uint64_t surface_map_size, uint64_t page_size, bool exporter, uint32_t width, uint32_t height,
++            uint32_t stride, uint32_t format) {
++  if (XSyncGetConfig().mode == XSyncOff || fd < 0 || !page_size || (surface_map_size % page_size))
++    return nullptr;
++
++  struct stat st;
++  if (fstat(fd, &st) != 0 || (uint64_t)st.st_size < surface_map_size + page_size) {
++    /* An exporter without the feature (or an older library): no sync page. */
++    return nullptr;
++  }
++
++  void *base = mmap(nullptr, page_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)surface_map_size);
++  if (base == MAP_FAILED) {
++    WARN("sharedorder: sync page mmap failed: ", errno);
++    return nullptr;
++  }
++  auto page = reinterpret_cast<XSyncPageShm *>(base);
++
++  if (exporter) {
++    /* Fresh shm is zero-filled; lanes start free with zero counters. */
++    page->version = kXSyncVersion;
++    page->surface_bytes = surface_map_size;
++    page->width = width;
++    page->height = height;
++    page->stride = stride;
++    page->format = format;
++    page->creator_pid = (uint32_t)getpid();
++    page->page_id = ((uint64_t)(uint32_t)getpid() << 32) ^ XSyncNowNs() ^ (uint64_t)(uintptr_t)base;
++    if (!page->page_id)
++      page->page_id = 1;
++    page->magic.store(kXSyncMagic, std::memory_order_release);
++  } else {
++    if (page->magic.load(std::memory_order_acquire) != kXSyncMagic || page->version != kXSyncVersion ||
++        page->surface_bytes != surface_map_size || page->width != width || page->height != height ||
++        page->stride != stride) {
++      WARN("sharedorder: shm object has no matching sync page (", width, "x", height, " stride=", stride,
++           "); texture stays unordered");
++      munmap(base, page_size);
++      return nullptr;
++    }
++  }
++
++  const uint64_t owner = ((uint64_t)(uint32_t)getpid() << 32) |
++                         (uint64_t)(g_owner_serial.fetch_add(1, std::memory_order_relaxed) + 1);
++  int lane = -1;
++  for (unsigned pass = 0; pass < 2 && lane < 0; pass++) {
++    for (unsigned i = 0; i < kXSyncLanes; i++) {
++      auto &l = page->lanes[i];
++      uint64_t cur = l.owner.load(std::memory_order_acquire);
++      if (pass == 0) {
++        if (cur != 0)
++          continue;
++        if (l.owner.compare_exchange_strong(cur, owner, std::memory_order_acq_rel)) {
++          lane = (int)i;
++          break;
++        }
++      } else {
++        /* Second pass: reclaim lanes whose owner process is gone. */
++        if (cur == 0 || !xsync_owner_dead(cur))
++          continue;
++        if (l.owner.compare_exchange_strong(cur, owner, std::memory_order_acq_rel)) {
++          xsync_lane_settle(l);
++          lane = (int)i;
++          WARN("sharedorder: reclaimed lane ", i, " of dead pid ", (int)(cur >> 32));
++          break;
++        }
++      }
++    }
++  }
++  if (lane < 0) {
++    WARN("sharedorder: no free lane (", kXSyncLanes, "), texture stays unordered");
++    munmap(base, page_size);
++    return nullptr;
++  }
++
++  auto slot = new XSyncSlot();
++  slot->page = page;
++  slot->map_base = base;
++  slot->map_len = page_size;
++  slot->lane = (unsigned)lane;
++  slot->owner = owner;
++  slot->exporter = exporter;
++  {
++    std::lock_guard<std::mutex> lock(g_slots_mutex);
++    g_slots.push_back(slot);
++  }
++  return slot;
++}
++
++void
++XSyncRelease(XSyncSlot *slot) {
++  if (!slot)
++    return;
++  {
++    std::lock_guard<std::mutex> lock(g_slots_mutex);
++    std::erase(g_slots, slot);
++  }
++  auto &l = slot->page->lanes[slot->lane];
++  l.blk_since_ns.store(0, std::memory_order_release);
++  xsync_lane_settle(l);
++  uint64_t expect = slot->owner;
++  l.owner.compare_exchange_strong(expect, 0, std::memory_order_acq_rel);
++  xsync_wake(slot->page);
++  munmap(slot->map_base, slot->map_len);
++  delete slot;
++}
++
++void
++XSyncPublish(std::vector<XSyncTicket> &tickets) {
++  XSyncPageShm *last_page = nullptr;
++  for (auto &t : tickets) {
++    auto &l = t.slot->page->lanes[t.slot->lane];
++    auto &done = t.write ? l.w_done : l.r_done;
++    /* Single writer per lane (its queue's finish thread), commit order. */
++    if (done.load(std::memory_order_relaxed) < t.value)
++      done.store(t.value, std::memory_order_release);
++    l.last_publish_ns.store(XSyncNowNs(), std::memory_order_relaxed);
++    if (t.slot->page != last_page) {
++      if (last_page)
++        xsync_wake(last_page);
++      last_page = t.slot->page;
++    }
++  }
++  if (last_page)
++    xsync_wake(last_page);
++  tickets.clear();
++}
++
++int
++XSyncCollectWaits(const XSyncAccess &access, int mode, std::vector<XSyncWaitItem> &out) {
++  auto page = access.slot->page;
++  if (XSyncPageQuarantined(page, XSyncNowNs()))
++    return 1;
++  for (unsigned i = 0; i < kXSyncLanes; i++) {
++    if (i == access.slot->lane)
++      continue;
++    auto &l = page->lanes[i];
++    uint64_t owner = l.owner.load(std::memory_order_acquire);
++    if (!owner)
++      continue;
++    for (int kind = 0; kind < 2; kind++) {
++      /* kind 0: WAR (we write, wait their reads); kind 1: RAW (we read, wait their writes) */
++      if (kind == 0 && !((access.rw & 2) && (mode & XSyncWAR)))
++        continue;
++      if (kind == 1 && !((access.rw & 1) && (mode & XSyncRAW)))
++        continue;
++      auto &issued = kind == 0 ? l.r_issued : l.w_issued;
++      auto &done = kind == 0 ? l.r_done : l.w_done;
++      uint64_t target = issued.load(std::memory_order_seq_cst);
++      if (done.load(std::memory_order_acquire) >= target)
++        continue;
++      bool merged = false;
++      for (auto &it : out) {
++        if (it.page == page && it.lane == i && it.write == (uint8_t)kind) {
++          it.target = std::max(it.target, target);
++          merged = true;
++          break;
++        }
++      }
++      if (!merged)
++        out.push_back({page, i, (uint8_t)kind, owner, target});
++    }
++  }
++  return 0;
++}
++
++void
++XSyncAssignTickets(const XSyncAccess &access, std::vector<XSyncTicket> &out) {
++  auto &l = access.slot->page->lanes[access.slot->lane];
++  if (access.rw & 1)
++    out.push_back({access.slot, 0, l.r_issued.fetch_add(1, std::memory_order_seq_cst) + 1});
++  if (access.rw & 2)
++    out.push_back({access.slot, 1, l.w_issued.fetch_add(1, std::memory_order_seq_cst) + 1});
++}
++
++/* ------------------------------------------------------------------ */
++/* bridge                                                               */
++/* ------------------------------------------------------------------ */
++
++/* ---- vmzero-1031 ---------------------------------------------------- */
++
++static int
++xsync_env_int(const char *name, int def) {
++  const char *v = getenv(name);
++  return v && *v ? atoi(v) : def;
++}
++
++bool
++XSyncDeadCopyEnabled() {
++  static std::atomic<int> on{-1};
++  static std::atomic<uint64_t> next_ns{0};
++  static const char *ctl = getenv("EMBER_VMZ_CTL");
++  int v = on.load(std::memory_order_relaxed);
++  if (v < 0) {
++    v = xsync_env_int("EMBER_VMZ_DEADCOPY", 0) != 0;
++    on.store(v, std::memory_order_relaxed);
++  }
++  if (ctl && *ctl) {
++    const uint64_t now = XSyncNowNs();
++    if (now >= next_ns.load(std::memory_order_relaxed)) {
++      next_ns.store(now + 1000000000ull, std::memory_order_relaxed);
++      if (FILE *f = fopen(ctl, "r")) {
++        char line[128];
++        while (fgets(line, sizeof(line), f)) {
++          if (!strncmp(line, "EMBER_VMZ_DEADCOPY=", 19)) {
++            int nv = atoi(line + 19) != 0;
++            if (nv != v) {
++              WARN("Ember vmzero: pid=", XSyncPid(), " dead copy skip ", nv ? "on" : "off");
++              v = nv;
++              on.store(nv, std::memory_order_relaxed);
++            }
++          }
++        }
++        fclose(f);
++      }
++    }
++  }
++  return v != 0;
++}
++
++bool
++XSyncCopyIsDead(const XSyncSlot *dst, const XSyncSlot *src) {
++  /* The ring's source is itself a shared swap chain buffer.  Any local read of
++   * the destination means it is a real texture, whatever else it looks like. */
++  if (!dst || !src || !dst->exporter || dst->local_read)
++    return false;
++  for (unsigned i = 0; i < kXSyncLanes; i++) {
++    if (i != dst->lane && dst->page->lanes[i].owner.load(std::memory_order_acquire))
++      return false;
++  }
++  return true;
++}
++
++bool
++XSyncSurfaceWanted(uint32_t width, uint32_t height, bool bgra8, bool render_target) {
++  static const int on = xsync_env_int("EMBER_SCANOUT_SURF", 0);
++  return on && bgra8 && render_target && width >= 640 && height >= 480;
++}
++
++void *
++XSyncSurfaceCreate(uint32_t width, uint32_t height, uint32_t stride, uint64_t need_bytes, uint32_t *out_id,
++                   void **out_base) {
++  const int w = (int)width, h = (int)height, bpe = 4, bpr = (int)stride;
++  const uint32_t fmt = 'BGRA';
++  const void *keys[] = {kIOSurfaceWidth, kIOSurfaceHeight, kIOSurfaceBytesPerElement, kIOSurfaceBytesPerRow,
++                        kIOSurfacePixelFormat, kIOSurfaceIsGlobal};
++  CFNumberRef nw = CFNumberCreate(nullptr, kCFNumberIntType, &w), nh = CFNumberCreate(nullptr, kCFNumberIntType, &h),
++              ne = CFNumberCreate(nullptr, kCFNumberIntType, &bpe), nb = CFNumberCreate(nullptr, kCFNumberIntType, &bpr),
++              nf = CFNumberCreate(nullptr, kCFNumberSInt32Type, &fmt);
++  const void *values[] = {nw, nh, ne, nb, nf, kCFBooleanTrue};
++  CFDictionaryRef props = CFDictionaryCreate(nullptr, keys, values, 6, &kCFTypeDictionaryKeyCallBacks,
++                                             &kCFTypeDictionaryValueCallBacks);
++  IOSurfaceRef s = IOSurfaceCreate(props);
++  CFRelease(props);
++  CFRelease(nw);
++  CFRelease(nh);
++  CFRelease(ne);
++  CFRelease(nb);
++  CFRelease(nf);
++  if (!s)
++    return nullptr;
++  IOSurfaceLock(s, 0, nullptr);
++  void *base = IOSurfaceGetBaseAddress(s);
++  IOSurfaceUnlock(s, 0, nullptr);
++  if (!base || IOSurfaceGetBytesPerRow(s) != stride || IOSurfaceGetAllocSize(s) < need_bytes ||
++      ((uintptr_t)base & (getpagesize() - 1))) {
++    WARN("Ember vmzero: IOSurface ", width, "x", height, " stride ", stride, " unusable (bpr ",
++         (uint64_t)IOSurfaceGetBytesPerRow(s), " alloc ", (uint64_t)IOSurfaceGetAllocSize(s), ")");
++    CFRelease(s);
++    return nullptr;
++  }
++  *out_id = IOSurfaceGetID(s);
++  *out_base = base;
++  return (void *)s;
++}
++
++void *
++XSyncSurfaceLookup(uint32_t id, uint32_t width, uint32_t height, uint32_t stride, uint64_t need_bytes,
++                   void **out_base) {
++  IOSurfaceRef s = IOSurfaceLookup(id);
++  if (!s)
++    return nullptr;
++  IOSurfaceLock(s, 0, nullptr);
++  void *base = IOSurfaceGetBaseAddress(s);
++  IOSurfaceUnlock(s, 0, nullptr);
++  if (!base || IOSurfaceGetWidth(s) != width || IOSurfaceGetHeight(s) != height ||
++      IOSurfaceGetBytesPerRow(s) != stride || IOSurfaceGetAllocSize(s) < need_bytes) {
++    CFRelease(s);
++    return nullptr;
++  }
++  *out_base = base;
++  return (void *)s;
++}
++
++void
++XSyncSurfaceReleaseLater(void *surface) {
++  if (!surface)
++    return;
++  dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0),
++                   surface, [](void *s) { CFRelease((IOSurfaceRef)s); });
++}
++
++uint32_t
++XSyncPeekSurfaceId(int fd, uint64_t surface_map_size, uint64_t page_size) {
++  struct stat st;
++  if (fd < 0 || fstat(fd, &st) != 0 || (uint64_t)st.st_size < surface_map_size + page_size)
++    return 0;
++  void *base = mmap(nullptr, page_size, PROT_READ, MAP_SHARED, fd, (off_t)surface_map_size);
++  if (base == MAP_FAILED)
++    return 0;
++  auto page = reinterpret_cast<XSyncPageShm *>(base);
++  uint32_t id = 0;
++  if (page->magic.load(std::memory_order_acquire) == kXSyncMagic && page->version == kXSyncVersion &&
++      page->surface_bytes == surface_map_size)
++    id = page->surface_id;
++  munmap(base, page_size);
++  return id;
++}
++
++void
++XSyncBridge::noteGpuStart(uint64_t wait_value, uint64_t gpu_start_ns) {
++  const uint64_t sig = signaledAtRawNs(wait_value);
++  if (!sig || !gpu_start_ns || sig <= gpu_start_ns)
++    return;
++  const uint64_t us = (sig - gpu_start_ns) / 1000;
++  stats.gpu_stall_n.fetch_add(1, std::memory_order_relaxed);
++  stats.gpu_stall_us_total.fetch_add(us, std::memory_order_relaxed);
++  uint64_t prev = stats.gpu_stall_us_max.load(std::memory_order_relaxed);
++  while (us > prev && !stats.gpu_stall_us_max.compare_exchange_weak(prev, us, std::memory_order_relaxed)) {
++  }
++}
++
++XSyncBridge::XSyncBridge(WMT::Device device) : event_(device.newSharedEvent()) {
++  event_.signalValue(0);
++  thread_ = std::thread([this]() { run(); });
++}
++
++XSyncBridge::~XSyncBridge() {
++  shutdown();
++}
++
++uint64_t
++XSyncBridge::submit(std::vector<XSyncWaitItem> &&items, const std::vector<XSyncTicket> &own) {
++  const uint64_t now = XSyncNowNs();
++  std::lock_guard<std::mutex> lock(mutex_);
++  uint64_t value = ++next_value_;
++  if (stop_) {
++    event_.signalValue(value);
++    return value;
++  }
++  jobs_.push_back({value, now, now + (uint64_t)XSyncGetConfig().timeout_ms * 1000000ull, std::move(items), own});
++  cv_.notify_one();
++  return value;
++}
++
++void
++XSyncBridge::shutdown() {
++  {
++    std::lock_guard<std::mutex> lock(mutex_);
++    if (stop_ && !thread_.joinable())
++      return;
++    stop_ = true;
++    cv_.notify_one();
++  }
++  if (thread_.joinable())
++    thread_.join();
++  std::lock_guard<std::mutex> lock(mutex_);
++  /* Whatever is left must not keep a command buffer waiting forever. */
++  event_.signalValue(next_value_);
++  jobs_.clear();
++}
++
++/* Mark/clear "this chunk is GPU-blocked" on the chunk's own lanes. */
++static void
++xsync_mark_blocked(const std::vector<XSyncTicket> &own, const XSyncWaitItem &on, uint64_t now) {
++  for (auto &t : own) {
++    auto &l = t.slot->page->lanes[t.slot->lane];
++    l.blk_since_ns.store(0, std::memory_order_release);
++    l.blk_target.store(on.target, std::memory_order_relaxed);
++    l.blk_page_id.store(on.page->page_id, std::memory_order_relaxed);
++    l.blk_lane.store(on.lane, std::memory_order_relaxed);
++    l.blk_kind.store(on.write, std::memory_order_relaxed);
++    /* the chunk may hold an r and a w ticket on the same lane */
++    if (t.write) {
++      l.blk_from_w.store(t.value, std::memory_order_relaxed);
++    } else {
++      l.blk_from_r.store(t.value, std::memory_order_relaxed);
++    }
++  }
++  for (auto &t : own) {
++    auto &l = t.slot->page->lanes[t.slot->lane];
++    /* tickets of the other kind not held by this chunk: none blocked */
++    bool has_r = false, has_w = false;
++    for (auto &u : own)
++      if (u.slot == t.slot)
++        (u.write ? has_w : has_r) = true;
++    if (!has_r)
++      l.blk_from_r.store(0, std::memory_order_relaxed);
++    if (!has_w)
++      l.blk_from_w.store(0, std::memory_order_relaxed);
++    l.blk_since_ns.store(now ? now : 1, std::memory_order_release);
++  }
++}
++
++static void
++xsync_clear_blocked(const std::vector<XSyncTicket> &own) {
++  for (auto &t : own) {
++    auto &l = t.slot->page->lanes[t.slot->lane];
++    uint64_t from = t.write ? l.blk_from_w.load(std::memory_order_relaxed)
++                            : l.blk_from_r.load(std::memory_order_relaxed);
++    if (from == t.value)
++      l.blk_since_ns.store(0, std::memory_order_release);
++  }
++}
++
++/* Is the partner lane we wait for blocked (in the very command buffer that
++ * holds our target ticket, or a later one) on one of *this process's*
++ * lanes, at a ticket our own blocked command buffer holds?  Then neither
++ * side can ever finish: a 2-party cycle.  Should not happen with
++ * snapshot-before-assign; when an outside dependency (a D3D11 Wait, the GPU,
++ * the guest) closes the loop it is broken here at once instead of after the
++ * timeout.  Writes a description into `why` when true. */
++static bool
++xsync_two_party_cycle(const XSyncWaitItem &it, std::string &why) {
++  auto &pl = it.page->lanes[it.lane];
++  const uint64_t since = pl.blk_since_ns.load(std::memory_order_acquire);
++  if (!since)
++    return false;
++  const uint64_t from = it.write ? pl.blk_from_w.load(std::memory_order_relaxed)
++                                 : pl.blk_from_r.load(std::memory_order_relaxed);
++  if (!from || from > it.target)
++    return false; /* our target lies before the partner's blocked command buffer */
++  const uint64_t on_page = pl.blk_page_id.load(std::memory_order_relaxed);
++  const uint32_t on_lane = pl.blk_lane.load(std::memory_order_relaxed);
++  const uint32_t on_kind = pl.blk_kind.load(std::memory_order_relaxed);
++  const uint64_t on_target = pl.blk_target.load(std::memory_order_relaxed);
++  std::lock_guard<std::mutex> lock(g_slots_mutex);
++  for (auto *slot : g_slots) {
++    if (slot->page->page_id != on_page || slot->lane != on_lane)
++      continue;
++    auto &ml = slot->page->lanes[slot->lane];
++    if (!ml.blk_since_ns.load(std::memory_order_acquire))
++      return false;
++    const uint64_t my_from = on_kind ? ml.blk_from_w.load(std::memory_order_relaxed)
++                                     : ml.blk_from_r.load(std::memory_order_relaxed);
++    if (!my_from || my_from > on_target)
++      return false;
++    why = str::format(
++        "partner lane ", it.lane, " (pid ", (int)(it.owner >> 32), ") is blocked since ",
++        (XSyncNowNs() - since) / 1000, " us at its ticket ", from, " <= our target ", it.target,
++        ", waiting for our lane ", on_lane, on_kind ? " w_done " : " r_done ", on_target, " >= our blocked ticket ", my_from
++    );
++    return true;
++  }
++  return false;
++}
++
++void
++XSyncBridge::run() {
++  pthread_setname_np("dxmt-xsync-bridge");
++  pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
++  const auto &cfg = XSyncGetConfig();
++
++  std::unique_lock<std::mutex> lock(mutex_);
++  for (;;) {
++    cv_.wait(lock, [&]() { return stop_ || !jobs_.empty(); });
++    if (jobs_.empty())
++      break; /* stop_ and nothing pending */
++    Job *job = &jobs_.front();
++    lock.unlock();
++
++    bool timed_out = false, cycle = false, marked = false;
++    std::string cycle_why;
++    uint64_t dead = 0, quarantined = 0;
++    uint64_t next_liveness_ns = job->submit_ns + 50000000ull;
++    uint64_t next_cycle_check_ns = job->submit_ns + 2000000ull;
++    int unsat = -1;
++    for (;;) {
++      unsat = -1;
++      const uint64_t now = XSyncNowNs();
++      for (size_t i = 0; i < job->items.size(); i++) {
++        auto &it = job->items[i];
++        auto &l = it.page->lanes[it.lane];
++        if (l.owner.load(std::memory_order_acquire) != it.owner)
++          continue; /* released or reclaimed: settled */
++        auto &done = it.write ? l.w_done : l.r_done;
++        if (done.load(std::memory_order_acquire) >= it.target)
++          continue;
++        if (XSyncPageQuarantined(it.page, now)) {
++          it.owner = ~0ull;
++          quarantined++;
++          continue;
++        }
++        unsat = (int)i;
++        break;
++      }
++      if (unsat < 0)
++        break;
++
++      auto &it = job->items[unsat];
++      if (!marked) {
++        xsync_mark_blocked(job->own, it, now);
++        marked = true;
++      }
++      if (now >= next_liveness_ns) {
++        next_liveness_ns = now + 50000000ull;
++        if (xsync_owner_dead(it.owner)) {
++          it.owner = ~0ull; /* never matches again -> settled */
++          dead++;
++          continue;
++        }
++      }
++      if (now >= next_cycle_check_ns) {
++        next_cycle_check_ns = now + 1000000ull;
++        if (xsync_two_party_cycle(it, cycle_why)) {
++          cycle = true;
++          break;
++        }
++      }
++      {
++        std::lock_guard<std::mutex> g(mutex_);
++        if (stop_)
++          break;
++      }
++      if (now >= job->deadline_ns) {
++        timed_out = true;
++        break;
++      }
++
++      XSyncPageShm *page = it.page;
++      uint32_t w = page->wake.load(std::memory_order_seq_cst);
++      page->waiters.fetch_add(1, std::memory_order_seq_cst);
++      /* Re-check after announcing ourselves: a publish that happened before
++       * `waiters` became visible did not bump `wake`. */
++      auto &l = page->lanes[it.lane];
++      auto &done = it.write ? l.w_done : l.r_done;
++      if (l.owner.load(std::memory_order_seq_cst) == it.owner && done.load(std::memory_order_seq_cst) < it.target) {
++        uint64_t left_us = (job->deadline_ns - now) / 1000;
++        uint32_t slice_us = (uint32_t)std::min<uint64_t>(std::max<uint64_t>(left_us, 50), 1000);
++        __ulock_wait(XSYNC_UL_COMPARE_AND_WAIT_SHARED | XSYNC_ULF_NO_ERRNO, &page->wake, w, slice_us);
++      }
++      page->waiters.fetch_sub(1, std::memory_order_seq_cst);
++    }
++
++    /* Timeout / cycle: stop ordering this texture for a while so one stuck
++     * partner costs one bounded wait, not one per frame. */
++    if ((timed_out || cycle) && unsat >= 0 && cfg.quarantine_ms)
++      xsync_quarantine(job->items[unsat].page, XSyncNowNs() + (uint64_t)cfg.quarantine_ms * 1000000ull);
++
++    const uint64_t waited_us = (XSyncNowNs() - job->submit_ns) / 1000;
++    {
++      auto &st = signal_raw_ns_[job->value % kSignalTimes];
++      st.raw_ns.store(clock_gettime_nsec_np(CLOCK_UPTIME_RAW), std::memory_order_relaxed);
++      st.value.store(job->value, std::memory_order_release);
++    }
++    event_.signalValue(job->value);
++    if (marked)
++      xsync_clear_blocked(job->own);
++
++    stats.waits_done.fetch_add(1, std::memory_order_relaxed);
++    stats.wait_us_total.fetch_add(waited_us, std::memory_order_relaxed);
++    uint64_t prev = stats.wait_us_max.load(std::memory_order_relaxed);
++    while (waited_us > prev &&
++           !stats.wait_us_max.compare_exchange_weak(prev, waited_us, std::memory_order_relaxed)) {
++    }
++    if (dead)
++      stats.dead_owner.fetch_add(dead, std::memory_order_relaxed);
++    if (quarantined)
++      stats.quarantine_skips.fetch_add(quarantined, std::memory_order_relaxed);
++    if (cycle) {
++      uint64_t n = stats.cycles.fetch_add(1, std::memory_order_relaxed) + 1;
++      if (n <= 5 || (n & (n - 1)) == 0)
++        WARN("sharedorder: pid=", XSyncPid(), " wait ", job->value, " CYCLE broken after ", waited_us, " us (cycles=",
++             n, "): ", cycle_why);
++    }
++    if (timed_out) {
++      uint64_t n = stats.timeouts.fetch_add(1, std::memory_order_relaxed) + 1;
++      if (n <= 5 || (n & (n - 1)) == 0) {
++        std::string what;
++        const uint64_t now = XSyncNowNs();
++        for (auto &it : job->items) {
++          if (it.owner == ~0ull)
++            continue;
++          auto &l = it.page->lanes[it.lane];
++          auto &done = it.write ? l.w_done : l.r_done;
++          const uint64_t pub = l.last_publish_ns.load(std::memory_order_relaxed);
++          const uint64_t bs = l.blk_since_ns.load(std::memory_order_relaxed);
++          what += str::format(
++              " [lane ", it.lane, " pid ", (int)(it.owner >> 32), it.write ? " w_done " : " r_done ",
++              done.load(std::memory_order_relaxed), "/", it.target, " last_progress_ms_ago ",
++              pub && now > pub ? (now - pub) / 1000000 : 0
++          );
++          if (bs)
++            what += str::format(
++                " partner_blocked_ms ", now > bs ? (now - bs) / 1000000 : 0, " on lane ",
++                l.blk_lane.load(std::memory_order_relaxed), l.blk_kind.load(std::memory_order_relaxed) ? " w>=" : " r>=",
++                l.blk_target.load(std::memory_order_relaxed),
++                l.blk_page_id.load(std::memory_order_relaxed) == it.page->page_id ? " (same texture)" : " (other texture)"
++            );
++          else
++            what += " partner_not_blocked";
++          what += "]";
++        }
++        WARN("sharedorder: pid=", XSyncPid(), " wait ", job->value, " timed out after ", waited_us,
++             " us; forcing, texture quarantined ", cfg.quarantine_ms, " ms (timeouts=", n, ")", what);
++      }
++    }
++
++    lock.lock();
++    jobs_.pop_front();
++  }
++}
++
++
++#else /* !XSYNC_ENABLED */
++
++XSyncSlot *
++XSyncAttach(int, uint64_t, uint64_t, bool, uint32_t, uint32_t, uint32_t, uint32_t) {
++  return nullptr;
++}
++static void
++xsync_quarantine(XSyncPageShm *, uint64_t) {}
++void
++XSyncRelease(XSyncSlot *) {}
++void
++XSyncPublish(std::vector<XSyncTicket> &tickets) {
++  tickets.clear();
++}
++int
++XSyncCollectWaits(const XSyncAccess &, int, std::vector<XSyncWaitItem> &) {
++  return 0;
++}
++void
++XSyncAssignTickets(const XSyncAccess &, std::vector<XSyncTicket> &) {}
++bool
++XSyncDeadCopyEnabled() {
++  return false;
++}
++bool
++XSyncCopyIsDead(const XSyncSlot *, const XSyncSlot *) {
++  return false;
++}
++bool
++XSyncSurfaceWanted(uint32_t, uint32_t, bool, bool) {
++  return false;
++}
++void *
++XSyncSurfaceCreate(uint32_t, uint32_t, uint32_t, uint64_t, uint32_t *, void **) {
++  return nullptr;
++}
++void *
++XSyncSurfaceLookup(uint32_t, uint32_t, uint32_t, uint32_t, uint64_t, void **) {
++  return nullptr;
++}
++void
++XSyncSurfaceReleaseLater(void *) {}
++uint32_t
++XSyncPeekSurfaceId(int, uint64_t, uint64_t) {
++  return 0;
++}
++void
++XSyncBridge::noteGpuStart(uint64_t, uint64_t) {}
++XSyncBridge::XSyncBridge(WMT::Device device) : event_(device.newSharedEvent()) {}
++XSyncBridge::~XSyncBridge() {}
++uint64_t
++XSyncBridge::submit(std::vector<XSyncWaitItem> &&, const std::vector<XSyncTicket> &) {
++  uint64_t v = ++next_value_;
++  event_.signalValue(v);
++  return v;
++}
++void
++XSyncBridge::shutdown() {}
++void
++XSyncBridge::run() {}
++
++#endif
++
++} // namespace dxmt
+diff --git a/src/dxmt/dxmt_xsync.hpp b/src/dxmt/dxmt_xsync.hpp
+new file mode 100644
+index 0000000..47ba430
+--- /dev/null
++++ b/src/dxmt/dxmt_xsync.hpp
+@@ -0,0 +1,317 @@
++/*
++ * Ember sharedorder-1030: cross-process GPU ordering for shared (shm) textures.
++ *
++ * Problem: a native shared texture is one linear plane of anonymous POSIX shm
++ * that several *processes* (Neptune render workers: the game, the guest DWM)
++ * map and hand to their own MTLDevice/MTLCommandQueue.  Metal orders nothing
++ * across queues, the textures are HazardTrackingModeUntracked, and DXMT's own
++ * fence tracking is per process.  So once the guest stops CPU-waiting for its
++ * own frame (present gate), the game can render frame k+3 into a buffer that
++ * the DWM's (late) composition of frame k is still sampling (WAR), and a read
++ * can overtake a write (RAW).
++ *
++ * Fix: every shm texture gets one extra page at the end of its shm object (the
++ * "sync page"), visible to every process that maps the texture.  The page
++ * holds up to kXSyncLanes lanes; each TextureAllocation (one per process/
++ * device/open) owns one lane with monotonic counters:
++ *
++ *   r_issued / r_done : command buffers of that lane that read the texture
++ *   w_issued / w_done : command buffers of that lane that write the texture
++ *
++ * issued is bumped on the encode thread when DXMT turns a chunk into a
++ * MTLCommandBuffer; done is published by the finish thread (in commit order)
++ * once that command buffer completed (or failed).  A chunk that writes the
++ * texture snapshots every *other* lane's r_issued (WAR) and a chunk that reads
++ * it snapshots every other lane's w_issued (RAW); if a snapshot is not done
++ * yet, the command buffer gets an encodeWaitForEvent on a process-local
++ * MTLSharedEvent right before the first encoder touching the texture.  A
++ * per-queue bridge thread waits (ulock on the shared page, no busy spin) for
++ * the other lane's done counter and then signals the local event.  The game's
++ * submit thread never blocks; only the GPU waits, and only when the other
++ * process really is behind.
++ *
++ * Deadlock guards: snapshot-before-assign makes same-texture cycles
++ * impossible; a released / stolen / dead lane counts as done; every wait has a
++ * deadline (NPT_SHARED_ORDER_TIMEOUT_MS) after which the event is forced.
++ *
++ * Env (read once per process):
++ *   NPT_SHARED_ORDER            1|on (default) = WAR+RAW, war, raw, 0|off
++ *   NPT_SHARED_ORDER_TIMEOUT_MS bridge deadline per wait (default 100, 5..5000)
++ *   NPT_SHARED_ORDER_QUARANTINE_MS  after a timeout, skip waits on that texture (default 1000)
++ *   NPT_SHARED_ORDER_GPUERR_MS  after a GPU error here, skip waits on our textures (default 2000)
++ *   NPT_SHARED_ORDER_LOG_S      stats line period in seconds (default 10, 0=off)
++ */
++#pragma once
++
++#include <atomic>
++#include <condition_variable>
++#include <cstdint>
++#include <deque>
++#include <mutex>
++#include <thread>
++#include <vector>
++
++#include "Metal.hpp"
++
++namespace dxmt {
++
++constexpr uint32_t kXSyncMagic = 0x4f54504eu; /* 'NPTO' */
++constexpr uint32_t kXSyncVersion = 2; /* v2: lane blocked-state, page id, quarantine */
++constexpr unsigned kXSyncLanes = 16;
++
++enum XSyncMode : int {
++  XSyncOff = 0,
++  XSyncWAR = 1, /* writer waits for other lanes' earlier reads */
++  XSyncRAW = 2, /* reader waits for other lanes' earlier writes */
++  XSyncBoth = 3,
++};
++
++struct XSyncConfig {
++  int mode;
++  uint32_t timeout_ms;    /* per wait; below the guest present-gate stall cap (~50-100 ms) */
++  uint32_t quarantine_ms; /* after a timeout: no waits on that texture for this long */
++  uint32_t gpu_error_quarantine_ms; /* after a GPU error in this process: no waits on its textures */
++  uint32_t log_s;
++};
++
++const XSyncConfig &XSyncGetConfig();
++
++struct alignas(64) XSyncLaneShm {
++  std::atomic<uint64_t> owner; /* 0 = free, else (pid << 32) | serial */
++  std::atomic<uint64_t> r_issued;
++  std::atomic<uint64_t> r_done;
++  std::atomic<uint64_t> w_issued;
++  std::atomic<uint64_t> w_done;
++  std::atomic<uint64_t> last_publish_ns;
++  /* v2 blocked state: this lane's tickets >= blk_from_{r,w} belong to a
++   * command buffer that is GPU-waiting (bridge) for lane blk_lane of page
++   * blk_page_id to reach blk_target (blk_kind 0 = r_done, 1 = w_done).
++   * blk_since_ns == 0: not blocked.  Diagnostics + 2-party cycle break. */
++  std::atomic<uint64_t> blk_since_ns;
++  std::atomic<uint64_t> blk_target;
++  std::atomic<uint64_t> blk_page_id;
++  std::atomic<uint32_t> blk_lane;
++  std::atomic<uint32_t> blk_kind;
++  std::atomic<uint64_t> blk_from_r;
++  std::atomic<uint64_t> blk_from_w;
++  uint64_t reserved[4];
++};
++
++struct XSyncPageShm {
++  std::atomic<uint32_t> magic;
++  uint32_t version;
++  uint64_t surface_bytes; /* page-aligned surface mapping size; this page follows it */
++  uint32_t width;
++  uint32_t height;
++  uint32_t stride;
++  uint32_t format;
++  std::atomic<uint32_t> wake;    /* ulock word, bumped on every publish with waiters */
++  std::atomic<uint32_t> waiters; /* bridge threads currently sleeping on `wake` */
++  uint32_t creator_pid;
++  uint32_t surface_id; /* vmzero-1031: global IOSurface holding the pixels, 0 = the shm object */
++  uint64_t page_id;                          /* random, set by the exporter */
++  std::atomic<uint64_t> quarantine_until_ns; /* CLOCK_MONOTONIC; waits skipped until then */
++  uint64_t reserved[1];
++  XSyncLaneShm lanes[kXSyncLanes];
++};
++
++static_assert(std::atomic<uint64_t>::is_always_lock_free, "shm atomics must be address-free");
++static_assert(std::atomic<uint32_t>::is_always_lock_free, "shm atomics must be address-free");
++static_assert(sizeof(XSyncPageShm) <= 4096, "sync page layout must fit one 4K page");
++
++/* One lane of one sync page, owned by one TextureAllocation. */
++struct XSyncSlot {
++  XSyncPageShm *page;
++  void *map_base;
++  size_t map_len;
++  unsigned lane;
++  uint64_t owner;
++  bool exporter;
++  bool local_read = false; /* vmzero-1031: this process read it: copies to it are not dead */
++};
++
++/* Bytes an exporter must add after its page-aligned surface (0 = feature off). */
++uint64_t XSyncExporterExtraBytes(uint64_t page_size);
++
++/* Map and join the sync page of a shm texture.  exporter: initialise the page
++ * (the object was created with XSyncExporterExtraBytes() extra).  Returns
++ * nullptr when the feature is off, the object has no (valid) sync page, or no
++ * lane is free -- the texture then simply runs unordered, as before. */
++XSyncSlot *XSyncAttach(int fd, uint64_t surface_map_size, uint64_t page_size, bool exporter, uint32_t width,
++                       uint32_t height, uint32_t stride, uint32_t format);
++
++/* Mark the lane fully done, free it and unmap.  Call only when no command
++ * buffer that references the owning allocation is still in flight. */
++void XSyncRelease(XSyncSlot *slot);
++
++/* --- per-chunk bookkeeping (encode thread -> finish thread) --- */
++
++struct XSyncAccess {
++  XSyncSlot *slot;
++  int rw; /* 1 read, 2 write, 3 both */
++};
++
++struct XSyncTicket {
++  XSyncSlot *slot;
++  uint8_t write; /* 0: r_done, 1: w_done */
++  uint64_t value;
++};
++
++struct XSyncWaitItem {
++  XSyncPageShm *page;
++  unsigned lane;
++  uint8_t write; /* waiting for w_done (RAW) vs r_done (WAR) */
++  uint64_t owner;
++  uint64_t target;
++};
++
++static inline bool
++XSyncPageQuarantined(const XSyncPageShm *page, uint64_t now_ns) {
++  return now_ns < page->quarantine_until_ns.load(std::memory_order_relaxed);
++}
++
++struct XSyncSignal {
++  obj_handle_t event; /* MTLSharedEvent (retained) */
++  uint64_t value;
++};
++
++/* What a committed chunk must do when its command buffer finishes. */
++struct XSyncChunkResult {
++  std::vector<XSyncTicket> tickets;
++  std::vector<XSyncSignal> signals; /* CPU fallback when the command buffer fails */
++  uint64_t wait_value = 0; /* vmzero-1031: this chunk's bridge wait, 0 none */
++
++  void
++  clear() {
++    tickets.clear();
++    for (auto &s : signals)
++      NSObject_release(s.event);
++    signals.clear();
++    wait_value = 0;
++  }
++};
++
++/* Store done counters and wake waiters (finish thread, in commit order). */
++void XSyncPublish(std::vector<XSyncTicket> &tickets);
++
++/* Snapshot targets other lanes must reach before this access may run.  Items
++ * whose target is already done are dropped. */
++/* Returns 1 when the texture is quarantined (no waits collected). */
++int XSyncCollectWaits(const XSyncAccess &access, int mode, std::vector<XSyncWaitItem> &out);
++
++/* Assign this chunk's own tickets (after all snapshots). */
++void XSyncAssignTickets(const XSyncAccess &access, std::vector<XSyncTicket> &out);
++
++struct XSyncStats {
++  std::atomic<uint64_t> chunks{0};      /* chunks touching a synced texture */
++  std::atomic<uint64_t> wait_chunks{0}; /* chunks that got a GPU wait */
++  std::atomic<uint64_t> war_items{0};
++  std::atomic<uint64_t> raw_items{0};
++  std::atomic<uint64_t> waits_done{0};
++  std::atomic<uint64_t> wait_us_total{0};
++  std::atomic<uint64_t> wait_us_max{0};
++  std::atomic<uint64_t> timeouts{0};
++  std::atomic<uint64_t> dead_owner{0};
++  std::atomic<uint64_t> cycles{0};           /* 2-party cycles broken at once */
++  std::atomic<uint64_t> quarantine_skips{0}; /* waits skipped on quarantined textures */
++  /* vmzero-1031: wait_us counts from the encode thread, not from when the GPU
++   * reached the wait.  gpu_stall = bridge signal - GPUStartTime of the waiting
++   * command buffer, > 0 only: an upper bound of the time the GPU really sat in
++   * that wait (the wait is at the first touching encoder, not always first). */
++  std::atomic<uint64_t> gpu_stall_n{0};
++  std::atomic<uint64_t> gpu_stall_us_total{0};
++  std::atomic<uint64_t> gpu_stall_us_max{0};
++  std::atomic<uint64_t> dead_copies{0};
++};
++
++/* Per-CommandQueue bridge: one local MTLSharedEvent + one thread. */
++class XSyncBridge {
++public:
++  explicit XSyncBridge(WMT::Device device);
++  ~XSyncBridge();
++
++  WMT::SharedEvent
++  event() const {
++    return event_;
++  }
++
++  /* Queue a wait job; returns the event value the command buffer must wait for.
++   * own: the chunk's own tickets (marked "blocked" while the job waits). */
++  uint64_t submit(std::vector<XSyncWaitItem> &&items, const std::vector<XSyncTicket> &own);
++
++  /* Force-signal everything submitted and stop the thread (idempotent). */
++  void shutdown();
++
++  /* vmzero-1031: CLOCK_UPTIME_RAW ns of the signal of `value`, 0 unknown. */
++  uint64_t
++  signaledAtRawNs(uint64_t value) const {
++    auto &e = signal_raw_ns_[value % kSignalTimes];
++    return e.value.load(std::memory_order_acquire) == value ? e.raw_ns.load(std::memory_order_relaxed) : 0;
++  }
++  void noteGpuStart(uint64_t wait_value, uint64_t gpu_start_ns);
++
++  XSyncStats stats;
++
++private:
++  struct Job {
++    uint64_t value;
++    uint64_t submit_ns;
++    uint64_t deadline_ns;
++    std::vector<XSyncWaitItem> items;
++    std::vector<XSyncTicket> own;
++  };
++
++  void run();
++
++  WMT::Reference<WMT::SharedEvent> event_;
++  std::mutex mutex_;
++  std::condition_variable cv_;
++  std::deque<Job> jobs_;
++  static constexpr unsigned kSignalTimes = 256;
++  struct SignalTime {
++    std::atomic<uint64_t> value{0};
++    std::atomic<uint64_t> raw_ns{0};
++  };
++  SignalTime signal_raw_ns_[kSignalTimes];
++  uint64_t next_value_ = 0;
++  bool stop_ = false;
++  std::thread thread_;
++};
++
++uint64_t XSyncNowNs();
++int XSyncPid();
++
++/* vmzero-1031 (host only, nothing below changes without its switch).
++ *
++ * EMBER_VMZ_DEADCOPY=1 (env or EMBER_VMZ_CTL file, re-read every second):
++ * XSyncCopyIsDead() = this full-surface copy writes a shared texture that no
++ * other process ever opened, so nobody can read it.  That is Triton's present
++ * copy ring: pipeline-1030 pg5 found the DWM samples the app's swap chain
++ * buffers, never the 6 slots, and with hDstAllocation = 0 the KMD emits no blt.
++ *
++ * EMBER_SCANOUT_SURF=1 (env, read once): exported BGRA8 render targets of at
++ * least 640x480 live in a global IOSurface instead of the shm object; the shm
++ * object then only carries the sync page, whose surface_id tells importers
++ * (DXMT and QEMU's virglrenderer) where the pixels are.  QEMU can then show
++ * the guest's scanout buffer without copying it. */
++bool XSyncCopyIsDead(const XSyncSlot *dst, const XSyncSlot *src);
++bool XSyncDeadCopyEnabled();
++bool XSyncSurfaceWanted(uint32_t width, uint32_t height, bool bgra8, bool render_target);
++/* Returns a retained IOSurfaceRef, its id and base address; nullptr on any failure. */
++void *XSyncSurfaceCreate(uint32_t width, uint32_t height, uint32_t stride, uint64_t need_bytes, uint32_t *out_id,
++                         void **out_base);
++void *XSyncSurfaceLookup(uint32_t id, uint32_t width, uint32_t height, uint32_t stride, uint64_t need_bytes,
++                         void **out_base);
++/* Release after any command buffer can have used it (a few seconds later). */
++void XSyncSurfaceReleaseLater(void *surface);
++/* surface_id in the sync page of a shm object, 0 = none (no page, no surface).  importer only */
++uint32_t XSyncPeekSurfaceId(int fd, uint64_t surface_map_size, uint64_t page_size);
++
++/* Ember: GPU error hook for the embedder (Neptune render worker). */
++typedef void (*XSyncGpuErrorCallback)(void *user, uint64_t frame, const char *description);
++void XSyncSetGpuErrorCallback(XSyncGpuErrorCallback cb, void *user);
++void XSyncReportGpuError(uint64_t frame, const char *description);
++/* NPT_GPU_ERROR_SIGNAL (default 1): CPU-signal a failed command buffer's events. */
++bool XSyncGpuErrorSignalEnabled();
++
++} // namespace dxmt
+diff --git a/src/dxmt/meson.build b/src/dxmt/meson.build
+index b2e3687..6b25735 100644
+--- a/src/dxmt/meson.build
++++ b/src/dxmt/meson.build
+@@ -23,6 +23,7 @@ dxmt_src = [
+   'dxmt_deptrack.cpp',
+   'dxmt_counter.cpp',
+   'dxmt_fence.cpp',
++  'dxmt_xsync.cpp',
+ ]
+ 
+ dxmt_shaders = [

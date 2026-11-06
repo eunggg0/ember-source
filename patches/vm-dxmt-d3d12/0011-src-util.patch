@@ -1,0 +1,343 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 11/15] src-util: Ember changes
+
+Base: DXMT 7c8dee1 with submodules
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/src/util/ec_thunk_order.cpp b/src/util/ec_thunk_order.cpp
+new file mode 100644
+index 0000000..8eba3b9
+--- /dev/null
++++ b/src/util/ec_thunk_order.cpp
+@@ -0,0 +1,37 @@
++/*
++ * Ember (10-16 fexx19): ARM64EC exit thunk 이름 충돌 막기.
++ *
++ * LLVM 은 ARM64EC exit thunk 를 "$iexit_thunk$cdecl$<반환>$<인자>" 이름의 comdat(아무거나 하나 고름)으로 만든다.
++ * 그런데 8바이트 C++ 클래스를 sret 로 돌려주는 함수(예: Rc<T> f(this, a, b, c))의 thunk 도 반환을 "i8" 로
++ * 적어서, HRESULT f(this, a, b, c) 같은 정수 반환 함수의 thunk 와 이름이 같아진다. sret 판은 x8 을 RCX 로
++ * 넣고 인자를 한 칸씩 민다. 링커가 sret 판을 고르면 hybrid_patchable 함수(Present1 등)의 $hybpatch_thunk 가
++ * x64 후킹(스팀·EOS·디스코드 오버레이)으로 갈 때 this 대신 x8(= __os_arm64x_dispatch_call 주소)을 넘긴다
++ * → 스텔라 블레이드 FEX 40초 튕김(overlayTick 에서 this=check_call).
++ *
++ * 링커(lld)는 comdat 을 처음 본 오브젝트 것으로 고른다. 이 파일을 각 DLL 소스 목록 맨 앞에 두고, 여기서
++ * 정수 반환 간접 호출을 인자 0~12개로 만들어 정수 판 thunk 가 늘 이기게 한다. sret 판을 쓰던 호출은
++ * 대상이 x64 일 때만 thunk 를 타는데, DXMT 내부 C++ 함수는 늘 ARM64EC 라 영향이 없다.
++ * 빌드 뒤 확인: Tools/dev/fexx19-1016/hpcheck.py <dll> (sret 꼴 0 이어야 함).
++ */
++#if defined(__arm64ec__)
++typedef long long I;
++typedef void *P;
++extern "C" __attribute__((used, noinline)) I
++dxmt_ec_thunk_order(P const volatile *f, P a) {
++  I r = 0;
++  r += ((I(*)())f[0])();
++  r += ((I(*)(P))f[1])(a);
++  r += ((I(*)(P, P))f[2])(a, a);
++  r += ((I(*)(P, P, P))f[3])(a, a, a);
++  r += ((I(*)(P, P, P, P))f[4])(a, a, a, a);
++  r += ((I(*)(P, P, P, P, P))f[5])(a, a, a, a, a);
++  r += ((I(*)(P, P, P, P, P, P))f[6])(a, a, a, a, a, a);
++  r += ((I(*)(P, P, P, P, P, P, P))f[7])(a, a, a, a, a, a, a);
++  r += ((I(*)(P, P, P, P, P, P, P, P))f[8])(a, a, a, a, a, a, a, a);
++  r += ((I(*)(P, P, P, P, P, P, P, P, P))f[9])(a, a, a, a, a, a, a, a, a);
++  r += ((I(*)(P, P, P, P, P, P, P, P, P, P))f[10])(a, a, a, a, a, a, a, a, a, a);
++  r += ((I(*)(P, P, P, P, P, P, P, P, P, P, P))f[11])(a, a, a, a, a, a, a, a, a, a, a);
++  r += ((I(*)(P, P, P, P, P, P, P, P, P, P, P, P))f[12])(a, a, a, a, a, a, a, a, a, a, a, a);
++  return r;
++}
++#endif
+diff --git a/src/util/ember_native_win32.h b/src/util/ember_native_win32.h
+new file mode 100644
+index 0000000..e03b416
+--- /dev/null
++++ b/src/util/ember_native_win32.h
+@@ -0,0 +1,206 @@
++#pragma once
++/*
++ * Ember vmd3d12-1027: Win32 대체 구현 — Ember d3d12 를 Wine 없이(맥 네이티브, VM 호스트 Neptune 용) 빌드할 때만.
++ * PE 빌드(_WIN32)에는 아무 영향 없음. 진단용 파일 매핑·트레이스는 네이티브에선 꺼짐(실패 반환).
++ * 이벤트는 directx-native(dxn_event_*) — Neptune 이 이 라이브러리의 dxmt_event_create 로 만든 핸들만 다룬다.
++ */
++#ifndef _WIN32
++
++#include <windows.h>
++#include <string>
++#include <stdint.h>
++#include <dlfcn.h>
++#include <pthread.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <mach/mach_time.h>
++#include <directx-native/dxn_event.h>
++
++#ifndef THREAD_PRIORITY_NORMAL
++#define THREAD_PRIORITY_NORMAL 0
++#endif
++#ifndef THREAD_PRIORITY_ABOVE_NORMAL
++#define THREAD_PRIORITY_ABOVE_NORMAL 1
++#endif
++#ifndef THREAD_PRIORITY_HIGHEST
++#define THREAD_PRIORITY_HIGHEST 2
++#endif
++#ifndef DLL_PROCESS_DETACH
++#define DLL_PROCESS_DETACH 0
++#define DLL_PROCESS_ATTACH 1
++#define DLL_THREAD_ATTACH 2
++#define DLL_THREAD_DETACH 3
++#endif
++#ifndef STD_ERROR_HANDLE
++#define STD_INPUT_HANDLE ((DWORD)-10)
++#define STD_OUTPUT_HANDLE ((DWORD)-11)
++#define STD_ERROR_HANDLE ((DWORD)-12)
++#endif
++#ifndef GENERIC_READ
++#define GENERIC_READ 0x80000000u
++#define GENERIC_WRITE 0x40000000u
++#endif
++#ifndef FILE_SHARE_READ
++#define FILE_SHARE_READ 1
++#define FILE_SHARE_WRITE 2
++#define FILE_SHARE_DELETE 4
++#endif
++#ifndef CREATE_ALWAYS
++#define CREATE_NEW 1
++#define CREATE_ALWAYS 2
++#define OPEN_EXISTING 3
++#define OPEN_ALWAYS 4
++#endif
++#ifndef FILE_ATTRIBUTE_NORMAL
++#define FILE_ATTRIBUTE_NORMAL 0x80
++#endif
++#ifndef PAGE_READWRITE
++#define PAGE_READWRITE 0x04
++#endif
++#ifndef FILE_MAP_ALL_ACCESS
++#define FILE_MAP_ALL_ACCESS 0xf001f
++#endif
++#ifndef VK_SHIFT
++#define VK_SHIFT 0x10
++#define VK_CONTROL 0x11
++#define VK_MENU 0x12
++#endif
++#ifndef WAIT_OBJECT_0
++#define WAIT_OBJECT_0 0
++#define WAIT_TIMEOUT 258
++#define WAIT_FAILED ((DWORD)0xFFFFFFFF)
++#endif
++#ifndef INFINITE
++#define INFINITE 0xFFFFFFFF
++#endif
++
++typedef WCHAR *LPWCH;
++#ifndef _LONG64_DEFINED
++#define _LONG64_DEFINED
++typedef int64_t LONG64;
++#endif
++#ifndef D3D12_ERROR_DRIVER_VERSION_MISMATCH
++#define D3D12_ERROR_DRIVER_VERSION_MISMATCH ((HRESULT)0x887E0002L)
++#endif
++#ifndef D3D12_ERROR_ADAPTER_NOT_FOUND
++#define D3D12_ERROR_ADAPTER_NOT_FOUND ((HRESULT)0x887E0001L)
++#endif
++inline LONG64 InterlockedIncrement64(LONG64 volatile *p) { return __atomic_add_fetch(p, 1, __ATOMIC_SEQ_CST); }
++inline LONG64 InterlockedDecrement64(LONG64 volatile *p) { return __atomic_sub_fetch(p, 1, __ATOMIC_SEQ_CST); }
++inline int _wcsnicmp(const WCHAR *a, const WCHAR *b, size_t n) {
++  for (size_t i = 0; i < n; i++) {
++    WCHAR x = a[i] >= L'A' && a[i] <= L'Z' ? a[i] + 32 : a[i];
++    WCHAR y = b[i] >= L'A' && b[i] <= L'Z' ? b[i] + 32 : b[i];
++    if (x != y) return x < y ? -1 : 1;
++    if (!x) return 0;
++  }
++  return 0;
++}
++inline BOOL FlushFileBuffers(HANDLE) { return FALSE; }
++inline LONG64 InterlockedExchange64(LONG64 volatile *p, LONG64 v) { return __atomic_exchange_n(p, v, __ATOMIC_SEQ_CST); }
++inline LONG64 InterlockedCompareExchange64(LONG64 volatile *p, LONG64 x, LONG64 c) {
++  __atomic_compare_exchange_n(p, &c, x, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
++  return c;
++}
++typedef void *(*FARPROC_NATIVE)(void);
++
++inline ULONGLONG GetTickCount64() {
++  return clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1000000ull;
++}
++inline DWORD GetCurrentThreadId() {
++  uint64_t tid = 0;
++  pthread_threadid_np(nullptr, &tid);
++  return (DWORD)tid;
++}
++inline DWORD GetLastError() { return 0; }
++inline BOOL QueryPerformanceFrequency(LARGE_INTEGER *f) {
++  f->QuadPart = 1000000000ll;
++  return TRUE;
++}
++inline BOOL QueryPerformanceCounter(LARGE_INTEGER *c) {
++  c->QuadPart = (LONGLONG)clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
++  return TRUE;
++}
++inline void Sleep(DWORD ms) { usleep((useconds_t)ms * 1000); }
++inline SHORT GetAsyncKeyState(int) { return 0; }
++inline BOOL TerminateProcess(HANDLE, UINT code) {
++  /* VM 호스트 렌더 워커를 죽이면 VM 3D 전체가 끊긴다 — 기록만 */
++  dxmt::Logger::err("TerminateProcess ignored in native build (code " + std::to_string(code) + ")");
++  return FALSE;
++}
++inline BOOL DisableThreadLibraryCalls(HMODULE) { return TRUE; }
++
++/* winemetal.dll 내보내기 찾기 — 네이티브에선 같은 이미지 안의 기호 */
++/* 10-28: 자기 이미지(libember-d3d12-native.dylib) 핸들 — Neptune 은 RTLD_LOCAL 로 열고, 같은 프로세스에 UTM
++ * libdxmt-native 도 있으므로 RTLD_DEFAULT 로 찾으면 남의 기호를 집을 수 있다. 이름 인자는 무시(winemetal 은 같은 이미지). */
++inline char ember_native_self_anchor;
++inline HMODULE GetModuleHandleA(LPCSTR) {
++  static void *self = [] {
++    Dl_info i;
++    if (!dladdr((const void *)&ember_native_self_anchor, &i) || !i.dli_fname)
++      return (void *)nullptr;
++    return dlopen(i.dli_fname, RTLD_NOLOAD | RTLD_LOCAL);
++  }();
++  return (HMODULE)self;
++}
++#define GetProcAddress(m, name) ((void *)dlsym((void *)(m), (name)))
++
++/* 환경 변수 */
++inline DWORD GetEnvironmentVariableA(LPCSTR name, LPSTR buf, DWORD size) {
++  const char *v = getenv(name);
++  if (!v) return 0;
++  DWORD n = (DWORD)strlen(v);
++  if (!buf || size <= n) return n + 1;
++  memcpy(buf, v, n + 1);
++  return n;
++}
++inline DWORD GetEnvironmentVariableW(LPCWSTR name, LPWSTR buf, DWORD size) {
++  char a[256]; size_t i = 0;
++  for (; name[i] && i < sizeof(a) - 1; i++) a[i] = (char)name[i];
++  a[i] = 0;
++  const char *v = getenv(a);
++  if (!v) return 0;
++  DWORD n = (DWORD)strlen(v);
++  if (!buf || size <= n) return n + 1;
++  for (DWORD k = 0; k <= n; k++) buf[k] = (WCHAR)(unsigned char)v[k];
++  return n;
++}
++inline LPWCH GetEnvironmentStringsW() { return nullptr; }
++inline BOOL FreeEnvironmentStringsW(LPWCH) { return TRUE; }
++
++/* 파일·매핑: 진단 기능 전용 → 네이티브에선 끔 */
++inline HANDLE GetStdHandle(DWORD which) { return (HANDLE)(intptr_t)(which == STD_ERROR_HANDLE ? 2 : 1); }
++inline BOOL WriteFile(HANDLE h, LPCVOID buf, DWORD n, LPDWORD written, void *) {
++  intptr_t fd = (intptr_t)h;
++  if (fd != 1 && fd != 2) return FALSE;
++  ssize_t r = write((int)fd, buf, n);
++  if (written) *written = r > 0 ? (DWORD)r : 0;
++  return r >= 0;
++}
++inline HANDLE CreateFileA(LPCSTR, DWORD, DWORD, void *, DWORD, DWORD, HANDLE) { return INVALID_HANDLE_VALUE; }
++inline HANDLE CreateFileW(LPCWSTR, DWORD, DWORD, void *, DWORD, DWORD, HANDLE) { return INVALID_HANDLE_VALUE; }
++inline HANDLE CreateFileMappingA(HANDLE, void *, DWORD, DWORD, DWORD, LPCSTR) { return nullptr; }
++inline LPVOID MapViewOfFile(HANDLE, DWORD, DWORD, DWORD, SIZE_T) { return nullptr; }
++inline BOOL UnmapViewOfFile(LPCVOID) { return FALSE; }
++
++/* 이벤트(directx-native) */
++inline BOOL SetEvent(HANDLE h) {
++  if (!h || !dxn_event_is_event(h)) return FALSE;
++  dxn_event_signal(h);
++  return TRUE;
++}
++inline BOOL ResetEvent(HANDLE h) {
++  if (!h || !dxn_event_is_event(h)) return FALSE;
++  dxn_event_clear(h);
++  return TRUE;
++}
++inline HANDLE CreateEventW(void *, BOOL manual, BOOL initial, LPCWSTR) { return dxn_event_create(manual, initial); }
++inline HANDLE CreateEventA(void *, BOOL manual, BOOL initial, LPCSTR) { return dxn_event_create(manual, initial); }
++inline DWORD WaitForSingleObject(HANDLE h, DWORD ms) {
++  if (!h || !dxn_event_is_event(h)) return WAIT_FAILED;
++  dxn_wait_status s = dxn_event_wait(h, ms == INFINITE ? DXN_WAIT_INFINITE : (uint64_t)ms * 1000000ull);
++  return s == DXN_WAIT_SIGNALED ? WAIT_OBJECT_0 : s == DXN_WAIT_TIMEOUT ? WAIT_TIMEOUT : WAIT_FAILED;
++}
++
++#endif /* !_WIN32 */
+diff --git a/src/util/thread.hpp b/src/util/thread.hpp
+index 45476d6..201d1b0 100644
+--- a/src/util/thread.hpp
++++ b/src/util/thread.hpp
+@@ -77,6 +77,14 @@ public:
+ 
+   bool joinable() const { return m_handle != nullptr; }
+ 
++  /* Ember(fc12 10-18): 상한 있는 join. 끝났으면 손잡이를 닫고 true, 아직이면 false(손잡이 그대로). */
++  bool join_for(uint32_t ms) {
++    if (::WaitForSingleObjectEx(m_handle, ms, FALSE) != WAIT_OBJECT_0)
++      return false;
++    this->detach();
++    return true;
++  }
++
+   void set_priority(ThreadPriority priority) {
+     int32_t value;
+     switch (priority) {
+@@ -128,6 +136,8 @@ public:
+ 
+   void join() { m_thread->join(); }
+ 
++  bool join_for(uint32_t ms) { return m_thread->join_for(ms); }
++
+   bool joinable() const { return m_thread != nullptr && m_thread->joinable(); }
+ 
+   void set_priority(ThreadPriority priority) {
+@@ -327,6 +337,8 @@ class thread : public std::thread {
+ public:
+   using std::thread::thread;
+ 
++  bool join_for(uint32_t) { join(); return true; }
++
+   void set_priority(ThreadPriority priority) {
+     ::sched_param param = {};
+     int32_t policy;
+diff --git a/src/util/util_win32_compat.h b/src/util/util_win32_compat.h
+index e4a556a..aa24eee 100644
+--- a/src/util/util_win32_compat.h
++++ b/src/util/util_win32_compat.h
+@@ -5,6 +5,7 @@
+ #include <windows.h>
+ 
+ #include "log/log.hpp"
++#include <unistd.h>
+ 
+ #define THREAD_PRIORITY_TIME_CRITICAL 15
+ 
+@@ -19,8 +20,7 @@ inline HANDLE GetCurrentThread() {
+ }
+ 
+ inline DWORD GetCurrentProcessId() {
+-  dxmt::Logger::warn("GetCurrentProcessId not implemented.");
+-  return 0;
++  return (DWORD)getpid();
+ }
+ 
+ inline BOOL ProcessIdToSessionId(DWORD pid, DWORD *id) {
+@@ -82,8 +82,13 @@ inline BOOL ReleaseSemaphore(HANDLE hSemaphore,
+   return FALSE;
+ }
+ 
++#include <directx-native/dxn_event.h>
+ inline BOOL CloseHandle(HANDLE hObject) {
+-  dxmt::Logger::warn("CloseHandle not implemented.");
++  /* Ember vmd3d12: directx-native 이벤트는 닫고, 나머지(진단 파일 등)는 무시 */
++  if (hObject && hObject != INVALID_HANDLE_VALUE && dxn_event_is_event(hObject)) {
++    dxn_event_close(hObject);
++    return TRUE;
++  }
+   return FALSE;
+ }
+ 
+@@ -102,4 +107,6 @@ inline BOOL DuplicateHandle(HANDLE   hSourceProcessHandle,
+ 
+ #define ARRAYSIZE(a) (sizeof(a)/sizeof(*(a)))
+ 
++#include "ember_native_win32.h"
++
+ #endif
+\ No newline at end of file

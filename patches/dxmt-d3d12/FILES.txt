@@ -1,6 +1,13 @@
 # dxmt-d3d12 — base: DXMT 7c8dee1 with submodules
-#
-# changed 118 files (new 44)
+# d3d12.dll (x86_64, arm64ec), winemetal.so (arm64 WineARM64)
+# changed 165 files (new 83)
+M build-arm64ec.txt
+M build-win32.txt
+M build-win64.txt
+M src/airconv/dxbc_converter.cpp
+M src/airconv/dxbc_converter_ts.cpp
+M src/airconv/dxbc_instructions.cpp
+M src/airconv/nt/air_builder.cpp
 M src/d3d10/d3d10_device.cpp
 M src/d3d11/d3d11_context_def.cpp
 M src/d3d11/d3d11_context_imm.cpp
@@ -18,6 +25,7 @@ M src/d3d11/d3d11_shader.cpp
 M src/d3d11/d3d11_shader.hpp
 M src/d3d11/d3d11_swapchain.cpp
 M src/d3d11/meson.build
+M src/d3d12/d3d12.cpp
 M src/d3d12/d3d12_buffer.cpp
 M src/d3d12/d3d12_command_allocator.cpp
 M src/d3d12/d3d12_command_allocator.hpp
@@ -29,18 +37,45 @@ M src/d3d12/d3d12_descriptor_heap.cpp
 M src/d3d12/d3d12_descriptor_heap.hpp
 M src/d3d12/d3d12_device.cpp
 M src/d3d12/d3d12_device.hpp
+A src/d3d12/d3d12_ember_cbdiag.hpp
+A src/d3d12/d3d12_ember_dxbc_coherency.hpp
+A src/d3d12/d3d12_ember_ei_guard.hpp
 A src/d3d12/d3d12_ember_opts.hpp
+A src/d3d12/d3d12_ember_pso.hpp
+A src/d3d12/d3d12_ember_psoskip.hpp
+A src/d3d12/d3d12_ember_racelog.hpp
+A src/d3d12/d3d12_ember_sbsync.hpp
+A src/d3d12/d3d12_ember_shutdown.hpp
 A src/d3d12/d3d12_ember_sparse.hpp
 A src/d3d12/d3d12_ember_trace.cpp
 A src/d3d12/d3d12_ember_trace.hpp
 A src/d3d12/d3d12_ember_trace_ring.hpp
+A src/d3d12/d3d12_ember_wait_guard.hpp
 M src/d3d12/d3d12_fence.cpp
 M src/d3d12/d3d12_heap.cpp
+A src/d3d12/d3d12_multiple_fence.hpp
 M src/d3d12/d3d12_pipeline_compute.cpp
 M src/d3d12/d3d12_pipeline_graphics.cpp
+A src/d3d12/d3d12_pipeline_library.hpp
+A src/d3d12/d3d12_pipeline_stream.hpp
 M src/d3d12/d3d12_root_signature.cpp
 M src/d3d12/d3d12_swapchain.cpp
 M src/d3d12/d3d12_texture.cpp
+A src/d3d12/ember_d3d12_upscale.hpp
+A src/d3d12/ember_dxbc_gs_draw.inc
+A src/d3d12/ember_dxbc_gs_pipeline.inc
+A src/d3d12/ember_dxbc_tess.hpp
+A src/d3d12/ember_dxbc_tess_draw.inc
+A src/d3d12/ember_dxbc_tess_pipeline.inc
+A src/d3d12/ember_reblack_completion.hpp
+A src/d3d12/ember_reblack_completion_core.hpp
+A src/d3d12/ember_reblack_fence.hpp
+A src/d3d12/ember_reblack_fence_core.hpp
+A src/d3d12/ember_reblack_owned.hpp
+A src/d3d12/ember_resource_zero.hpp
+A src/d3d12/ember_so_draw.inc
+A src/d3d12/ember_trace_bridge.h
+A src/d3d12/ember_trace_native.h
 M src/d3d12/meson.build
 M src/dxgi/dxgi.cpp
 M src/dxgi/dxgi_resource.hpp
@@ -56,6 +91,7 @@ M src/dxmt/dxmt_command_queue.hpp
 M src/dxmt/dxmt_context.cpp
 M src/dxmt/dxmt_context.hpp
 A src/dxmt/dxmt_ember_d11.hpp
+A src/dxmt/dxmt_ember_hazard.hpp
 M src/dxmt/dxmt_fence.cpp
 M src/dxmt/dxmt_fence.hpp
 M src/dxmt/dxmt_format.cpp
@@ -72,6 +108,9 @@ A src/dxmt/ember_fg_hook.hpp
 A src/dxmt/ember_hud_font.h
 A src/dxmt/ember_neural.cpp
 A src/dxmt/ember_neural.hpp
+A src/dxmt/ember_presentlat.hpp
+A src/dxmt/ember_presentlat_core.hpp
+A src/dxmt/ember_presentlat_ring.hpp
 A src/dxmt/ember_spark.hpp
 M src/dxmt/meson.build
 M src/nvapi/nvapi.cpp
@@ -88,12 +127,19 @@ A src/winemetal/ember_fg_thunks.c
 A src/winemetal/ember_fg_thunks.h
 A src/winemetal/ember_neural_thunks.c
 A src/winemetal/ember_neural_thunks.h
+A src/winemetal/ember_presentlat_camdl.h
 A src/winemetal/ember_tessellation.h
 M src/winemetal/meson.build
 M src/winemetal/unix/cache.c
 A src/winemetal/unix/ember_dxil_unix.m
 A src/winemetal/unix/ember_fg_unix.c
+A src/winemetal/unix/ember_fg_unix.ec.c
+A src/winemetal/unix/ember_fg_unix.x64.c
+A src/winemetal/unix/ember_metal_error.h
 A src/winemetal/unix/ember_neural_unix.m
+A src/winemetal/unix/ember_precise_wait.h
+A src/winemetal/unix/ember_presentlat_unix.inc
+A src/winemetal/unix/ember_signed_rt.cpp
 A src/winemetal/unix/ir/metal_irconverter/LICENSE.txt
 A src/winemetal/unix/ir/metal_irconverter/ir_comparison_function.h
 A src/winemetal/unix/ir/metal_irconverter/ir_descriptor_range_flags.h
@@ -111,6 +157,7 @@ A src/winemetal/unix/ir/metal_irconverter/ir_tessellator_partitioning.h
 A src/winemetal/unix/ir/metal_irconverter/ir_texture_address_mode.h
 A src/winemetal/unix/ir/metal_irconverter/ir_version.h
 A src/winemetal/unix/ir/metal_irconverter/metal_irconverter.h
+A src/winemetal/unix/ir/metal_irconverter_runtime/ir_tessellator_tables.h
 M src/winemetal/unix/meson.build
 M src/winemetal/unix/winemetal_unix.c
 M src/winemetal/winemetal.h

@@ -1,11 +1,11 @@
 From: Ember <ember@users.noreply.github.com>
-Subject: [PATCH 2/36] dlls-colorcnv: Ember changes
+Subject: [PATCH 2/46] dlls-colorcnv: Ember changes
 
 Base: Wine 11.18
 License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
 ---
 diff --git a/dlls/colorcnv/color_converter.c b/dlls/colorcnv/color_converter.c
-index 38981e4..905567f 100644
+index 38981e4..97652a9 100644
 --- a/dlls/colorcnv/color_converter.c
 +++ b/dlls/colorcnv/color_converter.c
 @@ -35,6 +35,7 @@
@@ -16,15 +16,17 @@ index 38981e4..905567f 100644
  #include <libavutil/imgutils.h>
  #include <libavutil/opt.h>
  #include <libswscale/swscale.h>
-@@ -591,6 +592,13 @@ static HRESULT color_convert_init(struct color_convert *impl)
+@@ -591,6 +592,15 @@ static HRESULT color_convert_init(struct color_convert *impl)
          goto failed;
      video_frame_init_aperture(&impl->output_frame, &impl->output_format);
  
 +#ifdef __arm64ec__
-+    /* Ember(10-03 compat2): ARM64EC 용 swscale NEON 이 NV12→RGB32 에서 세로 줄무늬를 만든다(msvproc 와 같은 수정). EMBER_SWS_CPU=1 이면 NEON. */
++    /* Ember perfpush2(10-03): 원인(arm64ec yuv2rgb_neon.S 의 compute_rgb 가 B 합을 읽기 전에 덮음)을 고쳐 NEON 을 다시 쓴다
++     * (swstest 456 조합이 윗물 aarch64 NEON 과 같음, 720p NV12→BGRA 1.63→0.17ms). EMBER_SWS_CPU=0 이면 예전처럼 C 경로. */
++    /* Ember(10-03 compat2): ARM64EC 용 swscale NEON 이 NV12→RGB32 에서 세로 줄무늬를 만든다(msvproc 와 같은 옛 우회, perfpush2 로 대체) */
 +    {
 +        char buf[8];
-+        if (!GetEnvironmentVariableA("EMBER_SWS_CPU", buf, sizeof(buf)) || buf[0] != '1') av_force_cpu_flags(0);
++        if (GetEnvironmentVariableA("EMBER_SWS_CPU", buf, sizeof(buf)) && buf[0] == '0') av_force_cpu_flags(0);
 +    }
 +#endif
      av_opt_set(impl->context, "sws_flags", "neighbor", 0);

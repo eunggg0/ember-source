@@ -1,0 +1,18 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 82/95] dlls-wow64: Ember changes
+
+Base: CrossOver 26.3.0 FOSS sources/wine
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/wow64/process.c b/dlls/wow64/process.c
+index 9cfd77a..c4ba52e 100644
+--- a/dlls/wow64/process.c
++++ b/dlls/wow64/process.c
+@@ -968,6 +968,7 @@ NTSTATUS WINAPI wow64_NtSetInformationProcess( UINT *args )
+     case ProcessPowerThrottlingState:   /* PROCESS_POWER_THROTTLING_STATE */
+     case ProcessLeapSecondInformation:   /* PROCESS_LEAP_SECOND_INFO */
+     case ProcessWineGrantAdminToken:   /* NULL */
++    case ProcessWineSessionId:   /* ULONG */
+         return NtSetInformationProcess( handle, class, ptr, len );
+ 
+     case ProcessAccessToken: /* PROCESS_ACCESS_TOKEN */

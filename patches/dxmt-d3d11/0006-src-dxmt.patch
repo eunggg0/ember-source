@@ -273,7 +273,7 @@ index 3090b83..974ac78 100644
  
  } // namespace dxmt
 diff --git a/src/dxmt/dxmt_command_queue.cpp b/src/dxmt/dxmt_command_queue.cpp
-index 89ffc37..737cdda 100644
+index 89ffc37..135e68f 100644
 --- a/src/dxmt/dxmt_command_queue.cpp
 +++ b/src/dxmt/dxmt_command_queue.cpp
 @@ -1,3 +1,6 @@
@@ -283,8 +283,11 @@ index 89ffc37..737cdda 100644
  /*
   * Copyright 2026 Feifan He for CodeWeavers
   * Copyright 2026 Marc-Aurel Zent for CodeWeavers
-@@ -23,6 +26,11 @@
+@@ -21,8 +24,54 @@
+ #include "Metal.hpp"
+ #include "dxmt_statistics.hpp"
  #include "util_env.hpp"
++#include "ember_stoke_stats.hpp"
  #include "util_win32_compat.h"
  #include <atomic>
 +#include <thread>
@@ -292,10 +295,50 @@ index 89ffc37..737cdda 100644
 +#include "ember_pace_policy.hpp"
 +#include <chrono>
 +#include <cmath>
++
++namespace {
++/* timeraudit-1028: 정밀 잠. llvm-mingw libc++ 의 this_thread::sleep_until/sleep_for 는 Sleep(ms 올림)이라
++ * (__libcpp_thread_sleep_for: ms = ceil(ns/1e6)) 페이싱 잠이 0~1ms(평균 0.5ms) 늦었다 — dispalign 주석의 "ms 올림 포함 ~0.5ms".
++ * NtDelayExecution(100ns 단위)은 Ember ntdll 에서 kqueue NOTE_CRITICAL 정밀 잠(perfpush2)이라 기한 +0.03ms.
++ * EMBER_TIMER=0 또는 EMBER_D11_PRECISE_SLEEP=0 이면 예전대로(libc++). */
++using ember_delay_fn = LONG(WINAPI *)(BOOLEAN, PLARGE_INTEGER);
++ember_delay_fn
++emberPreciseDelayFn() {
++  static ember_delay_fn fn = [] {
++    // (stoke3 merged2) CRT getenv 는 GUI 게임에서 비어 있을 수 있어(presenter EMBER_FPS_LOG 주석) 윈도우 환경으로 읽는다
++    const std::string t = dxmt::env::getEnvVar("EMBER_TIMER");
++    const std::string d = dxmt::env::getEnvVar("EMBER_D11_PRECISE_SLEEP");
++    if ((!t.empty() && t[0] == '0') || (!d.empty() && d[0] == '0')) return (ember_delay_fn) nullptr;
++    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
++    return ntdll ? (ember_delay_fn)(void *)GetProcAddress(ntdll, "NtDelayExecution") : (ember_delay_fn) nullptr;
++  }();
++  return fn;
++}
++/* 정밀 잠을 지금 쓰나: 환경(EMBER_TIMER·EMBER_D11_PRECISE_SLEEP=0 이면 끝까지 끔) + C:\ember-d11.cfg 의 EMBER_D11_PRECISE_SLEEP(게임 중 0/1, 같은 장면 비교) */
++bool
++emberPreciseSleepActive() {
++  return emberPreciseDelayFn() != nullptr && dxmt::EmberD11Get(dxmt::kEmberD11PreciseSleep) != 0;
++}
++void
++emberSleepUntil(std::chrono::steady_clock::time_point due) {
++  ember_delay_fn delay = emberPreciseSleepActive() ? emberPreciseDelayFn() : nullptr;
++  if (!delay) {
++    std::this_thread::sleep_until(due);
++    return;
++  }
++  for (int i = 0; i < 64; i++) {   // 신호로 일찍 깨면 남은 만큼 다시(보통 1번)
++    const int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(due - std::chrono::steady_clock::now()).count();
++    if (ns <= 0) return;
++    LARGE_INTEGER li;
++    li.QuadPart = -std::max<int64_t>(1, (ns + 99) / 100);
++    delay(FALSE, &li);
++  }
++}
++} // namespace
  
  #define ASYNC_ENCODING 1
  
-@@ -61,6 +69,9 @@ CommandQueue::CommandQueue(WMT::Device device) :
+@@ -61,6 +110,9 @@ CommandQueue::CommandQueue(WMT::Device device) :
      chunk.reset();
    };
    event = device.newSharedEvent();
@@ -305,7 +348,7 @@ index 89ffc37..737cdda 100644
  
    std::string env = env::getEnvVar("DXMT_CAPTURE_FRAME");
  
-@@ -81,6 +92,12 @@ CommandQueue::~CommandQueue() {
+@@ -81,6 +133,12 @@ CommandQueue::~CommandQueue() {
    ready_for_commit.notify_one();
    SharedEventListener_destroy(shared_event_listener);
    encodeThread.join();
@@ -318,7 +361,7 @@ index 89ffc37..737cdda 100644
    finishThread.join();
    for (unsigned i = 0; i < kCommandChunkCount; i++) {
      auto &chunk = chunks[i];
-@@ -109,6 +126,8 @@ CommandQueue::CommitCurrentChunk() {
+@@ -109,6 +167,8 @@ CommandQueue::CommitCurrentChunk() {
    chunk_ongoing.fetch_add(1, std::memory_order_relaxed);
    auto t1 = clock::now();
    statistics.commit_interval += (t1 - t0);
@@ -327,7 +370,7 @@ index 89ffc37..737cdda 100644
  
  #else
    CommitChunkInternal(chunk, ready_for_encode.fetch_add(1, std::memory_order_relaxed));
-@@ -157,8 +176,184 @@ CommandQueue::CommitChunkInternal(CommandChunk &chunk, uint64_t seq) {
+@@ -157,8 +217,199 @@ CommandQueue::CommitChunkInternal(CommandChunk &chunk, uint64_t seq) {
    if (chunk.resource_initializer_event_id) {
      cmdbuf.encodeWaitForEvent(initializer.event(), chunk.resource_initializer_event_id);
    }
@@ -390,9 +433,23 @@ index 89ffc37..737cdda 100644
 +        if (d2 > due && d2 < clock::now() + slot * 2) due = d2;
 +      }
 +    }
++    // (stoke3 merged2, 타이머 감사 4번) 보간 끔 상한의 '최소 간격 표시' 경로(직접 표시 아님 = PACE 0·자동 꺼짐·페이서 정보 없음):
++    // 위 식 '직전 커밋 + 칸 − min(칸/4, 2ms)' 의 실제 간격 = 칸 − 여유 + 잠 늦음. 옛 잠(ms 올림, 평균 +0.5ms)에서도 칸보다 짧았고
++    // 정밀 잠(+0.02ms)이면 60 상한이 ~68fps 로 나간다(perfpush2 의 보간 경로 함정과 같은 꼴, 표시는 Metal 최소 간격 칸−2ms 라 막지 못함).
++    // 정밀 잠이 켜져 있으면 보간 경로처럼 이상적 시각 격자(직전 목표 + 칸)를 쓴다 → 평균 간격 = 칸, 일찍 깨우기 여유는 위상으로만 남는다.
++    // 격자가 식보다 늦을 때만 쓰고(게임이 상한보다 느리면 식이 이겨 격자가 다시 맞춰짐), 반 칸 넘게 앞서 있으면 버린다.
++    // 직접 표시(d11pace)는 dispalign 이 잰 늦음(oversleep EMA)을 빼므로 정밀 잠에 스스로 맞고, 그 경로 격자는 CX 에서 20fps 갇힘이 있어 손대지 않는다.
++    // 끄기: C:\ember-d11.cfg EMBER_D11_CAP_GRID=0
++    static thread_local clock::time_point cap_grid_ {};
++    static thread_local clock::duration cap_slot_ {};
++    const bool cap_grid_on = !pending.paced && !direct_cap && emberPreciseSleepActive() && EmberD11Get(kEmberD11CapGrid) != 0;
++    if (cap_grid_on && cap_grid_.time_since_epoch().count() && cap_slot_ == slot) {
++      auto g = cap_grid_ + slot;
++      if (g > due && g < base + slot + slot / 2) due = g;
++    }
 +    if (due > clock::now()) {
 +      EmberWaitScope ws(kWaitCommitGrid);
-+      std::this_thread::sleep_until(due);
++      emberSleepUntil(due);
 +      if (direct_cap) {
 +        double os = std::chrono::duration<double>(clock::now() - due).count();
 +        oversleep_ += (std::clamp(os, 0.0, 0.008) - oversleep_) * 0.1;
@@ -400,6 +457,7 @@ index 89ffc37..737cdda 100644
 +      }
 +    }
 +    if (pending.paced) { pace_grid_ = due; pace_slot_ = slot; } else pace_grid_ = {};
++    if (cap_grid_on) { cap_grid_ = due; cap_slot_ = slot; } else cap_grid_ = {};
 +    spark_due = due;
 +  }
 +  chunk.ember_gen_ = pending.present ? (((pending.ring && pending.gen_slot >= 0) || pending.deferred.handle) ? 1 : 0) : -1;
@@ -512,7 +570,7 @@ index 89ffc37..737cdda 100644
  
    ready_for_commit.fetch_add(1, std::memory_order_release);
    ready_for_commit.notify_one();
-@@ -184,6 +379,127 @@ CommandQueue::EncodingThread() {
+@@ -184,6 +435,127 @@ CommandQueue::EncodingThread() {
    return 0;
  }
  
@@ -640,7 +698,7 @@ index 89ffc37..737cdda 100644
  uint32_t
  CommandQueue::WaitForFinishThread() {
    env::setThreadName("dxmt-finish-thread");
-@@ -206,11 +522,143 @@ CommandQueue::WaitForFinishThread() {
+@@ -206,11 +578,159 @@ CommandQueue::WaitForFinishThread() {
        }
      }
  
@@ -728,6 +786,22 @@ index 89ffc37..737cdda 100644
 +      ember_gpu_util_.store(0, std::memory_order_relaxed);
 +      pa_tracking_ = false;
 +    }
++    if (emberstoke::enabled()) {
++      // Ember Stoke 지표(stoke3-1028): 프레임 GPU 합집합 G_total, 표본 프레임의 표시 경로 몫 U, 30초마다 <exe>.json.
++      // 완료 스레드는 큐마다 하나 — 상태를 thread_local 로 두어 CommandQueue 배치를 바꾸지 않는다.
++      static thread_local emberstoke::FinishState stoke_st;
++      for (auto &producer : chunk.ember_hold_producers)
++        emberstoke::noteCmdbuf(stoke_st, producer.gpuStartTime(), producer.gpuEndTime());
++      emberstoke::noteCmdbuf(stoke_st, chunk.attached_cmdbuf.gpuStartTime(), chunk.attached_cmdbuf.gpuEndTime());
++      if (chunk.ember_stoke_tail && chunk.ember_stoke_prefix) {
++        // 뒤 버퍼는 게임 펜스를 기다리며 일찍 '시작'할 수 있다 → 시작 = max(뒤 시작, 앞 끝). 끝 = 이 청크의 마지막 버퍼 끝.
++        uint64_t ts = chunk.ember_stoke_tail.gpuStartTime(), pe = chunk.ember_stoke_prefix.gpuEndTime();
++        uint64_t te = chunk.attached_cmdbuf.gpuEndTime();
++        uint64_t from = std::max(ts, pe);
++        if (ts && pe && te > from) emberstoke::noteEmberShare(stoke_st, (double)(te - from) * 1e-6);
++      }
++      if (chunk.signal_frame_latency_fence_ != ~0ull) emberstoke::frameDone(stoke_st);
++    }
 +    {
 +      // Ember(fgguard): GPU 시간 로그(EMBER_FG_LOG=1)
 +      static int gpu_log = -1;
@@ -784,7 +858,7 @@ index 89ffc37..737cdda 100644
      chunk_ongoing.fetch_sub(1, std::memory_order_release);
      chunk_ongoing.notify_one();
  
-@@ -235,3 +683,697 @@ void CommandQueue::Retain(uint64_t seq, Allocation* allocation) {
+@@ -235,3 +755,697 @@ void CommandQueue::Retain(uint64_t seq, Allocation* allocation) {
  };
  
  } // namespace dxmt
@@ -944,7 +1018,7 @@ index 89ffc37..737cdda 100644
 +  }
 +  if (hold > 0) {
 +    pace_stat_.held++;
-+    std::this_thread::sleep_until(t_props + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(hold)));
++    emberSleepUntil(t_props + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(hold)));
 +  }
 +  auto t_call = clock::now();
 +  // Ember(dispalign): 커밋 스레드에 알림 — 이 항목을 지금 냈다, 커밋→GPU 완료는 이만큼
@@ -1114,7 +1188,7 @@ index 89ffc37..737cdda 100644
 +            // CPU 로 (target - 주기 - lead) 까지 잔 뒤 즉시 표시. 비트1 = 즉시 표시, time 은 기대 칸(정렬 통계용)
 +            double sleep_s = target - period - lead - now_u;
 +            if (sleep_s > 0)
-+              std::this_thread::sleep_until(t_call + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(sleep_s)));
++              emberSleepUntil(t_call + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(sleep_s)));
 +            // 실험 EMBER_FG_PHASE_MIN=<ms>: 즉시 표시 대신 afterMinimumDuration(ms) — 표시 파이프라인 차이 확인
 +            static const uint64_t min_us = [] { const char *e = std::getenv("EMBER_FG_PHASE_MIN"); return e ? (uint64_t)(std::atof(e) * 1000.0) : 0ull; }();
 +            follow.presentDrawableAtTime(drawable, target, flags | 2 | (min_us << 8));
@@ -1483,7 +1557,7 @@ index 89ffc37..737cdda 100644
 +}
 +} // namespace dxmt
 diff --git a/src/dxmt/dxmt_command_queue.hpp b/src/dxmt/dxmt_command_queue.hpp
-index e109af7..2c52850 100644
+index e109af7..4fea3e4 100644
 --- a/src/dxmt/dxmt_command_queue.hpp
 +++ b/src/dxmt/dxmt_command_queue.hpp
 @@ -18,8 +18,11 @@
@@ -1517,7 +1591,7 @@ index e109af7..2c52850 100644
      enc.$$setEncodingContext(
        chunk_id,
        frame_
-@@ -114,20 +120,31 @@ public:
+@@ -114,20 +120,33 @@ public:
      auto& statistics = enc.currentFrameStatistics();
      auto t0 = clock::now();
      list_enc.execute(enc);
@@ -1525,6 +1599,7 @@ index e109af7..2c52850 100644
      auto t1 = clock::now();
      readback = enc.flushCommands(cmdbuf, chunk_id, chunk_event_id);
 +    ember_hold_producers = enc.emberTakeHoldProducers();
++    enc.emberTakeStokeSplit(ember_stoke_prefix, ember_stoke_tail);
      auto t2 = clock::now();
      statistics.encode_prepare_interval += (t1 - t0);
      statistics.encode_flush_interval += (t2 - t1);
@@ -1545,12 +1620,13 @@ index e109af7..2c52850 100644
    QueryReadbacks readback;
 +  std::mutex ember_rb_mu;   // spinless-1019: 가림 결과 반영(완료 스레드 ↔ 게임 스레드 앞당김)
 +  std::vector<WMT::Reference<WMT::CommandBuffer>> ember_hold_producers;
++  WMT::Reference<WMT::CommandBuffer> ember_stoke_prefix, ember_stoke_tail;   // stoke3-1028: 표본 프레임 나눔(지표용)
    uint64_t resource_initializer_event_id;
 +  std::vector<ArgumentEncodingContext::EmberSplitCmdbuf> ember_splits; // Ember(d11prof=2)
  
  private:
    CommandQueue *queue;
-@@ -144,10 +161,13 @@ public:
+@@ -144,10 +163,15 @@ public:
    void
    reset() noexcept {
      signal_frame_latency_fence_ = ~0ull;
@@ -1560,11 +1636,13 @@ index e109af7..2c52850 100644
      ref_tracker.clear();
      attached_cmdbuf = nullptr;
 +    ember_hold_producers.clear();
++    ember_stoke_prefix = nullptr;
++    ember_stoke_tail = nullptr;
 +    ember_splits.clear();
    }
  };
  
-@@ -192,8 +212,118 @@ private:
+@@ -192,8 +216,118 @@ private:
    RingBumpState<HostBufferBlockAllocator, kCommandChunkCPUHeapSize, dxmt::null_mutex> cpu_command_allocator;
    RingBumpState<HostBufferBlockAllocator, 0x1000 /* 4kB */> reftracker_storage_allocator;
    CaptureState capture_state;
@@ -1683,7 +1761,7 @@ index e109af7..2c52850 100644
    InternalCommandLibrary cmd_library;
    ArgumentEncodingContext argument_encoding_ctx;
    WMT::Reference<WMT::SharedEvent> event;
-@@ -217,6 +347,21 @@ public:
+@@ -217,6 +351,21 @@ public:
      return cpu_coherent.signaledValue();
    };
  
@@ -1705,7 +1783,7 @@ index e109af7..2c52850 100644
    uint64_t
    CurrentSeqId() {
      return ready_for_encode.load(std::memory_order_relaxed);
-@@ -263,16 +408,77 @@ public:
+@@ -263,16 +412,77 @@ public:
      frame_count++;
      statistics.at(frame_count).reset();
      // After present N-th frame (N starts from 1), wait for (N - max_latency)-th frame to finish rendering 
@@ -1786,7 +1864,7 @@ index e109af7..2c52850 100644
  
    void SetMaxLatency(uint32_t value) { max_latency_ = value; };
  
-@@ -315,4 +521,4 @@ public:
+@@ -315,4 +525,4 @@ public:
    void Retain(uint64_t seq, Allocation *allocation);
  };
  
@@ -1794,7 +1872,7 @@ index e109af7..2c52850 100644
 \ No newline at end of file
 +} // namespace dxmt
 diff --git a/src/dxmt/dxmt_context.cpp b/src/dxmt/dxmt_context.cpp
-index bfa03d1..3175f28 100644
+index bfa03d1..180fe5c 100644
 --- a/src/dxmt/dxmt_context.cpp
 +++ b/src/dxmt/dxmt_context.cpp
 @@ -1,3 +1,4 @@
@@ -1802,7 +1880,15 @@ index bfa03d1..3175f28 100644
  /*
   * Copyright 2026 Feifan He for CodeWeavers
   *
-@@ -25,11 +26,14 @@
+@@ -17,6 +18,7 @@
+  */
+ 
+ #include "dxmt_context.hpp"
++#include "ember_stoke_stats.hpp"
+ #include "Metal.hpp"
+ #include "dxmt_command_queue.hpp"
+ #include "dxmt_deptrack.hpp"
+@@ -25,11 +27,14 @@
  #include "dxmt_presenter.hpp"
  #include "wsi_platform.hpp"
  #include <cstdint>
@@ -1817,7 +1903,7 @@ index bfa03d1..3175f28 100644
      lib(lib),
      emulated_cmd(device, lib, *this),
      clear_rt_cmd(device, *this),
-@@ -38,7 +42,6 @@ ArgumentEncodingContext::ArgumentEncodingContext(CommandQueue &queue, WMT::Devic
+@@ -38,7 +43,6 @@ ArgumentEncodingContext::ArgumentEncodingContext(CommandQueue &queue, WMT::Devic
      mv_scale_cmd(device, lib, *this),
      tile_barrier_cmd(device, lib, *this),
      timestamp_state_(device),
@@ -1825,7 +1911,7 @@ index bfa03d1..3175f28 100644
      queue_(queue) {
    dummy_sampler_info_.support_argument_buffers = true;
    dummy_sampler_info_.border_color = WMTSamplerBorderColorTransparentBlack;
-@@ -357,6 +360,18 @@ ArgumentEncodingContext::encodeShaderResources(
+@@ -357,6 +361,18 @@ ArgumentEncodingContext::encodeShaderResources(
            auto viewIdChecked = srv.texture->checkViewUseArray(srv.viewId, arg.Flags & MTL_SM50_SHADER_ARGUMENT_TEXTURE_ARRAY);
            encoded_buffer[arg.StructurePtrOffset] =
                access<stage>(srv.texture, viewIdChecked, ResourceAccess::Read).gpuResourceID;
@@ -1844,7 +1930,7 @@ index bfa03d1..3175f28 100644
            encoded_buffer[arg.StructurePtrOffset + 1] = TextureMetadata(srv.texture->arrayLength(viewIdChecked), 0);
            makeResident<stage, kind>(srv.texture.ptr(), viewIdChecked);
          } else {
-@@ -476,8 +491,8 @@ ArgumentEncodingContext::clearColor(Rc<Texture> &&texture, uint64_t viewId, unsi
+@@ -476,8 +492,8 @@ ArgumentEncodingContext::clearColor(Rc<Texture> &&texture, uint64_t viewId, unsi
    encoder_info->color = color;
    SanitizeRTVClearColor(texture->pixelFormat(viewId), encoder_info->color);
    encoder_info->array_length = arrayLength;
@@ -1855,7 +1941,7 @@ index bfa03d1..3175f28 100644
    encoder_current = encoder_info;
  
    encoder_info->attachment = access(texture, viewId, ResourceAccess::Write);
-@@ -500,8 +515,8 @@ ArgumentEncodingContext::clearDepthStencil(
+@@ -500,8 +516,8 @@ ArgumentEncodingContext::clearDepthStencil(
    encoder_info->clear_dsv = flag & DepthStencilPlanarFlags(texture->pixelFormat());
    encoder_info->depth_stencil = {depth, stencil};
    encoder_info->array_length = arrayLength;
@@ -1866,28 +1952,30 @@ index bfa03d1..3175f28 100644
    encoder_current = encoder_info;
  
    encoder_info->attachment = access(texture, viewId, ResourceAccess::Write);
-@@ -530,7 +545,8 @@ ArgumentEncodingContext::resolveTexture(
+@@ -530,7 +546,54 @@ ArgumentEncodingContext::resolveTexture(
  };
  
  void
 -ArgumentEncodingContext::present(Rc<Texture> &texture, Rc<Presenter> &presenter, double after, DXMTPresentMetadata metadata) {
 +ArgumentEncodingContext::present(Rc<Texture> &texture, Rc<Presenter> &presenter, double after, DXMTPresentMetadata metadata,
 +                                 std::chrono::steady_clock::time_point handoff, double pace) {
-   assert(!encoder_current);
-   auto encoder_info = allocate<PresentData>();
-   encoder_info->type = EncoderType::Present;
-@@ -540,12 +556,38 @@ ArgumentEncodingContext::present(Rc<Texture> &texture, Rc<Presenter> &presenter,
-   encoder_info->presenter = presenter;
-   encoder_info->after = after;
-   encoder_info->metadata = metadata;
++  assert(!encoder_current);
++  auto encoder_info = allocate<PresentData>();
++  encoder_info->type = EncoderType::Present;
++  encoder_info->id = nextEncoderId();
++  encoder_info->fence_wait = {};
++  encoder_info->fence_update = {encoder_info->id};
++  encoder_info->presenter = presenter;
++  encoder_info->after = after;
++  encoder_info->metadata = metadata;
 +  encoder_info->handoff = handoff;
 +  encoder_info->pace = pace;
- 
-   encoder_current = encoder_info;
-   encoder_info->backbuffer = access(texture, texture->fullView, ResourceAccess::Read).texture;
-   endPass();
- }
- 
++
++  encoder_current = encoder_info;
++  encoder_info->backbuffer = access(texture, texture->fullView, ResourceAccess::Read).texture;
++  endPass();
++}
++
 +void
 +ArgumentEncodingContext::presentUpscaled(Rc<Texture> &texture, Rc<Texture> &upscaled, Rc<SpatialScaler> &scaler,
 +                                         Rc<Presenter> &presenter, double after, DXMTPresentMetadata metadata,
@@ -1912,10 +2000,63 @@ index bfa03d1..3175f28 100644
 +  endPass();
 +}
 +
- void
- ArgumentEncodingContext::upscale(Rc<Texture> &texture, Rc<Texture> &upscaled, Rc<SpatialScaler> &scaler) {
++void
++ArgumentEncodingContext::presentStokeDirect(Rc<Texture> &texture, Rc<Texture> &upscaled, Rc<SpatialScaler> &scaler,
++                                            Rc<EmberLift> &lift, uint64_t lift_frame, uint32_t lift_flags,
++                                            Rc<Presenter> &presenter, double after, DXMTPresentMetadata metadata,
++                                            std::chrono::steady_clock::time_point handoff, double pace) {
    assert(!encoder_current);
-@@ -856,12 +898,28 @@ ArgumentEncodingContext::$$setEncodingContext(uint64_t seq_id, uint64_t frame_id
+   auto encoder_info = allocate<PresentData>();
+   encoder_info->type = EncoderType::Present;
+@@ -540,9 +603,18 @@ ArgumentEncodingContext::present(Rc<Texture> &texture, Rc<Presenter> &presenter,
+   encoder_info->presenter = presenter;
+   encoder_info->after = after;
+   encoder_info->metadata = metadata;
++  encoder_info->handoff = handoff;
++  encoder_info->pace = pace;
++  encoder_info->scaler = scaler;
++  encoder_info->lift = lift;
++  encoder_info->lift_frame = lift_frame;
++  encoder_info->lift_flags = lift_flags;
++  encoder_info->direct = lift ? 2u : 1u;
+ 
+   encoder_current = encoder_info;
+   encoder_info->backbuffer = access(texture, texture->fullView, ResourceAccess::Read).texture;
++  // 예전 길로 돌아가면 upscaled 를 쓴다 — 앞선 읽기(지난 표시)를 fence_wait 로 기다린다(presentUpscaled 와 같음)
++  encoder_info->upscaled = access(upscaled, upscaled->fullView, ResourceAccess::Write).texture;
+   endPass();
+ }
+ 
+@@ -562,6 +634,28 @@ ArgumentEncodingContext::upscale(Rc<Texture> &texture, Rc<Texture> &upscaled, Rc
+   endPass();
+ }
+ 
++void
++ArgumentEncodingContext::liftUpscale(Rc<Texture> &texture, Rc<Texture> &upscaled, Rc<EmberLift> &lift,
++                                     Rc<SpatialScaler> &fallback, uint64_t frame_no, uint32_t flags,
++                                     Rc<Presenter> &presenter) {
++  assert(!encoder_current);
++  auto encoder_info = allocate<EmberLiftData>();
++  encoder_info->type = EncoderType::EmberLift;
++  encoder_info->id = nextEncoderId();
++  encoder_info->fence_wait = {};
++  encoder_info->fence_update = {encoder_info->id};
++  encoder_info->lift = lift;
++  encoder_info->fallback = fallback;
++  encoder_info->frame_no = frame_no;
++  encoder_info->flags = flags;
++  encoder_info->presenter = presenter;
++
++  encoder_current = encoder_info;
++  encoder_info->backbuffer = access(texture, texture->fullView, ResourceAccess::Read).texture;
++  encoder_info->upscaled = access(upscaled, upscaled->fullView, ResourceAccess::Write).texture;
++  endPass();
++}
++
+ void
+ ArgumentEncodingContext::upscaleTemporal(
+     Rc<Texture> &input, Rc<Texture> &output, Rc<Texture> &depth, Rc<Texture> &motion_vector, TextureViewKey mvViewId,
+@@ -856,12 +950,28 @@ ArgumentEncodingContext::$$setEncodingContext(uint64_t seq_id, uint64_t frame_id
    cpu_buffer_offset_ = 0;
    seq_id_ = seq_id;
    frame_id_ = frame_id;
@@ -1945,7 +2086,7 @@ index bfa03d1..3175f28 100644
    assert(!encoder_current);
  
    unsigned encoder_count = encoder_count_;
-@@ -894,6 +952,78 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+@@ -894,6 +1004,78 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
      }
    }
  
@@ -2024,7 +2165,7 @@ index bfa03d1..3175f28 100644
    QueryReadbacks readbacks{};
  
    if (auto count = vro_state_.reset()) {
-@@ -905,8 +1035,37 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+@@ -905,8 +1087,57 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
  
    readbacks.timestamp = timestamp_state_.flush(cmdbuf);
  
@@ -2033,6 +2174,7 @@ index bfa03d1..3175f28 100644
 +  WMT::CommandBuffer ember_main_cmdbuf = cmdbuf;
 +  bool ember_splitting = ember_prof_level_ >= 2;
 +  bool ember_first_split = true;
++  bool ember_stoke_checked = false;   // stoke3-1028: 이 청크에서 표시 경로 인코더를 이미 만났나
 +
    while (encoder_index) {
      auto current = encoders[encoder_count - encoder_index];
@@ -2059,10 +2201,29 @@ index bfa03d1..3175f28 100644
 +        break;
 +      }
 +    }
++    // Ember Stoke 지표(stoke3-1028, ember_stoke_stats.hpp): 표본 프레임(32 에 하나)이면 첫 표시 경로 인코더 앞에서 명령 버퍼를
++    // 나눈다(앞 = 게임, 뒤 = 업스케일·Lift·보간·표시). 완료 스레드가 뒤쪽 GPU 구간으로 Ember 몫 U 를 잰다.
++    // 앞 버퍼는 보간 HOLD 와 같은 자리(ember_hold_producers_)에 넣어 완료 스레드가 기다리고 GPU 시간에 넣는다.
++    if (!ember_stoke_checked && ember_prof_level_ < 2 &&
++        (current->type == EncoderType::SpatialUpscale || current->type == EncoderType::EmberLift ||
++         current->type == EncoderType::TemporalUpscale || current->type == EncoderType::Present)) {
++      ember_stoke_checked = true;
++      if (emberstoke::sampleThisFrame()) {
++        WMT::Reference<WMT::CommandBuffer> next = queue_.emberCommandQueue().commandBuffer();
++        if (next) {
++          ember_hold_producers_.push_back(output_cmdbuf);
++          ember_stoke_prefix_ = output_cmdbuf;
++          cmdbuf.commit();
++          output_cmdbuf = std::move(next);
++          cmdbuf = output_cmdbuf;
++          ember_stoke_tail_ = output_cmdbuf;
++        }
++      }
++    }
      switch (current->type) {
      case EncoderType::Render: {
        auto data = static_cast<RenderEncoderData *>(current);
-@@ -963,6 +1122,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+@@ -963,6 +1194,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
        }
        auto gpu_buffer_ = data->allocated_argbuf;
        auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
@@ -2071,7 +2232,7 @@ index bfa03d1..3175f28 100644
        data->fence_wait.forEach(
            data->fence_wait_vertex, // if a fence is waited pre-raster, no need to wait again at fragment
            [&](auto id) { encoder.waitForFence(fence_pool_[id], WMTRenderStagePreRaster); },
-@@ -1058,6 +1219,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+@@ -1058,6 +1291,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
      case EncoderType::Compute: {
        auto data = static_cast<ComputeEncoderData *>(current);
        auto encoder = cmdbuf.computeCommandEncoder(true);
@@ -2080,7 +2241,7 @@ index bfa03d1..3175f28 100644
        data->fence_wait.forEach([&](auto id) { encoder.waitForFence(fence_pool_[id]); });
        struct wmtcmd_compute_setbuffer setcmd;
        setcmd.type = WMTComputeCommandSetBuffer;
-@@ -1077,6 +1240,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+@@ -1077,6 +1312,8 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
      case EncoderType::Blit: {
        auto data = static_cast<BlitEncoderData *>(current);
        auto encoder = cmdbuf.blitCommandEncoder();
@@ -2089,14 +2250,34 @@ index bfa03d1..3175f28 100644
        data->fence_wait.forEach([&](auto id) { encoder.waitForFence(fence_pool_[id]); });
        encoder.encodeCommands(&data->cmd_head);
        data->fence_update.forEach([&](auto id) { encoder.updateFence(fence_pool_[id]); });
-@@ -1087,6 +1252,51 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+@@ -1087,6 +1324,72 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
      case EncoderType::Present: {
        auto data = static_cast<PresentData *>(current);
        auto t0 = clock::now();
 +      data->presenter->setDisplayInterval(data->after);
 +      // Ember: MetalFX 앞 보간 — presenter 가 부르는 업스케일(SpatialUpscale 경우와 같은 펜스 순서)
 +      Presenter::UpscaleFn upscale_fn;
-+      if (data->scaler && data->upscaled) {
++      if (data->lift && data->upscaled) {
++        // stoke3-1028: Lift 를 presenter 안에서(바로 쓰기면 dst = 드로어블, 아니면 upscaled). 펜스 순서는 EmberLift 인코더와 같다.
++        upscale_fn = [&](WMT::CommandBuffer cb, WMT::Texture src, WMT::Texture dst, WMT::Fence wait, WMT::Fence done) {
++          WMT::Fence lift_fence = data->lift->fence();
++          auto begin_lift = cb.blitCommandEncoder();
++          begin_lift.setLabel(WMT::String::string("BeginEmberLift", WMTUTF8StringEncoding));
++          data->fence_wait.forEach([&](auto id) { begin_lift.waitForFence(fence_pool_[id]); });
++          if (wait) begin_lift.waitForFence(wait);
++          begin_lift.updateFence(lift_fence);
++          begin_lift.endEncoding();
++          bool ok = !data->lift->failed() && data->lift->encode(cb, src, dst, data->lift_frame, data->lift_flags);
++          // 못 하면 MetalFX 공간 — 그 출력 형식이 dst 와 같을 때만(드로어블 형식이 다르면 이번 한 장은 비고, 다음부터 스왑체인이 MetalFX 바로 쓰기로)
++          if (!ok && data->scaler && dst.pixelFormat() == data->upscaled.pixelFormat())
++            cb.encodeSpatialScale(data->scaler->scaler(), src, dst, lift_fence);
++          auto end_lift = cb.blitCommandEncoder();
++          end_lift.setLabel(WMT::String::string("EndEmberLift", WMTUTF8StringEncoding));
++          end_lift.waitForFence(lift_fence);
++          end_lift.updateFence(done);
++          end_lift.endEncoding();
++        };
++      } else if (data->scaler && data->upscaled) {
 +        upscale_fn = [&](WMT::CommandBuffer cb, WMT::Texture src, WMT::Texture dst, WMT::Fence wait, WMT::Fence done) {
 +          auto begin_scaler = cb.blitCommandEncoder();
 +          begin_scaler.setLabel(WMT::String::string("BeginScaler", WMTUTF8StringEncoding));
@@ -2138,10 +2319,11 @@ index bfa03d1..3175f28 100644
 +        cmdbuf = output_cmdbuf;
 +        return cmdbuf;
 +      };
++      data->presenter->setStokeDirect(data->direct);   // stoke3-1028: 0 이면 예전 길
        auto drawable = data->presenter->encodeCommands(
            cmdbuf, data->backbuffer, data->metadata,
            [&](WMT::RenderCommandEncoder encoder) {
-@@ -1094,14 +1304,71 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+@@ -1094,14 +1397,71 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
            },
            [&](WMT::RenderCommandEncoder encoder) {
              data->fence_update.forEach([&](auto id) { encoder.updateFence(fence_pool_[id], WMTRenderStageFragment); });
@@ -2217,7 +2399,42 @@ index bfa03d1..3175f28 100644
        data->~PresentData();
        break;
      }
-@@ -1255,6 +1522,13 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+@@ -1180,6 +1540,34 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+       data->~SpatialUpscaleData();
+       break;
+     }
++    case EncoderType::EmberLift: {
++      auto data = static_cast<EmberLiftData *>(current);
++      WMT::Fence lift_fence = data->lift->fence();
++
++      auto begin_lift = cmdbuf.blitCommandEncoder();
++      begin_lift.setLabel(WMT::String::string("BeginEmberLift", WMTUTF8StringEncoding));
++      data->fence_wait.forEach([&](auto id) { begin_lift.waitForFence(fence_pool_[id]); });
++      begin_lift.updateFence(lift_fence);
++      begin_lift.endEncoding();
++
++      // 라이브러리가 lift_fence 를 기다리고 마지막 패스 뒤 갱신한다. 못 하면(없음·형식) 같은 fence 로 MetalFX 공간 업스케일.
++      const bool lifted = data->lift->encode(cmdbuf, data->backbuffer, data->upscaled, data->frame_no, data->flags);
++      if (!lifted && data->fallback)
++        cmdbuf.encodeSpatialScale(data->fallback->scaler(), data->backbuffer, data->upscaled, lift_fence);
++      // stoke2-1027: 같은 flush 의 바로 뒤 Present 인코더가 부를 보간에 Lift 블록 벡터장(이번 쌍)을 넘긴다. 쓰기는 lift_fence →
++      // 아래 끝 blit → Present 펜스 사슬보다 앞이라 보간 첫 패스(게임 펜스 대기) 뒤에서 읽힌다. 못 했으면 비운다.
++      if (data->presenter)
++        data->presenter->setFgGuide(lifted ? data->lift->guide() : emberfg::Guide{});
++
++      auto end_lift = cmdbuf.blitCommandEncoder();
++      end_lift.waitForFence(lift_fence);
++      end_lift.setLabel(WMT::String::string("EndEmberLift", WMTUTF8StringEncoding));
++      data->fence_update.forEach([&](auto id) { end_lift.updateFence(fence_pool_[id]); });
++      end_lift.endEncoding();
++
++      data->~EmberLiftData();
++      break;
++    }
+     case EncoderType::SignalEvent: {
+       auto data = static_cast<SignalEventData *>(current);
+       cmdbuf.encodeSignalEvent(data->event, data->value);
+@@ -1255,6 +1643,13 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
      default:
        break;
      }
@@ -2231,7 +2448,7 @@ index bfa03d1..3175f28 100644
      encoder_index--;
    }
    encoder_head.next = nullptr;
-@@ -1272,6 +1546,299 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+@@ -1272,6 +1667,299 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
    return readbacks;
  }
  
@@ -2531,7 +2748,7 @@ index bfa03d1..3175f28 100644
  DXMT_ENCODER_LIST_OP
  ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *latter) {
  
-@@ -1316,6 +1883,7 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
+@@ -1316,6 +2004,7 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
            clear->clear_dsv &= ~2;
          }
          if (clear->clear_dsv == 0) {
@@ -2539,7 +2756,7 @@ index bfa03d1..3175f28 100644
            render->fence_update.merge(clear->fence_update);
            render->fence_wait.merge(clear->fence_wait);
            render->fence_wait.subtract(clear->fence_update);
-@@ -1331,6 +1899,7 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
+@@ -1331,6 +2020,7 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
              attachment->load_action = WMTLoadActionClear;
              attachment->clear_color = clear->color;
            }
@@ -2547,7 +2764,7 @@ index bfa03d1..3175f28 100644
            render->fence_update.merge(clear->fence_update);
            render->fence_wait.merge(clear->fence_wait);
            render->fence_wait.subtract(clear->fence_update);
-@@ -1381,7 +1950,9 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
+@@ -1381,7 +2071,9 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
  
      if (isEncoderSignatureMatched(r0, r1) &&
          // can't merge if latter's vertex wait for former's fragment
@@ -2558,7 +2775,7 @@ index bfa03d1..3175f28 100644
        for (unsigned i = 0; i < r0->render_target_count; i++) {
          auto &a0 = r0->colors[i];
          auto &a1 = r1->colors[i];
-@@ -1419,6 +1990,8 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
+@@ -1419,6 +2111,8 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
        r1->ts_arg_marshal_tasks = std::move(r0->ts_arg_marshal_tasks);
        r1->use_visibility_result = r0->use_visibility_result || r1->use_visibility_result;
  
@@ -2567,7 +2784,7 @@ index bfa03d1..3175f28 100644
        r1->fence_update.merge(r0->fence_update);
        r1->fence_wait.merge(r0->fence_wait);
        r1->fence_wait.subtract(r0->fence_update);
-@@ -1434,6 +2007,10 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
+@@ -1434,6 +2128,10 @@ ArgumentEncodingContext::checkEncoderRelation(EncoderData *former, EncoderData *
        */
  
        currentFrameStatistics().render_pass_optimized++;
@@ -2578,7 +2795,7 @@ index bfa03d1..3175f28 100644
        r0->~RenderEncoderData();
        r0->next = nullptr;
        r0->type = EncoderType::Null;
-@@ -1471,13 +2048,22 @@ ArgumentEncodingContext::hasDataDependency(EncoderData *latter, EncoderData *for
+@@ -1471,13 +2169,22 @@ ArgumentEncodingContext::hasDataDependency(EncoderData *latter, EncoderData *for
  
  bool
  ArgumentEncodingContext::isEncoderSignatureMatched(RenderEncoderData *r0, RenderEncoderData *r1) {
@@ -2603,7 +2820,7 @@ index bfa03d1..3175f28 100644
    if (r0->render_target_array_length != r1->render_target_array_length)
      return false;
    /**
-@@ -1490,26 +2076,36 @@ ArgumentEncodingContext::isEncoderSignatureMatched(RenderEncoderData *r0, Render
+@@ -1490,26 +2197,36 @@ ArgumentEncodingContext::isEncoderSignatureMatched(RenderEncoderData *r0, Render
    if (r0->dsv_planar_flags & 1) {
      if (r0->depth.attachment != r1->depth.attachment)
        return false;
@@ -2648,7 +2865,7 @@ index bfa03d1..3175f28 100644
          return false;
      }
    }
-@@ -1811,4 +2407,389 @@ SimpleCommandContext<ArgumentEncodingContext>::draw(
+@@ -1811,4 +2528,389 @@ SimpleCommandContext<ArgumentEncodingContext>::draw(
    draw.instance_count = instance_count;
  }
  
@@ -3041,7 +3258,7 @@ index bfa03d1..3175f28 100644
 +
 +} // namespace dxmt
 diff --git a/src/dxmt/dxmt_context.hpp b/src/dxmt/dxmt_context.hpp
-index 1cd99ca..ae90c01 100644
+index 1cd99ca..8c3278d 100644
 --- a/src/dxmt/dxmt_context.hpp
 +++ b/src/dxmt/dxmt_context.hpp
 @@ -17,6 +17,7 @@
@@ -3052,7 +3269,7 @@ index 1cd99ca..ae90c01 100644
  
  #include "Metal.hpp"
  #include "dxmt_buffer.hpp"
-@@ -24,6 +25,7 @@
+@@ -24,11 +25,13 @@
  #include "dxmt_command_clear.hpp"
  #include "dxmt_counter.hpp"
  #include "dxmt_deptrack.hpp"
@@ -3060,7 +3277,21 @@ index 1cd99ca..ae90c01 100644
  #include "dxmt_occlusion_query.hpp"
  #include "dxmt_presenter.hpp"
  #include "dxmt_residency.hpp"
-@@ -210,6 +212,10 @@ struct RenderEncoderData : EncoderData {
+ #include "dxmt_sampler.hpp"
+ #include "dxmt_scaler.hpp"
++#include "ember_lift.hpp"
+ #include "dxmt_statistics.hpp"
+ #include "dxmt_texture.hpp"
+ #include "log/log.hpp"
+@@ -119,6 +122,7 @@ enum class EncoderType {
+   TemporalUpscale,
+   WaitForEvent,
+   SampleTimestamp,
++  EmberLift,   // Ember Lift(작업명): libEmberLift 로 화면 키우기, 못 하면 같은 자리에서 MetalFX 공간 업스케일
+ };
+ 
+ struct EncoderData {
+@@ -210,6 +214,10 @@ struct RenderEncoderData : EncoderData {
    bool use_emulated_so = 0;
    TileBarrierPSOKey tile_barrier_pso_key = {};
    WMT::RenderPipelineState last_pso = {};
@@ -3071,7 +3302,7 @@ index 1cd99ca..ae90c01 100644
  };
  
  struct ComputeEncoderData : EncoderData {
-@@ -218,11 +224,16 @@ struct ComputeEncoderData : EncoderData {
+@@ -218,11 +226,16 @@ struct ComputeEncoderData : EncoderData {
    WMT::Buffer allocated_argbuf;
    uint64_t allocated_argbuf_offset;
    void *allocated_argbuf_mapping;
@@ -3088,7 +3319,7 @@ index 1cd99ca..ae90c01 100644
  };
  
  struct ClearEncoderData : EncoderData {
-@@ -251,6 +262,11 @@ struct PresentData : EncoderData {
+@@ -251,6 +264,17 @@ struct PresentData : EncoderData {
    Rc<Presenter> presenter;
    double after;
    DXMTPresentMetadata metadata;
@@ -3097,10 +3328,33 @@ index 1cd99ca..ae90c01 100644
 +  // Ember: MetalFX 앞 보간(EMBER_FG_PRE_UPSCALE=1). 있으면 presenter 가 렌더 해상도에서 보간하고 표시할 프레임마다 키운다.
 +  WMT::Reference<WMT::Texture> upscaled;
 +  Rc<SpatialScaler> scaler;
++  // Ember Stoke 바로 쓰기(stoke3-1028, EMBER_D11_STOKE_DIRECT): 보간 끔에서도 presenter 가 키우기를 맡아 드로어블에 바로 쓴다.
++  // lift 가 있으면 Lift 로, 없으면 presenter 의 MetalFX(드로어블 형식)로. direct = 0 이면 예전처럼(presentUpscaled = 보간 앞 키우기).
++  Rc<EmberLift> lift;
++  uint64_t lift_frame = 0;
++  uint32_t lift_flags = 0;
++  uint32_t direct = 0;
  };
  
  struct SpatialUpscaleData : EncoderData {
-@@ -368,6 +384,7 @@ public:
+@@ -259,6 +283,16 @@ struct SpatialUpscaleData : EncoderData {
+   Rc<SpatialScaler> scaler;
+ };
+ 
++struct EmberLiftData : EncoderData {
++  WMT::Reference<WMT::Texture> backbuffer;
++  WMT::Reference<WMT::Texture> upscaled;
++  Rc<EmberLift> lift;
++  Rc<SpatialScaler> fallback;
++  Rc<Presenter> presenter;   // stoke2-1027: 이 Present 의 보간에 Lift 벡터장을 넘길 곳(없으면 넘기지 않음)
++  uint64_t frame_no;
++  uint32_t flags;
++};
++
+ struct SignalEventData : EncoderData {
+   WMT::Reference<WMT::Event> event;
+   uint64_t value;
+@@ -368,6 +402,7 @@ public:
    template<PipelineStage stage = PipelineStage::Compute>
    WMT::Texture
    access(Rc<Texture> const &texture, unsigned level, unsigned slice, int flags) {
@@ -3108,7 +3362,7 @@ index 1cd99ca..ae90c01 100644
      auto allocation = texture->current();
      retainAllocation(allocation);
      if (!allocation->flags().test(TextureAllocationFlag::GpuReadonly)) {
-@@ -385,6 +402,7 @@ public:
+@@ -385,6 +420,7 @@ public:
    TextureView &
    access(Rc<Texture> const &texture, uint64_t viewId, int flags) {
      assert(viewId);
@@ -3116,7 +3370,7 @@ index 1cd99ca..ae90c01 100644
      auto allocation = texture->current();
      retainAllocation(allocation);
      auto &view = texture->view(viewId, allocation);
-@@ -665,10 +683,16 @@ public:
+@@ -665,10 +701,26 @@ public:
      return (new (allocate_cpu_heap(sizeof(T), alignof(T))) T());
    };
  
@@ -3131,10 +3385,20 @@ index 1cd99ca..ae90c01 100644
 +                       double after, DXMTPresentMetadata metadata,
 +                       std::chrono::steady_clock::time_point handoff = {}, double pace = -1);
 +
++  // Ember Stoke 바로 쓰기(stoke3-1028): 키우기를 표시 안에서 드로어블로 바로(lift 가 비었으면 MetalFX). 조건이 안 맞으면
++  // presenter 가 예전 길(upscaled 에 키운 뒤 표시 패스)로 돌아간다 — 그때 lift 가 있으면 Lift 로 upscaled 를 채운다.
++  void presentStokeDirect(Rc<Texture> &texture, Rc<Texture> &upscaled, Rc<SpatialScaler> &scaler, Rc<EmberLift> &lift,
++                          uint64_t lift_frame, uint32_t lift_flags, Rc<Presenter> &presenter, double after,
++                          DXMTPresentMetadata metadata, std::chrono::steady_clock::time_point handoff = {}, double pace = -1);
++
++  // Ember Lift(작업명): backbuffer → upscaled 를 libEmberLift 로(광류 시간 업스케일). 라이브러리가 못 하면 fallback(공간)으로.
++  void liftUpscale(Rc<Texture> &texture, Rc<Texture> &upscaled, Rc<EmberLift> &lift, Rc<SpatialScaler> &fallback,
++                   uint64_t frame_no, uint32_t flags, Rc<Presenter> &presenter);
++
    void upscaleTemporal(
        Rc<Texture> &input, Rc<Texture> &output, Rc<Texture> &depth, Rc<Texture> &motion_vector, TextureViewKey mvViewId,
        Rc<Texture> &exposure, Rc<TemporalScaler> &scaler, const WMTFXTemporalScalerProps &props
-@@ -769,7 +793,35 @@ public:
+@@ -769,7 +821,35 @@ public:
    
    AllocatedTempBufferSlice allocateTempBuffer1(size_t size, size_t alignment);
  
@@ -3171,7 +3435,7 @@ index 1cd99ca..ae90c01 100644
  
    uint64_t currentSeqId() {return seq_id_;}
  
-@@ -826,9 +878,83 @@ public:
+@@ -826,9 +906,88 @@ public:
    ArgumentEncodingContext(CommandQueue &queue, WMT::Device device, InternalCommandLibrary &lib);
    ~ArgumentEncodingContext();
  
@@ -3191,6 +3455,11 @@ index 1cd99ca..ae90c01 100644
 +  }
 +  std::vector<WMT::Reference<WMT::CommandBuffer>> emberTakeHoldProducers() {
 +    return std::move(ember_hold_producers_);
++  }
++  // Ember Stoke 지표(stoke3-1028): 표본 프레임에서 나눈 앞(게임) 버퍼와 뒤(표시 경로 시작) 버퍼. 없으면 둘 다 빈 값.
++  void emberTakeStokeSplit(WMT::Reference<WMT::CommandBuffer> &prefix, WMT::Reference<WMT::CommandBuffer> &tail) {
++    prefix = std::move(ember_stoke_prefix_);
++    tail = std::move(ember_stoke_tail_);
 +  }
 +  void emberNoteChunk(uint64_t prep_ns, uint64_t flush_ns);
 +  void emberNotePsoWait(uint64_t ns);
@@ -3255,7 +3524,7 @@ index 1cd99ca..ae90c01 100644
    InternalCommandLibrary &lib;
    EmulatedCommandContext emulated_cmd;
    ClearRTV<ArgumentEncodingContext> clear_rt_cmd;
-@@ -852,6 +978,53 @@ private:
+@@ -852,6 +1011,54 @@ private:
    };
    ResolveSignatureMatchResult isResolveSignatureMatched(RenderEncoderData *former, ResolveEncoderData *latter);
  
@@ -3278,6 +3547,7 @@ index 1cd99ca..ae90c01 100644
 +  uint64_t ember_init_value_ = 0;
 +  std::vector<EmberSplitCmdbuf> ember_splits_;
 +  std::vector<WMT::Reference<WMT::CommandBuffer>> ember_hold_producers_;
++  WMT::Reference<WMT::CommandBuffer> ember_stoke_prefix_, ember_stoke_tail_;   // stoke3-1028
 +  /* 직전 렌더 인코더(이 청크 또는 앞 청크)의 첨부와, 그 뒤에 온 다른 종류 인코더 */
 +  obj_handle_t ember_last_color_[8] = {};
 +  obj_handle_t ember_last_depth_ = 0;
@@ -3309,7 +3579,7 @@ index 1cd99ca..ae90c01 100644
    std::array<VertexBufferBinding, kVertexBufferSlots> vbuf_;
    Rc<Buffer> ibuf_;
  
-@@ -908,6 +1081,7 @@ private:
+@@ -908,6 +1115,7 @@ private:
  
    VisibilityResultOffsetBumpState vro_state_;
    std::vector<Rc<VisibilityResultQuery>> pending_queries_;
@@ -3317,7 +3587,7 @@ index 1cd99ca..ae90c01 100644
    unsigned active_visibility_query_count_ = 0;
    Flags<FeatureCompatibility> compatibility_flag_;
    TimestampQueryState timestamp_state_;
-@@ -918,7 +1092,6 @@ private:
+@@ -918,7 +1126,6 @@ private:
  
    uint64_t intrapass_barrier_control_bits_ = 0;
  
@@ -3327,10 +3597,10 @@ index 1cd99ca..ae90c01 100644
  
 diff --git a/src/dxmt/dxmt_ember_d11.hpp b/src/dxmt/dxmt_ember_d11.hpp
 new file mode 100644
-index 0000000..374fd9e
+index 0000000..43a9c5a
 --- /dev/null
 +++ b/src/dxmt/dxmt_ember_d11.hpp
-@@ -0,0 +1,831 @@
+@@ -0,0 +1,847 @@
 +#pragma once
 +/* Ember: D3D11 경로(ArgumentEncodingContext) 진단·최적화 스위치와 GPU/CPU 프로파일러.
 + *
@@ -3375,6 +3645,12 @@ index 0000000..374fd9e
 + *                      타이머 정확도 수정(perfpush2) 뒤 커밋이 화면보다 빨라 프레임이 쌓이던 지연 +23ms 회귀를 없앤다
 + *   EMBER_D11_PACE_LOG=1  5초마다 C:\ember-d11pace.log 에 요약, 2 = 프레임마다 한 줄
 + *   EMBER_D11_BATCH=0  인코더 머리·꼬리(펜스·버퍼 묶기)를 본문과 한 번의 unix 호출로 묶지 않는다(예전 방식, 기본 1=묶음)
++ *   EMBER_D11_STOKE_DIRECT=1 (stoke3-1028) 보간 끔 + MetalFX 스왑체인에서 키우기(MetalFX 공간·Lift)가 upscaled 사본 대신 드로어블에 바로 쓴다.
++ *                      표시 패스가 그대로 베끼기일 때만(감마 램프·HDR·선명화·Auto HDR·게임 화면 HUD 중이면 예전 길). 기본 0. 게임 중 전환 가능.
++ *   EMBER_D11_LIFT=1     (lift-1027) EMBER_LIFT=1 로 켠 화면 키우기를 게임 중에 0 끔(MetalFX 공간) / 1 켬. 다시 켜면 이력부터 새로.
++ *   EMBER_D11_PRECISE_SLEEP=1 (timeraudit-1028) 커밋 격자·Pulse hold·dq 페이서 잠을 NtDelayExecution(정밀)으로. 0 = 예전 libc++ Sleep(ms 올림)
++ *   EMBER_D11_CAP_GRID=1 (stoke3 merged2) 정밀 잠일 때 보간 끔 상한(직접 표시 아님)의 커밋을 이상적 시각 격자로 — 60 상한이 68 로 새지 않게
++ *   EMBER_D11_LIFT_GUIDE=1 (stoke2-1027) Lift 의 블록 벡터장을 보간(libEmberFG 1.7 guide)에 넘김 — 0 = 보간이 광류를 따로 구함(같은 장면 GPU 비교)
 + *   EMBER_FG_PRE_UPSCALE=0 (loagpu, 10-04) MetalFX 뒤(4K) 보간 — 기본 1: MetalFX 쓰는 보간은 렌더 해상도에서 보간하고 표시 프레임마다 키운다.
 + *                      로아 QHD→4K 실측 게임 fps +10~15% (보간 MC 5.0→2.4ms/프레임). 예전엔 시작 때 환경 변수로만 읽었고 기본 0. 이 파일로 게임 중에도 바꾼다
 + *   EMBER_D11_OVERLAY_INPASS=0 (loagpu) Ember 프레임 오버레이를 예전처럼 화면 전체 Load/Store 패스로 따로 그림(기본 1 = 표시 패스 안, 글자 상자만)
@@ -3504,6 +3780,11 @@ index 0000000..374fd9e
 +  kEmberD11LayerDrop,
 +  kEmberD11KeyPollMs,
 +  kEmberD11PaceIdleSkip,
++  kEmberD11Lift,
++  kEmberD11StokeDirect,
++  kEmberD11LiftGuide,
++  kEmberD11PreciseSleep,
++  kEmberD11CapGrid,
 +  kEmberD11KeyCount,
 +};
 +
@@ -3575,6 +3856,11 @@ index 0000000..374fd9e
 +      {"EMBER_D11_LAYER_DROP", 1},
 +      {"EMBER_D11_KEY_POLL_MS", 50},
 +      {"EMBER_D11_PACE_IDLE_SKIP", 1},
++      {"EMBER_D11_LIFT", 1},   // lift-1027: 0 = Ember Lift(작업명) 잠시 끔(공간 업스케일) — 같은 장면 켬/끔 비교용
++      {"EMBER_D11_STOKE_DIRECT", 0},   // stoke3-1028: 1 = 보간 끔에서 MetalFX 공간·Lift 결과를 드로어블에 바로(4K 복사 1회 ↓), 기본 끔
++      {"EMBER_D11_LIFT_GUIDE", 1},   // stoke2-1027: 0 = Lift 벡터장을 보간에 안 넘김(보간이 따로 구함) — 같은 장면 GPU 비교용
++      {"EMBER_D11_PRECISE_SLEEP", 1},   // timeraudit-1028 P3: 0 = 커밋 격자·페이서 잠을 예전 libc++ Sleep(ms 올림)으로(게임 중 비교). 환경 EMBER_TIMER=0 은 끝까지 끔
++      {"EMBER_D11_CAP_GRID", 1},   // stoke3 merged2: 0 = 보간 끔 상한 최소 간격 경로의 이상적 시각 격자 끔(정밀 잠일 때만 켜짐)
 +  };
 +  return keys[k];
 +}
@@ -4277,7 +4563,7 @@ index 56e9e76..42dcea3 100644
    WMTBufferInfo visibility_result_heap_info;
    WMT::Reference<WMT::Buffer> visibility_result_heap;
 diff --git a/src/dxmt/dxmt_presenter.cpp b/src/dxmt/dxmt_presenter.cpp
-index e5aec04..60924d6 100644
+index e5aec04..71d2b61 100644
 --- a/src/dxmt/dxmt_presenter.cpp
 +++ b/src/dxmt/dxmt_presenter.cpp
 @@ -3,11 +3,29 @@
@@ -4508,7 +4794,7 @@ index e5aec04..60924d6 100644
      metadata.edr_scale = display_edr_value_.maximum_edr_color_component_value /
                  display_edr_value_.maximum_potential_edr_color_component_value;
  
-@@ -147,52 +294,1490 @@ Presenter::synchronizeLayerProperties() {
+@@ -147,52 +294,1580 @@ Presenter::synchronizeLayerProperties() {
    if (final_colorspace == WMTColorSpaceHDR_scRGB)
      metadata.edr_scale *= 0.8;
  
@@ -4631,6 +4917,10 @@ index e5aec04..60924d6 100644
 -  auto drawable = layer_.nextDrawable();
 +  Drawables out;
 +  frame_no_++;
++  // stoke2-1027: 바깥 광류는 이 Present 한 번만 — 받아 두고 바로 비운다(어느 return 으로 나가도 다음 Present 로 새지 않게).
++  const emberfg::Guide fg_guide = fg_guide_frame_ == frame_no_ ? fg_guide_ : emberfg::Guide{};
++  fg_guide_ = {};
++  fg_guide_frame_ = 0;
 +  auto drop_unavailable = [&] {
 +    drop_present(cmdbuf);
 +    previous_valid_ = false;
@@ -4838,6 +5128,44 @@ index e5aec04..60924d6 100644
 +      up_direct_logged_ = why;
 +    }
 +  }
++  // Ember Stoke 바로 쓰기(stoke3-1028): 보간 끔에서 키우기 결과를 upscaled(4K 사본)에 쓰고 표시 패스로 드로어블에 베끼던 것을
++  // 키우기가 드로어블에 바로 쓰게 한다(4K 읽기+쓰기 1회 ↓, loagpu3 링 바로 쓰기의 보간 끔 판). 조건이 하나라도 안 맞으면 예전 길.
++  const uint32_t stoke_req = stoke_direct_req_;
++  stoke_direct_req_ = 0;
++  bool stoke_direct = false;
++  // 끈 동안엔 기록 상태를 풀어 다시 켤 때(cfg 로 1→0→1) '켬' 줄이 또 남게 한다 — 판별 측정이 상태를 로그로 확인한다(10-28 연쇄9)
++  if (!stoke_req) stoke_direct_logged_ = -1;
++  if (pre_up && stoke_req) {
++    int why = 0;
++    if (frame_generation_ || use_ring || framegen) why = 1;
++    else if (!present_identity_ || metadata.edr_scale != 1.0f || sharpness_ > 0) why = 2;
++    else if (!size_matched) why = 3;
++    else if (stoke_req == 1 &&
++             !ensureDirectScaler(backbuffer, ORIGINAL_FORMAT(layer_props_.pixel_format), (uint64_t)width, (uint64_t)height)) why = 3;
++    else if (!dump_dir_.empty() || test_dup) why = 4;
++    else if (hud_drawing_) why = 5;   // 게임 화면 HUD 가 그리는 중엔 예전 길(HUD 패스 순서를 바꾸지 않는다), 로그 없음
++    stoke_direct = why == 0;
++    if (why != 5 && why != stoke_direct_logged_) {
++      static const char *kWhy[] = {"켬", "끔(보간 중)", "끔(표시 패스가 색을 바꿈: 감마·HDR·선명화·Auto HDR)", "끔(크기·형식 다름)",
++                                   "끔(덤프·시험 중)"};
++      Logger::info(std::string("ember-d11: Stoke 바로 쓰기 ") + kWhy[why] + (stoke_req == 1 ? " (MetalFX)" : " (Lift)"));
++      stoke_direct_logged_ = why;
++    }
++  }
++  stoke_direct_used_ = stoke_direct;
++  {
++    // 5초마다 바로 쓰기 쓴 프레임 수(요청한 프레임 중) — 측정이 판마다 실제 상태를 센다. 요청이 없던 5초는 찍지 않는다.
++    static thread_local uint32_t sd_req = 0, sd_used = 0;
++    static thread_local std::chrono::steady_clock::time_point sd_since{};
++    if (stoke_req) { sd_req++; sd_used += stoke_direct ? 1u : 0u; }
++    const auto sd_now = std::chrono::steady_clock::now();
++    if (!sd_since.time_since_epoch().count()) sd_since = sd_now;
++    else if (sd_now - sd_since >= std::chrono::seconds(5)) {
++      if (sd_req) Logger::info("ember-stoke-direct: used=" + std::to_string(sd_used) + " req=" + std::to_string(sd_req));
++      sd_req = sd_used = 0;
++      sd_since = sd_now;
++    }
++  }
 +  WMT::Texture gen_target;
 +  WMT::MetalDrawable gen_drawable;
 +  // Smooth plan.defer is half the engine's source interval. Missing history,
@@ -4999,9 +5327,21 @@ index e5aec04..60924d6 100644
 +    mc_fence_ = {};
 +    if (mc_path && !test_dup) {
 +      emberfg::EncodeIn ein {};
-+      // (dxmt-ane) 짝 번호가 있을 때만 ABI 1.4 꼬리까지 — 아니면 옛 크기 그대로(옛 엔진과 같은 바이트)
-+      ein.size = ane_pair ? (uint32_t)sizeof(ein) : emberfg::kEncodeInV10Size;
++      // stoke2-1027: Ember Stoke(Lift)가 이번 Present 직전에 같은 쌍(앞 원본 → 이번 원본)의 벡터장을 구했으면 보간에 넘긴다.
++      // 조건: 이번 Present 것 · 앞 프레임 사본이 바로 앞 Present 것(사이에 빠진 원본 없음) · 늦게 쓰기(쌍이 한 장 밀림)·보간 먼저 키우기 아님.
++      // 엔진은 SAME_PAIR 를 믿되 벡터를 자기 눈금(W/4 SAD)으로 다시 재고, 못 쓰면 지금처럼 따로 구한다(encode_out.guide_status).
++      const bool guide = fg_guide.field && previous_valid_ && prev_copy_frame_ + 1 == frame_no_ &&
++                         !late_mode && !pre_up && EmberD11Get(kEmberD11LiftGuide) != 0;
++      // (dxmt-ane) 짝 번호가 있을 때만 ABI 1.4 꼬리까지 — 아니면 옛 크기 그대로(옛 엔진과 같은 바이트). guide 면 1.7 꼬리까지.
++      ein.size = guide ? (uint32_t)sizeof(ein) : ane_pair ? emberfg::kEncodeInV14Size : emberfg::kEncodeInV10Size;
 +      ein.ane_pair_id = ane_pair;
++      if (guide) {
++        ein.guide_field = fg_guide.field;
++        ein.guide_flags = fg_guide.flags;
++        ein.guide_cell = fg_guide.cell;
++        ein.guide_src_w = fg_guide.src_w;
++        ein.guide_src_h = fg_guide.src_h;
++      }
 +      ein.n_wait_fences = ember_wait_n_;
 +      ein.command_buffer = cmdbuf.handle;
 +      ein.current = backbuffer.handle;
@@ -5202,6 +5542,7 @@ index e5aec04..60924d6 100644
 +      blit.endEncoding();
 +    }
 +    previous_valid_ = true;
++    prev_copy_frame_ = frame_no_;   // stoke2-1027
 +  }
 +  if (late_mode && !prev_copied) previous_valid_ = false;
 +  if (late_mode && prev_copied && late_current && submit_before_hold) {
@@ -5250,6 +5591,7 @@ index e5aec04..60924d6 100644
 +    }
 +    if (cur_cheap) {
 +    } else if (up_direct) { WMT::Texture dst; dst.handle = ring_tex_[cur_slot]; directUpscale(cmdbuf, backbuffer, dst, WMT::Fence{}, up_fence_); }
++    else if (stoke_direct) { /* stoke3-1028: 드로어블을 잡은 뒤 거기에 바로(아래) */ }
 +    else upscale(cmdbuf, backbuffer, upscaled, WMT::Fence{}, up_fence_);
 +    if (generate && !pending_dumps_.empty() && pending_dumps_.back().frame == frame_no_ && last_dump_frame_ == frame_no_)
 +      copyDumpUpscaled(cmdbuf, upscaled);
@@ -5262,6 +5604,40 @@ index e5aec04..60924d6 100644
 +    cur_drawable = layer_.nextDrawable();
 +    if (!cur_drawable && drop_present && EmberD11Get(kEmberD11LayerDrop)) { drop_unavailable(); return out; }
 +    cur_target = cur_drawable.texture();
++  }
++  if (stoke_direct) {
++    // stoke3-1028: 키우기가 드로어블에 바로 쓴다 — 표시 패스 없음. 게임 펜스는 키우기(백버퍼 읽기)가 끝난 뒤 빈 패스로 올린다
++    // (loagpu3 와 같은 16x16 패스). 프레임 오버레이는 글자 상자만 Load 패스로, 게임 화면 HUD 는 그 뒤에(hud_drawing_ 이면 여기 안 옴).
++    if (stoke_req == 1) directUpscale(cmdbuf, backbuffer, cur_target, WMT::Fence{}, up_fence_);
++    else upscale(cmdbuf, backbuffer, cur_target, WMT::Fence{}, up_fence_);
++    if (!fence_pass_tex_) {
++      WMTTextureInfo ti;
++      ti.type = WMTTextureType2D;
++      ti.pixel_format = WMTPixelFormatBGRA8Unorm;
++      ti.usage = WMTTextureUsageRenderTarget;
++      ti.options = WMTResourceStorageModePrivate;
++      ti.width = 16;
++      ti.height = 16;
++      ti.depth = 1;
++      ti.mipmap_level_count = 1;
++      ti.sample_count = 1;
++      ti.array_length = 1;
++      fence_pass_tex_ = device_.newTexture(ti);
++    }
++    WMTRenderPassInfo finfo;
++    WMT::InitializeRenderPassInfo(finfo);
++    finfo.colors[0].load_action = WMTLoadActionDontCare;
++    finfo.colors[0].store_action = WMTStoreActionDontCare;
++    finfo.colors[0].texture = fence_pass_tex_;
++    auto fenc = cmdbuf.renderCommandEncoder(finfo);
++    emberLabel(fenc, "EmberPresent-stoke-fence");
++    fenc.waitForFence(up_fence_, WMTRenderStageFragment);
++    update_fences(fenc);
++    fenc.endEncoding();
++    encodeOverlay(cmdbuf, cur_target, nullptr, true, up_fence_);
++    encodeEmberHud(cmdbuf, cur_target);
++    out.current = cur_drawable;
++    return out;
 +  }
 +  if (up_direct) {
 +    // Ember(loagpu3): 표시 패스 없음 — 백버퍼를 읽는 패스(보상 계산·이전 프레임 사본·MetalFX)가 끝난 뒤 게임 펜스를 올리는
@@ -6011,7 +6387,7 @@ index e5aec04..60924d6 100644
    constants[0].data.set(&true_data);
    constants[0].type = WMTDataTypeBool;
    constants[0].index = kPresentFCIndex_BackbufferSizeMatched;
-@@ -211,6 +1796,24 @@ Presenter::buildRenderPipelineState(bool is_pq, bool with_hdr_metadata, bool is_
+@@ -211,6 +1886,24 @@ Presenter::buildRenderPipelineState(bool is_pq, bool with_hdr_metadata, bool is_
    constants[5].data.set(gamma_enable ? &true_data : &false_data);
    constants[5].type  = WMTDataTypeBool;
    constants[5].index = kPresentFCIndex_GammaEnabled;
@@ -6036,7 +6412,7 @@ index e5aec04..60924d6 100644
  
    WMT::Reference<WMT::Error> error;
    auto vs_present_quad = library.newFunction("vs_present_quad");
-@@ -225,10 +1828,620 @@ Presenter::buildRenderPipelineState(bool is_pq, bool with_hdr_metadata, bool is_
+@@ -225,10 +1918,620 @@ Presenter::buildRenderPipelineState(bool is_pq, bool with_hdr_metadata, bool is_
      present_pipeline.colors[0].pixel_format = layer_props_.pixel_format;
      present_pipeline.vertex_function = vs_present_quad;
      present_pipeline.fragment_function = fs_present_quad;
@@ -6662,7 +7038,7 @@ index e5aec04..60924d6 100644
 \ No newline at end of file
 +} // namespace dxmt
 diff --git a/src/dxmt/dxmt_presenter.hpp b/src/dxmt/dxmt_presenter.hpp
-index 77eb35c..1a32f58 100644
+index 77eb35c..cae00eb 100644
 --- a/src/dxmt/dxmt_presenter.hpp
 +++ b/src/dxmt/dxmt_presenter.hpp
 @@ -1,10 +1,24 @@
@@ -6704,7 +7080,7 @@ index 77eb35c..1a32f58 100644
  };
  
  constexpr uint32_t DXMT_GAMMA_CP_COUNT = 1024;
-@@ -65,18 +86,283 @@ public:
+@@ -65,18 +86,296 @@ public:
  
    PresentState synchronizeLayerProperties();
  
@@ -6827,6 +7203,12 @@ index 77eb35c..1a32f58 100644
 +  /// 표시 프레임 수가 두 배가 되지만 움직임 추정은 없어(ForgePlay 와 같은 방식) 빠른 움직임에는 겹침이 보인다.
 +  /// Ember 선명화 세기(0 끔, 0~1). 파이프라인을 만들기 전에(스왑체인 생성 때) 정한다.
 +  void setSharpness(float s) { sharpness_ = s < 0 ? 0 : (s > 1 ? 1 : s); }
++  /// Ember Stoke 바로 쓰기(stoke3-1028, EMBER_D11_STOKE_DIRECT): 다음 encodeCommands 한 번에만 적용(인코딩 스레드).
++  /// 0 = 예전 길, 1 = presenter 의 MetalFX(드로어블 형식)로 드로어블에 바로, 2 = 받은 upscale 콜백(Lift — 어느 형식이든)이 드로어블에 바로.
++  /// 보간 끔·표시 패스가 그대로 베끼기(감마·HDR·선명화·Auto HDR 없음)·크기 같음·게임 화면 HUD 안 그림일 때만 실제로 바로 쓴다.
++  void setStokeDirect(uint32_t mode) { stoke_direct_req_ = mode; }
++  /// 지난 encodeCommands 가 실제로 바로 썼나(지표 파일의 direct). 인코딩 스레드에서만 읽는다.
++  bool stokeDirectUsed() const { return stoke_direct_used_; }
 +  void setFrameGeneration(bool enable);
 +  /// (realign-1020, fpslat DRAW2 후속) 보간 끔 + EMBER_DRAWABLES=2(저지연 요청)일 때 화면 대기열 장수를 Present 마다 정한다(게임 스레드).
 +  /// EMBER_D11_DRAW2: 0 = 3장, 1 = 2장, 2 = 자동(게임이 목표 간격을 따라오면 2장 — 지연 −3~5ms 실측, 못 따라오면 3장 — GPU 한계 fps 손해 방지).
@@ -6843,6 +7225,13 @@ index 77eb35c..1a32f58 100644
 +  /// Ember HUD: 보간 상태 한 줄("\nFG ON  OUT n" / 가드 이유). 엔진이 만든다. 게임 스레드에서 부른다.
 +  std::string frameGenerationHud(double game_fps) {
 +    return fg_.ok() ? fg_.hudText(emberfg::now_ns(std::chrono::steady_clock::now()), game_fps, generated_frames_) : std::string();
++  }
++
++  /// stoke2-1027: 다음 encodeCommands(이번 Present)의 보간에 넘길 바깥 광류. Ember Stoke(Lift) 인코더가 같은 flush 에서 Present
++  /// 인코더 바로 앞에 부른다. 그 Present 것일 때만 쓰인다(frame 번호로 확인).
++  void setFgGuide(const emberfg::Guide &g) {
++    fg_guide_ = g;
++    fg_guide_frame_ = frame_no_ + 1;
 +  }
 +
 +  /// Ember: 이번 Present 패스가 기다릴 게임 펜스(dxmt_context 가 encodeCommands 직전에 넘긴다). 보간 엔진의 첫 패스도 기다린다.
@@ -6990,7 +7379,7 @@ index 77eb35c..1a32f58 100644
    WMTLayerProps layer_props_;
    uint32_t sample_count_;
    WMTColorSpace colorspace_ = WMTColorSpaceSRGB;
-@@ -92,8 +378,77 @@ private:
+@@ -92,8 +391,83 @@ private:
    WMT::Reference<WMT::Texture> gamma_lut_texture_;
    WMT::Reference<WMT::RenderPipelineState> present_blit_;
    WMT::Reference<WMT::RenderPipelineState> present_scale_;
@@ -7008,6 +7397,9 @@ index 77eb35c..1a32f58 100644
 +  double display_interval_ = 0;
 +  std::atomic<double> refresh_interval_ {0};
 +  float sharpness_ = 0;
++  uint32_t stoke_direct_req_ = 0;      // stoke3-1028
++  bool stoke_direct_used_ = false;
++  int stoke_direct_logged_ = -1;
 +  std::chrono::steady_clock::time_point next_refresh_check_ {};
 +  std::chrono::steady_clock::time_point next_overlay_poll_ {};
 +  std::atomic<double> display_latency_ms_ {0};
@@ -7049,6 +7441,9 @@ index 77eb35c..1a32f58 100644
 +  uint64_t dump_at_ = 120;
 +  int dump_count_ = 3, dumps_queued_ = 0;
 +  uint64_t frame_no_ = 0, last_dump_frame_ = 0;
++  // stoke2-1027: 바깥 광류(guide)와 그것이 맞는 Present, 앞 프레임 사본을 만든 Present
++  emberfg::Guide fg_guide_{};
++  uint64_t fg_guide_frame_ = 0, prev_copy_frame_ = 0;
 +  struct PendingDump {
 +    uint64_t frame;
 +    float alpha;
@@ -7738,10 +8133,10 @@ index 0000000..4541f6c
 +} // namespace dxmt
 diff --git a/src/dxmt/ember_fg_hook.hpp b/src/dxmt/ember_fg_hook.hpp
 new file mode 100644
-index 0000000..fb87a31
+index 0000000..c72f052
 --- /dev/null
 +++ b/src/dxmt/ember_fg_hook.hpp
-@@ -0,0 +1,264 @@
+@@ -0,0 +1,291 @@
 +/*
 + * Ember FG hook — thin connection from the DXMT presenter to the optional EmberCore frame generation engine
 + * (libEmberFG.dylib, loaded by winemetal's unix side). All frame generation decisions and the motion-compensated
@@ -7792,9 +8187,27 @@ index 0000000..fb87a31
 +  uint64_t wait_fences[kMaxWaitFences];
 +  /* ABI 1.4 꼬리: AneSubmit 의 짝 번호(0 = 예전과 같음). 쓰지 않을 때는 size 를 kEncodeInV10Size 로 보내 옛 엔진과 같은 바이트만 넘긴다. */
 +  uint64_t ane_pair_id;
++  /* ABI 1.5 Leap 꼬리(이 호스트는 쓰지 않아 0) + 1.7 guide 꼬리(stoke2-1027). guide 를 보낼 때만 size = sizeof(EncodeIn). */
++  float leap_t;
++  uint32_t leap_flags;
++  uint64_t guide_field, guide_fence;
++  uint32_t guide_flags;
++  float guide_cell;
++  uint32_t guide_src_w, guide_src_h;
 +};
-+/* ane_pair_id 앞까지 = ABI 1.0~1.3 크기 */
++/* ane_pair_id 앞까지 = ABI 1.0~1.3 크기, ane_pair_id 까지 = 1.4 크기(예전 호스트가 보내던 그대로) */
 +constexpr uint32_t kEncodeInV10Size = 56 + 8 * kMaxWaitFences;
++constexpr uint32_t kEncodeInV14Size = kEncodeInV10Size + 8;
++/* 1.7 guide_flags / encode_out.guide_status (ember_fg.h EMBER_FG_GUIDE_*) */
++enum : uint32_t { GUIDE_SAME_PAIR = 1, GUIDE_ANCHOR_CURRENT = 0, GUIDE_ANCHOR_PREVIOUS = 2, GUIDE_ANCHOR_MID = 4, GUIDE_TO_PREVIOUS = 8 };
++enum : uint32_t { GUIDE_USED = 0, GUIDE_ABSENT = 1 };
++/* stoke2-1027: 이번 Present 의 보간에 넘길 바깥 광류(지금은 Ember Stoke = libEmberLift 의 블록 벡터장) */
++struct Guide {
++  uint64_t field = 0;
++  uint32_t flags = 0;
++  float cell = 0;
++  uint32_t src_w = 0, src_h = 0;
++};
 +/* (dxmt-ane 10-16) ember_fg_ane_submit_in(ABI 1.4) — FlowQ 뉴럴 엔진 흐름 미리 보내기(EMBER_FG_OP_ANE_SUBMIT) */
 +struct AneSubmitIn {
 +  uint32_t size, n_wait_fences;
@@ -7809,6 +8222,12 @@ index 0000000..fb87a31
 +struct EncodeOut {
 +  uint32_t size, ok;
 +  uint64_t texture, fence;
++  /* ABI 1.5 Leap(이 호스트는 안 씀) + 1.7 guide 결과. 옛 엔진은 앞 24/48 바이트만 쓴다(0 으로 시작해야 함). */
++  uint32_t leap_ok;
++  float leap_t, interp_t;
++  uint32_t leap_pad;
++  uint64_t leap_texture;
++  uint32_t guide_used, guide_status;
 +};
 +struct RingReq {
 +  uint32_t size, need_generated;
@@ -7828,10 +8247,13 @@ index 0000000..fb87a31
 +  uint32_t active, fast;
 +  double game_interval, mc_confidence, dump_mean_conf;
 +};
-+static_assert(sizeof(Config) == 56 && sizeof(FrameIn) == 40 && sizeof(FramePlan) == 32 && sizeof(EncodeIn) == kEncodeInV10Size + 8 &&
++static_assert(offsetof(EncodeIn, leap_t) == kEncodeInV14Size && offsetof(EncodeIn, guide_field) == kEncodeInV14Size + 8 &&
++              offsetof(EncodeIn, guide_src_h) == kEncodeInV14Size + 36 && sizeof(EncodeIn) == kEncodeInV14Size + 40 &&
++              offsetof(EncodeOut, guide_used) == 48 && sizeof(EncodeOut) == 56, "EmberFG 1.7 encode wire layout");
++static_assert(sizeof(Config) == 56 && sizeof(FrameIn) == 40 && sizeof(FramePlan) == 32 &&
 +              offsetof(EncodeIn, ane_pair_id) == kEncodeInV10Size && sizeof(AneSubmitIn) == 2120 &&
 +              offsetof(AneSubmitIn, wait_fences) == 48 && offsetof(AneSubmitIn, source_time_ns) == 48 + 8 * kMaxWaitFences &&
-+              sizeof(EncodeOut) == 24 && sizeof(RingReq) == 40 && sizeof(RingSlots) == 32 && sizeof(Stats) == 72, "EmberFG wire layout");
++              sizeof(RingReq) == 40 && sizeof(RingSlots) == 32 && sizeof(Stats) == 72, "EmberFG wire layout");
 +
 +/* (realign-1020 B) Ember 표시 큐(libEmberFG ABI 1.5 ember_fg_dq.h, HOST_THREAD) 거울 */
 +enum : uint32_t { DQ_PRESENT_AFTER_MIN = 0, DQ_PRESENT_CPU_TIMED = 1 };
@@ -8169,6 +8591,200 @@ index 0000000..853d85e
 +  {0x00,0x00,0x60,0x78,0x38,0x18,0x18,0x1e,0x1e,0x18,0x18,0x18,0x78,0x70,0x00,0x00}, /* '}' */
 +  {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xf2,0xdf,0x0e,0x00,0x00,0x00,0x00,0x00,0x00}, /* '~' */
 +};
+diff --git a/src/dxmt/ember_lift.cpp b/src/dxmt/ember_lift.cpp
+new file mode 100644
+index 0000000..d168ec9
+--- /dev/null
++++ b/src/dxmt/ember_lift.cpp
+@@ -0,0 +1,90 @@
++/*
++ * Ember Lift(작업명) glue, DXMT side — see ember_lift.hpp. The engine is libEmberLift.dylib (EmberCore).
++ *
++ * This library is free software; you can redistribute it and/or modify it under the terms of the GNU Lesser
++ * General Public License as published by the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ */
++#include "ember_lift.hpp"
++#include "ember_neural.hpp"   // embertone::call / envBlock — the same EmberFG_call bridge
++#include "log/log.hpp"
++#include "util_env.hpp"
++#include "../winemetal/ember_fg_thunks.h"
++#include <chrono>
++
++namespace dxmt {
++
++void
++EmberLift::incRef() {
++  refcount_.fetch_add(1u, std::memory_order_acquire);
++}
++
++void
++EmberLift::decRef() {
++  if (refcount_.fetch_sub(1u, std::memory_order_release) == 1u)
++    delete this;
++}
++
++bool
++EmberLift::enabled() {
++  static int on = -1;
++  if (on < 0) on = env::getEnvVar("EMBER_LIFT") == "1";
++  return on;
++}
++
++EmberLift::EmberLift(WMT::Device device) {
++  fence_ = device.newFence();
++  auto env = embertone::envBlock();
++  uint64_t ctx = 0;
++  if (embertone::call(EMBER_FG_OP_LIFT_CREATE, ctx, device.handle, env.data(), env.size(), nullptr, 0) && ctx)
++    ctx_ = ctx;
++  else
++    Logger::warn("ember-lift: libEmberLift 없음(winemetal.so 옆) — MetalFX 공간 업스케일 그대로");
++}
++
++EmberLift::~EmberLift() {
++  if (ctx_) embertone::call(EMBER_FG_OP_LIFT_DESTROY, ctx_, 0, nullptr, 0, nullptr, 0);
++  ctx_ = 0;
++}
++
++bool
++EmberLift::encode(WMT::CommandBuffer cmdbuf, WMT::Texture backbuffer, WMT::Texture upscaled, uint64_t frame_no,
++                  uint32_t flags) {
++  if (!ctx_ || !cmdbuf.handle || !backbuffer.handle || !upscaled.handle) return false;
++  emberlift::EncodeIn in{};
++  in.size = sizeof(in);
++  in.flags = flags;
++  in.command_buffer = cmdbuf.handle;
++  in.source = backbuffer.handle;
++  in.target = upscaled.handle;
++  in.fence = fence_.handle;
++  in.frame_no = frame_no;
++  in.now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++  emberlift::EncodeOut out{};
++  out.size = sizeof(out);
++  uint64_t ctx = ctx_;
++  bool ok = embertone::call(EMBER_FG_OP_LIFT_ENCODE, ctx, 0, &in, sizeof(in), &out, sizeof(out)) && out.ok;
++  last_mode_.store(ok ? out.mode_used : ~0u, std::memory_order_relaxed);
++  last_ = ok ? out : emberlift::EncodeOut{};   // stoke2-1027: guide() 가 읽는다
++  if (!ok && !warned_) {
++    warned_ = true;
++    Logger::warn("ember-lift: 이 크기·형식은 처리 못 함 — 이번 스왑체인은 MetalFX 공간 업스케일");
++  }
++  return ok;
++}
++
++emberfg::Guide
++EmberLift::guide() const {
++  emberfg::Guide g{};
++  // 1.1 꼬리를 돌려준 라이브러리만(옛 1.0 은 size 32). field_valid = 이번 쌍으로 새로 구함(리셋·spatial 아님).
++  if (last_.size >= sizeof(last_) && last_.ok && last_.field && last_.field_valid && last_.field_cell && last_.src_w && last_.src_h) {
++    g.field = last_.field;
++    g.flags = emberfg::GUIDE_SAME_PAIR | emberfg::GUIDE_ANCHOR_CURRENT | emberfg::GUIDE_TO_PREVIOUS;
++    g.cell = (float)last_.field_cell;
++    g.src_w = last_.src_w;
++    g.src_h = last_.src_h;
++  }
++  return g;
++}
++
++} // namespace dxmt
+diff --git a/src/dxmt/ember_lift.hpp b/src/dxmt/ember_lift.hpp
+new file mode 100644
+index 0000000..4bd0b1a
+--- /dev/null
++++ b/src/dxmt/ember_lift.hpp
+@@ -0,0 +1,92 @@
++#pragma once
++/*
++ * Ember Lift(작업명, 화면 키우기) glue, DXMT side.
++ *
++ * The engine lives in the optional libEmberLift.dylib (EmberCore, separate proprietary library, not part of this tree).
++ * The swap chain calls it through winemetal's EmberFG_call (ops EMBER_FG_OP_LIFT_*, unix side ember_fg_unix.c loads the
++ * library next to winemetal.so). When the library or the winemetal support is missing, encode() returns false and the
++ * caller keeps the MetalFX spatial scaler. The wire structs below mirror EmberCore lift/include/ember_lift.h (ABI 1.x)
++ * byte for byte.
++ *
++ * This library is free software; you can redistribute it and/or modify it under the terms of the GNU Lesser
++ * General Public License as published by the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ */
++#include "Metal.hpp"
++#include "ember_fg_hook.hpp"   // emberfg::Guide (stoke2-1027)
++#include <atomic>
++#include <cstddef>
++#include <cstdint>
++
++namespace dxmt {
++
++namespace emberlift {
++
++constexpr uint32_t kHostDXMT = 0;
++constexpr uint32_t kInReset = 1u << 0;
++constexpr uint32_t kInSourcePQ = 1u << 1;
++constexpr uint32_t kInSourceScRGB = 1u << 2;
++
++struct EncodeIn {
++  uint32_t size, flags;
++  uint64_t command_buffer, source, target, fence;
++  uint64_t frame_no;
++  int64_t now_ns;
++  uint64_t ext_field;
++  uint32_t ext_field_block, pad0;
++};
++struct EncodeOut {
++  uint32_t size, ok, mode_used, history_reset;
++  uint64_t motion, confidence;
++  /* ABI 1.1 (stoke2-1027): 블록 벡터장(렌더/8, 앞 위치 − 이번 위치 렌더 px). 옛 1.0 라이브러리는 size 32 로 돌려준다. */
++  uint64_t field;
++  uint32_t field_cell, field_valid, src_w, src_h;
++};
++constexpr uint32_t kEncodeOutV10Size = 32;
++static_assert(sizeof(EncodeIn) == 72 && offsetof(EncodeIn, frame_no) == 40 && offsetof(EncodeIn, ext_field) == 56 &&
++              offsetof(EncodeOut, field) == kEncodeOutV10Size && sizeof(EncodeOut) == 56, "ember_lift.h layout");
++
++} // namespace emberlift
++
++/// One Lift context per swap chain (it keeps the previous frame and the output history).
++class EmberLift {
++public:
++  void incRef();
++  void decRef();
++
++  explicit EmberLift(WMT::Device device);
++  ~EmberLift();
++
++  /// EMBER_LIFT=1 (read once). The swap chain also needs the MetalFX swap chain path (DXMT_METALFX_SPATIAL_SWAPCHAIN=1).
++  static bool enabled();
++  /// Library loaded and context created.
++  bool ready() const { return ctx_ != 0; }
++
++  /// Fence the begin/end blit encoders around encode() use (same pattern as SpatialScaler::fence()).
++  WMT::Fence fence() { return fence_; }
++
++  /// (stoke3-1028) Mode the library used last time (EMBER_LIFT_MODE_*: 0 spatial, 1 ember, 2 mfx), ~0u before the first
++  /// successful encode or after a failure. Read by the swap chain for the Stoke stats file.
++  uint32_t lastMode() const { return last_mode_.load(std::memory_order_relaxed); }
++  /// (stoke3-1028) An encode has failed on this swap chain (size/format refused or library missing) — the direct-to-drawable
++  /// path must not pick Lift any more (it cannot fall back to MetalFX into a drawable of another format).
++  bool failed() const { return warned_; }
++
++  /// stoke2-1027: 마지막 encode 가 (앞 프레임 → 이번 프레임) 쌍으로 새로 구한 블록 벡터장 — 보간 엔진(libEmberFG 1.7 guide)에 넘긴다.
++  /// 리셋·spatial·옛 1.0 라이브러리·실패면 빈 값(field 0).
++  emberfg::Guide guide() const;
++
++  /// Encode one upscale (backbuffer → upscaled) into cmdbuf. The library waits for and updates fence().
++  /// false = nothing was encoded (library missing / unsupported size or format) — the caller falls back.
++  bool encode(WMT::CommandBuffer cmdbuf, WMT::Texture backbuffer, WMT::Texture upscaled, uint64_t frame_no, uint32_t flags);
++
++private:
++  uint64_t ctx_ = 0;
++  WMT::Reference<WMT::Fence> fence_;
++  std::atomic<uint32_t> refcount_{0};
++  bool warned_ = false;
++  std::atomic<uint32_t> last_mode_{~0u};
++  emberlift::EncodeOut last_{};   // stoke2-1027
++};
++
++} // namespace dxmt
 diff --git a/src/dxmt/ember_neural.cpp b/src/dxmt/ember_neural.cpp
 new file mode 100644
 index 0000000..92886ff
@@ -8541,17 +9157,341 @@ index 0000000..8492301
 +}
 +
 +} // namespace dxmt::emberspark
+diff --git a/src/dxmt/ember_stoke_stats.cpp b/src/dxmt/ember_stoke_stats.cpp
+new file mode 100644
+index 0000000..302fafd
+--- /dev/null
++++ b/src/dxmt/ember_stoke_stats.cpp
+@@ -0,0 +1,232 @@
++/*
++ * Ember Stoke '자동' 실시간 지표(stoke3-1028) — ember_stoke_stats.hpp 참고.
++ *
++ * This library is free software; you can redistribute it and/or modify it under the terms of the GNU Lesser
++ * General Public License as published by the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ */
++#include "ember_stoke_stats.hpp"
++#include "log/log.hpp"
++#include "util_env.hpp"
++#include "util_string.hpp"
++#include <algorithm>
++#include <chrono>
++#include <cstdio>
++#include <cstring>
++#include <ctime>
++#include <string>
++#include <vector>
++#include <windows.h>
++
++namespace dxmt::emberstoke {
++
++namespace {
++
++std::atomic<uint32_t> g_mode{0}, g_render{0}, g_output{0}, g_flags{0};   // render/output = (w << 16) | h, flags 1 = 보간, 2 = 바로 쓰기
++std::atomic<uint32_t> g_present_counter{0};
++
++int64_t
++steady_ns() {
++  return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++}
++
++/* 유닉스 경로 → 윈도우 경로(wine_get_dos_file_name, 없으면 Z: 가정 — Ember 보틀은 Z: = /) */
++std::wstring
++dos_path(const std::string &unix_path) {
++  using GetDos = LPWSTR(CDECL *)(LPCSTR);
++  static auto fn = reinterpret_cast<GetDos>(::GetProcAddress(::GetModuleHandleW(L"kernel32.dll"), "wine_get_dos_file_name"));
++  if (fn) {
++    if (LPWSTR w = fn(unix_path.c_str())) {
++      std::wstring out(w);
++      ::HeapFree(::GetProcessHeap(), 0, w);
++      return out;
++    }
++  }
++  std::string p = "Z:" + unix_path;
++  std::replace(p.begin(), p.end(), '/', '\\');
++  return str::tows(p.c_str());
++}
++
++/* 쓸 디렉터리(윈도우 경로, 끝 '\' 없음). 한 번만 정한다. */
++const std::wstring &
++stats_dir() {
++  static std::wstring dir = [] {
++    std::string d = env::getEnvVar("EMBER_STOKE_STATS_DIR");
++    if (d.empty()) {
++      // …/Data/Bottles/<보틀> 이면 …/Data/Logs/stoke-stats (Ember 데이터 배치)
++      std::string pfx = env::getEnvVar("WINEPREFIX");
++      while (pfx.size() > 1 && pfx.back() == '/') pfx.pop_back();
++      size_t a = pfx.rfind('/');
++      if (a != std::string::npos && a > 0) {
++        size_t b = pfx.rfind('/', a - 1);
++        if (b != std::string::npos && pfx.compare(b + 1, a - b - 1, "Bottles") == 0)
++          d = pfx.substr(0, b) + "/Logs/stoke-stats";
++      }
++    }
++    std::wstring w = d.empty() ? std::wstring(L"C:\\ember-stoke-stats") : dos_path(d);
++    while (!w.empty() && (w.back() == L'\\' || w.back() == L'/')) w.pop_back();
++    ::CreateDirectoryW(w.c_str(), nullptr);   // 이미 있으면 실패해도 그만(부모는 앱이 만든다)
++    return w;
++  }();
++  return dir;
++}
++
++std::string
++exe_key() {
++  static std::string k = [] {
++    std::string e = env::getExeName();
++    for (auto &c : e) c = (char)std::tolower((unsigned char)c);
++    for (auto &c : e)
++      if (c == '"' || c == '\\' || c == '/' || (unsigned char)c < 0x20) c = '_';
++    return e.empty() ? std::string("unknown.exe") : e;
++  }();
++  return k;
++}
++
++double
++median(std::vector<double> v) {
++  if (v.empty()) return -1;
++  std::sort(v.begin(), v.end());
++  size_t n = v.size();
++  return n % 2 ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
++}
++
++const char *
++mode_name(uint32_t m) {
++  static const char *k[] = {"native", "mfx-spatial", "lift-ember", "lift-mfx", "lift-spatial"};
++  return m < kModeCount ? k[m] : "unknown";
++}
++
++void
++write_file(FinishState &st) {
++  // 요약: 지금 방식과 같은 방식·섞이지 않은 창만의 중앙값(입장·로딩 창은 fps 5 미만이라 이미 빠짐)
++  const uint32_t mode = g_mode.load(std::memory_order_relaxed);
++  std::vector<double> fps, f, g, u, r;
++  for (uint32_t i = 0; i < st.n_hist; i++) {
++    if (st.hist_mixed[i] || st.hist_mode[i] != mode) continue;
++    fps.push_back(st.hist[i][0]);
++    f.push_back(st.hist[i][1]);
++    if (st.hist[i][2] >= 0) { g.push_back(st.hist[i][2]); r.push_back(st.hist[i][2] / st.hist[i][1]); }
++    if (st.hist[i][3] >= 0) u.push_back(st.hist[i][3]);
++  }
++  const uint32_t rd = g_render.load(std::memory_order_relaxed), od = g_output.load(std::memory_order_relaxed);
++  const uint32_t fl = g_flags.load(std::memory_order_relaxed);
++  std::string s;
++  char buf[512];
++  std::snprintf(buf, sizeof(buf),
++                "{\"v\":1,\"exe\":\"%s\",\"pid\":%lu,\"session\":%lld,\"updated\":%lld,\"mode\":\"%s\",\"frame_gen\":%s,\"direct\":%s,"
++                "\"render\":[%u,%u],\"output\":[%u,%u],\"windows\":%zu,\"fps\":%.2f,\"f_ms\":%.3f,\"g_ms\":%.3f,\"u_ms\":%.3f,"
++                "\"g_over_f\":%.4f,\"hist\":[",
++                exe_key().c_str(), (unsigned long)::GetCurrentProcessId(), (long long)st.session_unix, (long long)std::time(nullptr),
++                mode_name(mode), (fl & 1) ? "true" : "false", (fl & 2) ? "true" : "false", rd >> 16, rd & 0xffff, od >> 16,
++                od & 0xffff, fps.size(), median(fps), median(f), median(g), median(u), median(r));
++  s += buf;
++  // 최근 40 창만(파일 작게) — 모드가 바뀐 세션(게임 중 Lift 켜고 끄기)도 앱이 볼 수 있게 방식 이름을 같이
++  uint32_t from = st.n_hist > 40 ? st.n_hist - 40 : 0;
++  for (uint32_t i = from; i < st.n_hist; i++) {
++    std::snprintf(buf, sizeof(buf), "%s[%.2f,%.3f,%.3f,%.3f,\"%s\",%d]", i == from ? "" : ",", st.hist[i][0], st.hist[i][1],
++                  st.hist[i][2], st.hist[i][3], mode_name(st.hist_mode[i]), (int)st.hist_mixed[i]);
++    s += buf;
++  }
++  s += "]}\n";
++
++  const std::wstring &dir = stats_dir();
++  std::wstring base = dir + L"\\" + str::tows(exe_key().c_str());
++  std::wstring tmp = base + L".json.tmp", fin = base + L".json";
++  HANDLE h = ::CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
++  if (h == INVALID_HANDLE_VALUE) {
++    static bool warned = false;
++    if (!warned) { warned = true; Logger::warn("ember-stoke: 지표 파일을 못 씀 — " + str::fromws(tmp.c_str())); }
++    return;
++  }
++  DWORD wrote = 0;
++  ::WriteFile(h, s.data(), (DWORD)s.size(), &wrote, nullptr);
++  ::CloseHandle(h);
++  ::MoveFileExW(tmp.c_str(), fin.c_str(), MOVEFILE_REPLACE_EXISTING);
++}
++
++} // namespace
++
++bool
++enabled() {
++  static int on = -1;
++  if (on < 0) on = env::getEnvVar("EMBER_STOKE_STATS") != "0";
++  return on;
++}
++
++void
++notePresent(uint32_t mode, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh, bool frame_gen, bool direct) {
++  g_mode.store(mode, std::memory_order_relaxed);
++  g_render.store((std::min(rw, 0xffffu) << 16) | std::min(rh, 0xffffu), std::memory_order_relaxed);
++  g_output.store((std::min(ow, 0xffffu) << 16) | std::min(oh, 0xffffu), std::memory_order_relaxed);
++  g_flags.store((frame_gen ? 1u : 0u) | (direct ? 2u : 0u), std::memory_order_relaxed);
++}
++
++bool
++sampleThisFrame() {
++  if (!enabled()) return false;
++  return (g_present_counter.fetch_add(1, std::memory_order_relaxed) & 31u) == 7u;   // 32 프레임에 한 번(시작 직후는 피함)
++}
++
++void
++noteCmdbuf(FinishState &st, uint64_t s, uint64_t e) {
++  if (!s || e <= s) return;
++  uint64_t from = std::max(s, st.last_end);
++  if (e > from) st.frame_acc_ms += (double)(e - from) * 1e-6;
++  st.last_end = std::max(st.last_end, e);
++}
++
++void
++noteEmberShare(FinishState &st, double u_ms) {
++  if (u_ms < 0 || u_ms > 100) return;
++  st.u_sum_ms += u_ms;
++  st.u_n++;
++}
++
++void
++frameDone(FinishState &st) {
++  const int64_t now = steady_ns();
++  if (!st.session_unix) st.session_unix = (int64_t)std::time(nullptr);
++  if (!st.win_start_ns) {
++    st.win_start_ns = now;
++    st.frame_acc_ms = 0;
++    return;
++  }
++  const uint32_t mode = g_mode.load(std::memory_order_relaxed);
++  if (st.mode_first == ~0u) st.mode_first = mode;
++  else if (st.mode_first != mode) st.mixed = true;
++  st.gpu_sum_ms += st.frame_acc_ms;
++  st.frame_acc_ms = 0;
++  st.frames++;
++  const double dt_s = (double)(now - st.win_start_ns) * 1e-9;
++  if (dt_s < 30.0) return;
++  const double fps = st.frames / dt_s;
++  if (fps >= 5.0 && st.frames >= 150) {   // 로딩·일시 정지 창은 버린다
++    const double f_ms = dt_s * 1000.0 / st.frames;
++    const double gt = st.gpu_sum_ms / st.frames;
++    const double u = st.u_n ? st.u_sum_ms / st.u_n : -1.0;
++    const double g = u >= 0 ? std::max(0.0, gt - u) : -1.0;
++    if (st.n_hist == 240) {   // 꽉 차면 앞 절반을 버린다(2시간)
++      std::memmove(st.hist, st.hist + 120, sizeof(st.hist[0]) * 120);
++      std::memmove(st.hist_mode, st.hist_mode + 120, sizeof(st.hist_mode[0]) * 120);
++      std::memmove(st.hist_mixed, st.hist_mixed + 120, sizeof(st.hist_mixed[0]) * 120);
++      st.n_hist = 120;
++    }
++    st.hist[st.n_hist][0] = (float)fps;
++    st.hist[st.n_hist][1] = (float)f_ms;
++    st.hist[st.n_hist][2] = (float)g;
++    st.hist[st.n_hist][3] = (float)u;
++    st.hist_mode[st.n_hist] = st.mode_first;
++    st.hist_mixed[st.n_hist] = st.mixed;
++    st.n_hist++;
++    write_file(st);
++  }
++  st.win_start_ns = now;
++  st.frames = 0;
++  st.gpu_sum_ms = st.u_sum_ms = 0;
++  st.u_n = 0;
++  st.mode_first = ~0u;
++  st.mixed = false;
++}
++
++} // namespace dxmt::emberstoke
+diff --git a/src/dxmt/ember_stoke_stats.hpp b/src/dxmt/ember_stoke_stats.hpp
+new file mode 100644
+index 0000000..906d590
+--- /dev/null
++++ b/src/dxmt/ember_stoke_stats.hpp
+@@ -0,0 +1,67 @@
++#pragma once
++/*
++ * Ember Stoke '자동' 실시간 지표(stoke3-1028). LGPL 2.1+ (DXMT 트리).
++ *
++ * 하는 일: 게임 세션 동안 프레임 간격 F 와 게임 몫 GPU 시간 G 를 늘 잰다(기본 켬, EMBER_STOKE_STATS=0 이면 끔).
++ *   - G_total = 한 게임 프레임에 속한 명령 버퍼들의 GPU 구간 합집합(gpuStartTime/gpuEndTime, 추가 비용 없음)
++ *   - U       = Ember 표시 경로 몫(업스케일·Lift·보간·표시 패스). 32 프레임에 한 번, 첫 표시 경로 인코더 앞에서 명령 버퍼를
++ *               하나 더 커밋해 나눈 뒤 'U = 끝 − max(뒤 버퍼 시작, 앞 버퍼 끝)' 으로 잰다(표본 프레임만 커밋 1회 추가).
++ *   - G       = G_total − U(표본 평균). 네이티브 판에서도 같은 식(U = 표시 복사·오버레이)이라 판끼리 비교된다.
++ *   - F       = 30초 창의 실제 시간 ÷ 게임 프레임 수.
++ * 30초마다 <EMBER_STOKE_STATS_DIR>/<exe>.json 을 통째로 다시 쓴다(임시 파일 → 바꿔치기). 세션 기록(로그)에는 쓰지 않는다.
++ *   디렉터리: EMBER_STOKE_STATS_DIR(유닉스 경로, 앱이 줌) → WINEPREFIX 가 …/Bottles/<이름> 이면 …/Logs/stoke-stats →
++ *   C:\ember-stoke-stats (보틀 안). 앱(StokeAuto.swift)은 셋 다 찾는다.
++ */
++#include <atomic>
++#include <cstdint>
++
++namespace dxmt::emberstoke {
++
++/// 이번 프레임에 쓴 화면 키우기 방식(앱 규칙이 읽는 'mode' 값과 같은 번호)
++enum Mode : uint32_t {
++  kModeNative = 0,      // 업스케일 없음(게임 해상도 그대로 표시. 렌더 < 화면이면 macOS 가 늘임 — render/output 크기로 앱이 가린다)
++  kModeMfxSpatial = 1,  // MetalFX 공간(DXMT_METALFX_SPATIAL_SWAPCHAIN)
++  kModeLiftEmber = 2,   // Ember Stoke 자체 시간 업스케일
++  kModeLiftMfx = 3,     // Lift + MetalFX 시간
++  kModeLiftSpatial = 4, // Lift 공간(비교용)
++  kModeCount
++};
++
++/// 기본 켬. EMBER_STOKE_STATS=0 이면 아무것도 재지 않고 명령 버퍼도 나누지 않는다.
++bool enabled();
++
++/// 스왑체인 Present(인코딩 스레드)가 프레임마다 부른다.
++void notePresent(uint32_t mode, uint32_t render_w, uint32_t render_h, uint32_t output_w, uint32_t output_h, bool frame_gen,
++                 bool direct);
++
++/// 표시 경로 인코더를 처음 만날 때 한 번 부른다(flushCommands). 참이면 이 프레임은 명령 버퍼를 나눠 U 를 잰다.
++bool sampleThisFrame();
++
++/// 완료 스레드(큐마다 하나)의 누적 상태. CommandQueue 배치를 바꾸지 않으려고 완료 스레드 함수의 static 으로 둔다.
++struct FinishState {
++  uint64_t last_end = 0;       // 합집합 계산용 직전 GPU 끝(ns)
++  double frame_acc_ms = 0;     // 이번 프레임 GPU 합집합
++  // 30초 창
++  int64_t win_start_ns = 0;
++  uint32_t frames = 0;
++  double gpu_sum_ms = 0;
++  double u_sum_ms = 0;
++  uint32_t u_n = 0;
++  uint32_t mode_first = ~0u;
++  bool mixed = false;
++  // 세션(파일 내용)
++  int64_t session_unix = 0;
++  uint32_t n_hist = 0;
++  float hist[240][4] = {};     // fps, F ms, G ms(-1 = U 모름), U ms(-1)
++  uint32_t hist_mode[240] = {};
++  uint8_t hist_mixed[240] = {};
++};
++
++/// 명령 버퍼 하나가 끝났을 때(GPU 시각 ns, 0 이면 모름). 프레임 끝 청크면 frame_end.
++void noteCmdbuf(FinishState &st, uint64_t gpu_start_ns, uint64_t gpu_end_ns);
++/// 표본 프레임의 U(ms). 음수면 무시.
++void noteEmberShare(FinishState &st, double u_ms);
++/// 게임 프레임 하나가 끝났다(청크의 signal_frame_latency_fence_). 30초가 지났으면 파일을 쓴다.
++void frameDone(FinishState &st);
++
++} // namespace dxmt::emberstoke
 diff --git a/src/dxmt/meson.build b/src/dxmt/meson.build
-index 9d5bfe2..a15475e 100644
+index 9d5bfe2..a9d5937 100644
 --- a/src/dxmt/meson.build
 +++ b/src/dxmt/meson.build
-@@ -23,6 +23,9 @@ dxmt_src = [
+@@ -23,13 +23,21 @@ dxmt_src = [
    'dxmt_counter.cpp',
    'dxmt_fence.cpp',
    'dxmt_keyed_mutex.cpp',
 +  'ember_neural.cpp',
++  'ember_lift.cpp',
++  'ember_stoke_stats.cpp',
 +  'ember_autohdr.cpp',
 +  'ember_fg_hook.cpp',
  ]
  
  dxmt_shaders = [
+   'dxmt_command.metal'
+ ]
+ 
+-dxmt_shaders_ir = metalir_generator.process(dxmt_shaders)
++# Ember: target the app minimum (macOS 14). Without it the build host OS (27) is used and
++# macOS 14-26 fail every clear/blit compute PSO ("language version 4.1 incompatible").
++dxmt_shaders_ir = metalir_generator.process(dxmt_shaders,
++  extra_args: ['-std=metal3.1', '--target=air64-apple-macos14.0'])
+ 
+ dxmt_shaders_lib = metallib_generator.process(dxmt_shaders_ir)
+ 

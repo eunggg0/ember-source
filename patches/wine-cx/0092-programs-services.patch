@@ -1,0 +1,129 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 92/95] programs-services: Ember changes
+
+Base: CrossOver 26.3.0 FOSS sources/wine
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/programs/services/rpc.c b/programs/services/rpc.c
+index b2f541e..0aa3567 100644
+--- a/programs/services/rpc.c
++++ b/programs/services/rpc.c
+@@ -902,6 +902,10 @@ DWORD __cdecl svcctl_SetServiceStatus(SC_RPC_HANDLE handle, SERVICE_STATUS *stat
+ 
+     service_lock(service->service_entry);
+ 
++    WINE_TRACE("startup-report %s state %#lx checkpoint %lu hint %lu\n",
++                wine_dbgstr_w(service->service_entry->name), status->dwCurrentState,
++                status->dwCheckPoint, status->dwWaitHint );
++
+     /* FIXME: be a bit more discriminant about what parts of the status we set
+      * and check that fields are valid */
+     service->service_entry->status.dwCurrentState = status->dwCurrentState;
+diff --git a/programs/services/services.c b/programs/services/services.c
+index e013783..5b4bd01 100644
+--- a/programs/services/services.c
++++ b/programs/services/services.c
+@@ -410,6 +410,27 @@ static BOOL is_root_pnp_service(HDEVINFO set, const struct service_entry *servic
+     return FALSE;
+ }
+ 
++static DWORD service_start_internal(struct service_entry *service, DWORD service_argc,
++                                    LPCWSTR *service_argv, BOOL wait_for_status);
++
++static BOOL autostart_wait_for_status(struct service_entry *service)
++{
++    HKEY key;
++    DWORD type, value = 0, size = sizeof(value);
++    LONG err;
++
++    if (service->config.dwStartType != SERVICE_AUTO_START ||
++        !(service->config.dwServiceType & SERVICE_WIN32_OWN_PROCESS) ||
++        (service->config.dwServiceType & SERVICE_WIN32_SHARE_PROCESS))
++        return TRUE;
++
++    if (RegOpenKeyExW(service->db->root_key, service->name, 0, KEY_QUERY_VALUE, &key))
++        return TRUE;
++    err = RegQueryValueExW(key, L"EmberAsyncAutoStart", NULL, &type, (BYTE *)&value, &size);
++    RegCloseKey(key);
++    return err || type != REG_DWORD || size != sizeof(value) || value != 1;
++}
++
+ static void scmdatabase_autostart_services(struct scmdatabase *db)
+ {
+     struct service_entry **services_list;
+@@ -463,7 +484,7 @@ static void scmdatabase_autostart_services(struct scmdatabase *db)
+             services_list[delayed_cnt++] = service;
+             continue;
+         }
+-        err = service_start(service, 0, NULL);
++        err = service_start_internal(service, 0, NULL, autostart_wait_for_status(service));
+         if (err != ERROR_SUCCESS)
+             WINE_FIXME("Auto-start service %s failed to start: %ld\n",
+                        wine_dbgstr_w(service->name), err);
+@@ -1080,9 +1101,13 @@ found:
+ static DWORD service_wait_for_startup(struct service_entry *service, struct process_entry *process)
+ {
+     HANDLE handles[2] = { service->status_changed_event, process->process };
+-    DWORD result;
++    DWORD result, start = GetTickCount();
+ 
++    WINE_TRACE("startup-status begin %s pid %04lx timeout %lu\n",
++                wine_dbgstr_w(service->name), process->process_id, service_pipe_timeout );
+     result = WaitForMultipleObjects( 2, handles, FALSE, service_pipe_timeout );
++    WINE_TRACE("startup-status end %s wait %#lx elapsed %lu\n",
++                wine_dbgstr_w(service->name), result, GetTickCount() - start );
+     if (result != WAIT_OBJECT_0)
+         return ERROR_SERVICE_REQUEST_TIMEOUT;
+ 
+@@ -1155,7 +1180,8 @@ static DWORD process_send_start_message(struct process_entry *process, BOOL shar
+     return result;
+ }
+ 
+-DWORD service_start(struct service_entry *service, DWORD service_argc, LPCWSTR *service_argv)
++static DWORD service_start_internal(struct service_entry *service, DWORD service_argc,
++                                    LPCWSTR *service_argv, BOOL wait_for_status)
+ {
+     struct process_entry *process = NULL;
+     BOOL shared_process;
+@@ -1166,8 +1192,13 @@ DWORD service_start(struct service_entry *service, DWORD service_argc, LPCWSTR *
+     {
+         err = process_send_start_message(process, shared_process, service->name, service_argv, service_argc);
+ 
+-        if (err == ERROR_SUCCESS)
++        WINE_TRACE("startup-ack %s pid %04lx result %lu\n",
++                    wine_dbgstr_w(service->name), process->process_id, err );
++        if (err == ERROR_SUCCESS && wait_for_status)
+             err = service_wait_for_startup(service, process);
++        else if (err == ERROR_SUCCESS)
++            WINE_TRACE("autostart-status deferred %s pid %04lx\n",
++                        wine_dbgstr_w(service->name), process->process_id );
+ 
+         if (err != ERROR_SUCCESS)
+         {
+@@ -1190,6 +1221,11 @@ DWORD service_start(struct service_entry *service, DWORD service_argc, LPCWSTR *
+     return err;
+ }
+ 
++DWORD service_start(struct service_entry *service, DWORD service_argc, LPCWSTR *service_argv)
++{
++    return service_start_internal(service, service_argc, service_argv, TRUE);
++}
++
+ void process_terminate(struct process_entry *process)
+ {
+     struct scmdatabase *db = process->db;
+@@ -1283,8 +1319,14 @@ int __cdecl main(int argc, char *argv[])
+     JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_limit;
+     JOBOBJECT_ASSOCIATE_COMPLETION_PORT port_info;
+     HANDLE started_event, process_monitor_thread;
++    ULONG session_id = 0;
++    WCHAR env[2];
+     DWORD err;
+ 
++    if (GetEnvironmentVariableW(L"WINE_SERVICES_SESSION0", env, ARRAY_SIZE(env)) == 1 && env[0] == '1')
++        NtSetInformationProcess(GetCurrentProcess(), ProcessWineSessionId,
++                                &session_id, sizeof(session_id));
++
+     job_object = CreateJobObjectW(NULL, NULL);
+     job_limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+     if (!SetInformationJobObject(job_object, JobObjectExtendedLimitInformation, &job_limit, sizeof(job_limit)))

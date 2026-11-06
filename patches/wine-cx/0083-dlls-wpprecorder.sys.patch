@@ -1,0 +1,28 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 83/95] dlls-wpprecorder.sys: Ember changes
+
+Base: CrossOver 26.3.0 FOSS sources/wine
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/wpprecorder.sys/Makefile.in b/dlls/wpprecorder.sys/Makefile.in
+new file mode 100644
+index 0000000..a591a86
+--- /dev/null
++++ b/dlls/wpprecorder.sys/Makefile.in
+@@ -0,0 +1,3 @@
++MODULE = wpprecorder.sys
++
++SOURCES = wpprecorder.sys.spec
+diff --git a/dlls/wpprecorder.sys/wpprecorder.sys.spec b/dlls/wpprecorder.sys/wpprecorder.sys.spec
+new file mode 100644
+index 0000000..57ebc34
+--- /dev/null
++++ b/dlls/wpprecorder.sys/wpprecorder.sys.spec
+@@ -0,0 +1,7 @@
++@ stub WppAutoLogStart
++@ stub WppAutoLogStop
++@ stub WppAutoLogTrace
++@ stub imp_WppRecorderConfigure
++@ stub imp_WppRecorderLogCreate
++@ stub imp_WppRecorderLogGetDefault
++@ stub imp_WppRecorderReplay

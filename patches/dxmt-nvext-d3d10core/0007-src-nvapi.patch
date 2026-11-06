@@ -1,0 +1,60 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 7/12] src-nvapi: Ember changes
+
+Base: DXMT 7c8dee1 with submodules
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/src/nvapi/nvapi.cpp b/src/nvapi/nvapi.cpp
+index e9007bb..07dd319 100644
+--- a/src/nvapi/nvapi.cpp
++++ b/src/nvapi/nvapi.cpp
+@@ -795,6 +795,36 @@ NvAPI_GPU_GetLogicalGpuInfo(NvLogicalGpuHandle hLogicalGpu, NV_LOGICAL_GPU_DATA
+   return NVAPI_OK;
+ }
+ 
++/* Ember(10-27): Streamline(sl.common) asks for these while matching the DXGI adapter to an NVAPI GPU. Without them
++ * sl.dlss unloaded itself on FEX (Rosetta only worked because it picked up D3DMetal's nvapi64). Physical and logical
++ * handles are both the Metal registryID here (see NvAPI_EnumPhysicalGPUs / NvAPI_EnumLogicalGPUs). */
++NVAPI_INTERFACE
++NvAPI_GetLogicalGPUFromPhysicalGPU(NvPhysicalGpuHandle hPhysicalGPU, NvLogicalGpuHandle *pLogicalGPU) {
++  if (!pLogicalGPU)
++    return NVAPI_INVALID_ARGUMENT;
++  *pLogicalGPU = (NvLogicalGpuHandle)hPhysicalGPU;
++  return NVAPI_OK;
++}
++
++NVAPI_INTERFACE
++NvAPI_GetPhysicalGPUsFromLogicalGPU(NvLogicalGpuHandle hLogicalGPU, NvPhysicalGpuHandle hPhysicalGPU[NVAPI_MAX_PHYSICAL_GPUS],
++                                    NvU32 *pGpuCount) {
++  if (!hPhysicalGPU || !pGpuCount)
++    return NVAPI_INVALID_ARGUMENT;
++  hPhysicalGPU[0] = (NvPhysicalGpuHandle)hLogicalGPU;
++  *pGpuCount = 1;
++  return NVAPI_OK;
++}
++
++/* D3D12 has no NV shader extension support in DXMT: answer "unsupported" instead of a missing entry point. */
++NVAPI_INTERFACE
++NvAPI_D3D12_IsNvShaderExtnOpCodeSupported(IUnknown *pDev, NvU32 opCode, bool *pSupported) {
++  if (!pDev || !pSupported)
++    return NVAPI_INVALID_ARGUMENT;
++  *pSupported = false;
++  return NVAPI_OK;
++}
++
+ extern "C" __cdecl void *nvapi_QueryInterface(NvU32 id) {
+   switch (id) {
+   case 0x0150e828:
+@@ -899,6 +929,12 @@ extern "C" __cdecl void *nvapi_QueryInterface(NvU32 id) {
+     return (void *)&NvAPI_GPU_GetAdapterIdFromPhysicalGpu;
+   case 0x842b066e:
+     return (void *)&NvAPI_GPU_GetLogicalGpuInfo;
++  case 0xadd604d1:
++    return (void *)&NvAPI_GetLogicalGPUFromPhysicalGPU;
++  case 0xaea3fa32:
++    return (void *)&NvAPI_GetPhysicalGPUsFromLogicalGPU;
++  case 0x3dfacec8:
++    return (void *)&NvAPI_D3D12_IsNvShaderExtnOpCodeSupported;
+   default:
+     break;
+   }

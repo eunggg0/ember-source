@@ -1,16 +1,24 @@
 # wine-x64 — base: Wine 11.0
-#
-# changed 34 files (new 1)
+# Wine x86_64 runtime (Resources/Wine, Resources/Renderers/stock)
+# changed 59 files (new 8)
 M dlls/bcrypt/gnutls.c
+M dlls/dnsapi/query.c
 M dlls/dwrite/opentype.c
+M dlls/imm32/ime.c
+M dlls/imm32/imm.c
 M dlls/kernelbase/process.c
 M dlls/nsi/nsi.c
+M dlls/ntdll/Makefile.in
 M dlls/ntdll/loader.c
 M dlls/ntdll/ntdll.spec
 M dlls/ntdll/thread.c
+A dlls/ntdll/unix/ember_shield_adapter.h
+M dlls/ntdll/unix/file.c
 M dlls/ntdll/unix/loader.c
 M dlls/ntdll/unix/process.c
+M dlls/ntdll/unix/registry.c
 M dlls/ntdll/unix/server.c
+M dlls/ntdll/unix/socket.c
 M dlls/ntdll/unix/sync.c
 M dlls/ntdll/unix/thread.c
 M dlls/ntdll/unix/unix_private.h
@@ -18,20 +26,37 @@ M dlls/ntdll/unix/virtual.c
 M dlls/ntdll/unwind.c
 M dlls/secur32/schannel_gnutls.c
 M dlls/win32u/freetype.c
+M dlls/win32u/sysparams.c
 M dlls/winecoreaudio.drv/coreaudio.c
 M dlls/winemac.drv/cocoa_app.m
 M dlls/winemac.drv/cocoa_cursorclipping.m
 M dlls/winemac.drv/cocoa_window.m
 M dlls/winemac.drv/display.c
 M dlls/winemac.drv/gdi.c
+A dlls/winemac.drv/keyboard_layout.h
 M dlls/winemac.drv/macdrv.h
 M dlls/winemac.drv/macdrv_cocoa.h
 M dlls/winemac.drv/macdrv_main.c
 M dlls/winemac.drv/window.c
+M dlls/winhttp/session.c
+M dlls/wininet/internet.c
 M dlls/wintypes/main.c
+M dlls/ws2_32/protocol.c
 M include/Makefile.in
+A include/wine/ember_blockcount.h
+A include/wine/ember_blocklist.h
+A include/wine/ember_blocklist_core.h
 A include/wine/inproc_sync_macos.h
+M include/wine/server_protocol.h
+M server/Makefile.in
+M server/async.c
 M server/device.c
+A server/ember_shield_gate.h
+A server/ember_shield_route.h
+M server/file.h
 M server/inproc_sync.c
 M server/object.h
+M server/protocol.def
+M server/request_trace.h
+M server/sock.c
 M server/timer.c

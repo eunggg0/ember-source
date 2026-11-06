@@ -1,0 +1,228 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 84/95] dlls-ws2_32: Ember changes
+
+Base: CrossOver 26.3.0 FOSS sources/wine
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/ws2_32/ember_netfast.h b/dlls/ws2_32/ember_netfast.h
+new file mode 100644
+index 0000000..e134a40
+--- /dev/null
++++ b/dlls/ws2_32/ember_netfast.h
+@@ -0,0 +1,52 @@
++/* Ember Link socket defaults. Independently implemented from public APIs.
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ * Included after ws2_32_private.h; uses the existing AFD socket-option path.
++ */
++#ifndef EMBER_NETFAST_H
++#define EMBER_NETFAST_H
++
++static void ember_netfast_socket_defaults( SOCKET socket, int family, int type, int protocol )
++{
++    WCHAR value[2];
++    DWORD saved_error;
++    IO_STATUS_BLOCK io;
++    NTSTATUS status;
++    int enabled = 1, sndbuf;
++
++    if ((family != AF_INET && family != AF_INET6) || type != SOCK_STREAM || protocol != IPPROTO_TCP)
++        return;
++
++    /* Read the calling Windows process environment, never shared wineserver state.
++     * Only the exact value "1" opts in. Do not cache: child exe rules and explicit
++     * process environment changes must remain independent within a bottle.
++     */
++    saved_error = GetLastError();
++    if (GetEnvironmentVariableW( L"EMBER_NETFAST", value, ARRAY_SIZE(value) ) == 1 && value[0] == '1')
++    {
++        status = NtDeviceIoControlFile( (HANDLE)socket, NULL, NULL, NULL, &io,
++                IOCTL_AFD_WINE_SET_TCP_NODELAY, &enabled, sizeof(enabled), NULL, 0 );
++        if (status) WARN( "Ember Link: TCP_NODELAY unavailable, status %#lx\n", status );
++    }
++    /* Research-only opt-in: bound a larger send queue, never enlarge it.
++     * This is independent of NODELAY and must be measured under queue pressure.
++     * Logical Winsock buffer values are not host queue occupancy measurements.
++     */
++    if (GetEnvironmentVariableW( L"EMBER_NET_SNDBUF_16K", value, ARRAY_SIZE(value) ) == 1 && value[0] == '1')
++    {
++        status = NtDeviceIoControlFile( (HANDLE)socket, NULL, NULL, NULL, &io,
++                IOCTL_AFD_WINE_GET_SO_SNDBUF, NULL, 0, &sndbuf, sizeof(sndbuf) );
++        if (!status && sndbuf > 16384)
++        {
++            sndbuf = 16384;
++            status = NtDeviceIoControlFile( (HANDLE)socket, NULL, NULL, NULL, &io,
++                    IOCTL_AFD_WINE_SET_SO_SNDBUF, &sndbuf, sizeof(sndbuf), NULL, 0 );
++        }
++        if (status) WARN( "Ember Link research: send buffer unavailable, status %#lx\n", status );
++    }
++    SetLastError( saved_error );
++    /* Best effort, once at creation. A game's later setsockopt wins. No payload,
++     * ACK, traffic-class, timer, thread-priority, or system-wide changes.
++     * Send-buffer research is separately opt-in above; default remains unchanged.
++     */
++}
++#endif
+diff --git a/dlls/ws2_32/protocol.c b/dlls/ws2_32/protocol.c
+index c0add6b..e1789eb 100644
+--- a/dlls/ws2_32/protocol.c
++++ b/dlls/ws2_32/protocol.c
+@@ -24,6 +24,9 @@
+ 
+ #include "ws2_32_private.h"
+ 
++#define EMBER_BLOCK_MODULE "ws2_32"
++#include "wine/ember_blocklist.h"
++
+ WINE_DEFAULT_DEBUG_CHANNEL(winsock);
+ WINE_DECLARE_DEBUG_CHANNEL(winediag);
+ 
+@@ -160,6 +163,7 @@ int WINAPI getaddrinfo( const char *node, const char *service,
+     TRACE( "node %s, service %s, hints %p\n", debugstr_a(node), debugstr_a(service), hints );
+ 
+     *info = NULL;
++    if (ember_host_deniedA(node)) { SetLastError(WSAHOST_NOT_FOUND); return WSAHOST_NOT_FOUND; }
+ 
+     if (!node && !service)
+     {
+@@ -927,6 +931,8 @@ struct hostent * WINAPI gethostbyname( const char *name )
+         return NULL;
+     }
+ 
++    if (ember_host_deniedA(name)) { SetLastError(WSAHOST_NOT_FOUND); return NULL; }
++
+     if ((ret = WS_CALL( gethostname, &params )))
+     {
+         SetLastError( ret );
+diff --git a/dlls/ws2_32/socket.c b/dlls/ws2_32/socket.c
+index d4223e9..43554ba 100644
+--- a/dlls/ws2_32/socket.c
++++ b/dlls/ws2_32/socket.c
+@@ -33,6 +33,9 @@
+ WINE_DEFAULT_DEBUG_CHANNEL(winsock);
+ WINE_DECLARE_DEBUG_CHANNEL(winediag);
+ 
++/* ember_netfast.h 는 TRACE 를 쓰므로 디버그 채널 선언 뒤에 둔다 */
++#include "ember_netfast.h"
++
+ #define TIMEOUT_INFINITE _I64_MAX
+ 
+ #define u64_from_user_ptr(ptr) ((ULONGLONG)(uintptr_t)(ptr))
+@@ -1262,6 +1265,15 @@ int WINAPI closesocket( SOCKET s )
+     return 0;
+ }
+ 
++static BOOL is_mhy(void)
++{
++    WCHAR enabled[2], disabled[2];
++    return GetEnvironmentVariableW( L"WINE_ENABLE_DISCONNECT", enabled, ARRAY_SIZE(enabled) ) == 1 &&
++           enabled[0] == '1' &&
++           !(GetEnvironmentVariableW( L"WINE_DISABLE_DISCONNECT", disabled, ARRAY_SIZE(disabled) ) == 1 &&
++             disabled[0] == '1');
++}
++
+ 
+ /***********************************************************************
+  *      connect   (ws2_32.4)
+@@ -1272,9 +1284,23 @@ int WINAPI connect( SOCKET s, const struct sockaddr *addr, int len )
+     IO_STATUS_BLOCK io;
+     HANDLE sync_event;
+     NTSTATUS status;
++    static LONG disconnect_once;
++
++    /* DWProton 0ca19edf5: first connection refusal, explicit opt-in only. */
++    if (is_mhy() && !InterlockedCompareExchange( &disconnect_once, 1, 0 ))
++    {
++        WSASetLastError( WSAECONNREFUSED );
++        return SOCKET_ERROR;
++    }
+ 
+     TRACE( "socket %#Ix, addr %s, len %d\n", s, debugstr_sockaddr(addr), len );
+ 
++    if (!addr && len)
++    {
++        SetLastError( WSAEFAULT );
++        return -1;
++    }
++
+     if (!(sync_event = get_sync_event())) return -1;
+ 
+     if (!(params = malloc( sizeof(*params) + len )))
+@@ -1284,7 +1310,8 @@ int WINAPI connect( SOCKET s, const struct sockaddr *addr, int len )
+     }
+     params->addr_len = len;
+     params->synchronous = TRUE;
+-    memcpy( params + 1, addr, len );
++    if (len)
++        memcpy( params + 1, addr, len );
+ 
+     status = NtDeviceIoControlFile( (HANDLE)s, sync_event, NULL, NULL, &io, IOCTL_AFD_WINE_CONNECT,
+                                     params, sizeof(*params) + len, NULL, 0 );
+@@ -3879,6 +3906,51 @@ int WINAPI WSAAsyncSelect( SOCKET s, HWND window, UINT message, LONG mask )
+     return status ? -1 : 0;
+ }
+ 
++static BOOL is_need_timeout_fix(void)
++{
++    WCHAR enabled[2];
++    return GetEnvironmentVariableW( L"WINE_ENABLE_TIMEOUT_FIX", enabled, ARRAY_SIZE(enabled) ) == 1 &&
++           enabled[0] == '1';
++}
++
++static void fix_curl_timeout(void)
++{
++    static LONG count;
++    static const BYTE timeout_buf[] = {0x60, 0xea, 0x00, 0x00, 0x60, 0xea, 0x00, 0x00};
++    HANDLE heap;
++    BYTE *data;
++    PROCESS_HEAP_ENTRY entry;
++
++    if (!is_need_timeout_fix() || InterlockedIncrement( &count ) > 2)
++        return;
++
++    TRACE("HACK: WSACreateEvent fixing curl timeout :xdd:\n");
++
++    heap = GetProcessHeap();
++    HeapLock(heap);
++
++    entry.lpData = NULL;
++    entry.wFlags = PROCESS_HEAP_REGION;
++
++    while (HeapWalk(heap, &entry))
++    {
++        if (entry.cbData < 4)
++            continue;
++        if (!(entry.wFlags & PROCESS_HEAP_ENTRY_BUSY))
++            continue;
++
++        data = entry.lpData;
++        if (data[0] == 0xAD && data[1] == 0xDB && data[2] == 0xDE && data[3] == 0xC0)
++        {
++            if (entry.cbData < 0x300)
++                continue;
++            memcpy(data + 0x2f8, timeout_buf, sizeof(timeout_buf));
++            TRACE("HACK: WSACreateEvent adjusted curl timeout to 60000ms in memory at %p\n", data + 0x2f8);
++        }
++    }
++
++    HeapUnlock(heap);
++}
+ 
+ /***********************************************************************
+  *      WSACreateEvent          (WS2_32.31)
+@@ -3889,6 +3961,8 @@ WSAEVENT WINAPI WSACreateEvent(void)
+     /* Create a manual-reset event, with initial state: unsignaled */
+     TRACE("\n");
+ 
++    fix_curl_timeout();
++
+     return CreateEventW(NULL, TRUE, FALSE, NULL);
+ }
+ 
+@@ -4055,6 +4129,7 @@ SOCKET WINAPI WSASocketW(int af, int type, int protocol,
+         CloseHandle(handle);
+         return INVALID_SOCKET;
+     }
++    ember_netfast_socket_defaults( ret, af, type, protocol );
+     WSASetLastError(0);
+     return ret;
+ }

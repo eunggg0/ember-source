@@ -1,0 +1,57 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 89/95] programs-csrss: Ember changes
+
+Base: CrossOver 26.3.0 FOSS sources/wine
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/programs/csrss/Makefile.in b/programs/csrss/Makefile.in
+new file mode 100644
+index 0000000..e6fe20d
+--- /dev/null
++++ b/programs/csrss/Makefile.in
+@@ -0,0 +1,7 @@
++MODULE    = csrss.exe
++IMPORTS   = ntdll
++
++EXTRADLLFLAGS = -mwindows
++
++SOURCES = \
++	main.c
+diff --git a/programs/csrss/main.c b/programs/csrss/main.c
+new file mode 100644
+index 0000000..0ddffda
+--- /dev/null
++++ b/programs/csrss/main.c
+@@ -0,0 +1,32 @@
++/*
++ * csrss.exe
++ *
++ * Copyright 2026 bluechxin
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#include <windows.h>
++#include <winternl.h>
++
++int __cdecl main( int argc, char *argv[] )
++{
++    HANDLE exit_event = NULL;
++
++    NtSetInformationProcess( GetCurrentProcess(), ProcessWineMakeProcessSystem,
++                             &exit_event, sizeof(HANDLE *) );
++    if (exit_event) WaitForSingleObject( exit_event, INFINITE );
++    return 0;
++}

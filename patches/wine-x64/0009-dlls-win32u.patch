@@ -1,0 +1,206 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 9/17] dlls-win32u: Ember changes
+
+Base: Wine 11.0
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/win32u/freetype.c b/dlls/win32u/freetype.c
+index aeae190..2aca7c5 100644
+--- a/dlls/win32u/freetype.c
++++ b/dlls/win32u/freetype.c
+@@ -75,6 +75,37 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(font);
+ 
++#ifdef __APPLE__
++/* macOS 의 dlopen 은 맨 이름만 주면 DYLD_FALLBACK_LIBRARY_PATH 만 본다.
++ * 그 환경변수는 실행하는 쪽이 빠뜨리기 쉽고, 빠지면 TLS 가 통째로 죽는다
++ * (실측: schannel 이 등록되지 않아 AcquireCredentialsHandle 이
++ *  SEC_E_SECPKG_NOT_FOUND 로 실패하고, 게임 런처가 "네트워크 점검" 으로 멈춘다).
++ * 그래서 우리 .so 의 위치를 기준으로 절대 경로를 만들어 한 번 더 시도한다.
++ *   <root>/lib/wine/<arch>-unix/*.so  →  <root>/lib/<soname> */
++static void *dlopen_beside_wine( const char *soname )
++{
++    Dl_info info;
++    char path[1024];
++    size_t len;
++    char *p;
++    int i;
++
++    if (!dladdr( (void *)dlopen_beside_wine, &info ) || !info.dli_fname) return NULL;
++    len = strlen( info.dli_fname );
++    if (len >= sizeof(path)) return NULL;
++    memcpy( path, info.dli_fname, len + 1 );
++    for (i = 0; i < 3; i++)   /* 파일명, <arch>-unix, wine 을 차례로 벗긴다 */
++    {
++        if (!(p = strrchr( path, '/' ))) return NULL;
++        *p = 0;
++    }
++    if (strlen( path ) + strlen( soname ) + 2 >= sizeof(path)) return NULL;
++    strcat( path, "/" );
++    strcat( path, soname );
++    return dlopen( path, RTLD_NOW );
++}
++#endif
++
+ static FT_Library library = 0;
+ typedef struct
+ {
+@@ -1456,6 +1487,9 @@ static void load_mac_fonts(void)
+ static BOOL init_freetype(void)
+ {
+     ft_handle = dlopen(SONAME_LIBFREETYPE, RTLD_NOW);
++#ifdef __APPLE__
++    if (!ft_handle) ft_handle = dlopen_beside_wine( SONAME_LIBFREETYPE );
++#endif
+     if(!ft_handle) {
+         WINE_MESSAGE(
+       "Wine cannot find the FreeType font library.  To enable Wine to\n"
+diff --git a/dlls/win32u/sysparams.c b/dlls/win32u/sysparams.c
+index eee8149..fd2a726 100644
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -167,6 +167,47 @@ static UINT64 monitor_update_serial;
+ static pthread_mutex_t display_lock = PTHREAD_MUTEX_INITIALIZER;
+ 
+ static BOOL emulate_modeset;
++static BOOL ember_phys_modes;
++
++/* Pure policy: do not grow one axis using an unrelated mode's other axis. */
++static DEVMODEW ember_pixel_maximum( const DEVMODEW *initial, const DEVMODEW *modes, UINT count )
++{
++    DEVMODEW maximum = *initial;
++    const DEVMODEW *mode;
++    BOOL found = FALSE;
++    for (mode = modes; count; --count, mode = NEXT_DEVMODEW(mode))
++    {
++        if (mode->dmDisplayFlags & (WINE_DM_UNSUPPORTED | DM_INTERLACED)) continue;
++        if (mode->dmBitsPerPel != initial->dmBitsPerPel) continue;
++        if (!mode->dmPelsWidth || !mode->dmPelsHeight) continue;
++        if (found && (mode->dmPelsWidth < maximum.dmPelsWidth || mode->dmPelsHeight < maximum.dmPelsHeight)) continue;
++        maximum = *mode;
++        found = TRUE;
++    }
++    return maximum;
++}
++
++static BOOL ember_raw_seed_changed( const DEVMODEW *previous, const DEVMODEW *current )
++{
++    return previous->dmPelsWidth != current->dmPelsWidth ||
++           previous->dmPelsHeight != current->dmPelsHeight ||
++           previous->dmPosition.x != current->dmPosition.x ||
++           previous->dmPosition.y != current->dmPosition.y ||
++           previous->dmDisplayFrequency != current->dmDisplayFrequency ||
++           previous->dmDisplayOrientation != current->dmDisplayOrientation ||
++           previous->dmBitsPerPel != current->dmBitsPerPel;
++}
++
++static DEVMODEW ember_virtual_initial( const DEVMODEW *raw, const DEVMODEW *maximum )
++{
++    DEVMODEW initial = *raw;
++    if (initial.dmPelsWidth > maximum->dmPelsWidth || initial.dmPelsHeight > maximum->dmPelsHeight)
++    {
++        initial.dmPelsWidth = maximum->dmPelsWidth;
++        initial.dmPelsHeight = maximum->dmPelsHeight;
++    }
++    return initial;
++}
+ BOOL decorated_mode = TRUE;
+ UINT64 thunk_lock_callback = 0;
+ 
+@@ -2104,7 +2145,7 @@ static DEVMODEW *get_virtual_modes( const DEVMODEW *initial, const DEVMODEW *max
+     vertical = initial->dmPelsHeight > initial->dmPelsWidth;
+ 
+     freqs[1] = devmode_get( initial, DM_DISPLAYFREQUENCY );
+-    if (freqs[1] <= 60) freqs[1] = 0;
++    if (freqs[1] == 60 || (!ember_phys_modes && freqs[1] < 60)) freqs[1] = 0;
+ 
+     if (!(screen_sizes = get_screen_sizes( maximum, host_modes, host_modes_count, &sizes_count ))) return NULL;
+     modes = malloc( ARRAY_SIZE(freqs) * ARRAY_SIZE(depths) * (sizes_count + 2) * sizeof(*modes) );
+@@ -2133,14 +2174,14 @@ static DEVMODEW *get_virtual_modes( const DEVMODEW *initial, const DEVMODEW *max
+             count += add_virtual_mode( modes, count, &mode );
+         }
+ 
+-        mode.dmPelsWidth = vertical ? initial->dmPelsHeight : initial->dmPelsWidth;
+-        mode.dmPelsHeight = vertical ? initial->dmPelsWidth : initial->dmPelsHeight;
++        mode.dmPelsWidth = vertical && !ember_phys_modes ? initial->dmPelsHeight : initial->dmPelsWidth;
++        mode.dmPelsHeight = vertical && !ember_phys_modes ? initial->dmPelsWidth : initial->dmPelsHeight;
+         count += add_virtual_mode( modes, count, &mode );
+ 
+         if (maximum->dmPelsWidth != initial->dmPelsWidth || maximum->dmPelsHeight != initial->dmPelsHeight)
+         {
+-            mode.dmPelsWidth = vertical ? maximum->dmPelsHeight : maximum->dmPelsWidth;
+-            mode.dmPelsHeight = vertical ? maximum->dmPelsWidth : maximum->dmPelsHeight;
++            mode.dmPelsWidth = vertical && !ember_phys_modes ? maximum->dmPelsHeight : maximum->dmPelsWidth;
++            mode.dmPelsHeight = vertical && !ember_phys_modes ? maximum->dmPelsWidth : maximum->dmPelsHeight;
+             count += add_virtual_mode( modes, count, &mode );
+         }
+     }
+@@ -2153,7 +2194,7 @@ static DEVMODEW *get_virtual_modes( const DEVMODEW *initial, const DEVMODEW *max
+ static void add_modes( const DEVMODEW *current, UINT host_modes_count, const DEVMODEW *host_modes, void *param )
+ {
+     struct device_manager_ctx *ctx = param;
+-    DEVMODEW dummy, physical, detached = *current, virtual, *virtual_modes = NULL;
++    DEVMODEW dummy, physical, maximum, initial, previous_physical, detached = *current, virtual, *virtual_modes = NULL;
+     UINT virtual_count, modes_count = host_modes_count;
+     const DEVMODEW *modes = host_modes;
+     struct source *source;
+@@ -2171,6 +2212,8 @@ static void add_modes( const DEVMODEW *current, UINT host_modes_count, const DEV
+     }
+ 
+     physical = modes_count == 1 ? *modes : *current;
++    maximum = ember_phys_modes ? ember_pixel_maximum( current, host_modes, host_modes_count ) : physical;
++    initial = ember_phys_modes ? ember_virtual_initial( current, &maximum ) : *current;
+     if (ctx->is_primary) ctx->primary = *current;
+ 
+     detached.dmPelsWidth = 0;
+@@ -2187,10 +2230,34 @@ static void add_modes( const DEVMODEW *current, UINT host_modes_count, const DEV
+         if (!read_source_mode( source->key, ENUM_CURRENT_SETTINGS, &virtual ) || is_detached_mode( &virtual ))
+             virtual = physical;
+ 
+-        if ((virtual_modes = get_virtual_modes( current, &physical, host_modes, host_modes_count, &virtual_count )))
++        /* A different Ember launch resolution must invalidate a stale virtual
++         * current, but a refresh during a game must preserve its selected mode. */
++        if (ember_phys_modes &&
++            (!read_source_mode( source->key, WINE_ENUM_PHYSICAL_SETTINGS, &previous_physical ) ||
++             ember_raw_seed_changed( &previous_physical, &physical )))
++        {
++            virtual = initial;
++            write_source_mode( source->key, ENUM_REGISTRY_SETTINGS, &virtual );
++        }
++
++        if ((virtual_modes = get_virtual_modes( &initial, &maximum, host_modes, host_modes_count, &virtual_count )))
+         {
+             modes_count = virtual_count;
+             modes = virtual_modes;
++            if (ember_phys_modes)
++            {
++                UINT i;
++                for (i = 0; i < virtual_count; ++i)
++                    if (virtual_modes[i].dmPelsWidth == virtual.dmPelsWidth &&
++                        virtual_modes[i].dmPelsHeight == virtual.dmPelsHeight &&
++                        virtual_modes[i].dmBitsPerPel == virtual.dmBitsPerPel &&
++                        virtual_modes[i].dmDisplayFrequency == virtual.dmDisplayFrequency) break;
++                if (i == virtual_count)
++                {
++                    virtual = initial;
++                    write_source_mode( source->key, ENUM_REGISTRY_SETTINGS, &virtual );
++                }
++            }
+             current = &virtual;
+ 
+             write_source_mode( source->key, WINE_ENUM_PHYSICAL_SETTINGS, &physical );
+@@ -5943,6 +6010,13 @@ void sysparams_init(void)
+     if (!get_config_key( hkey, appkey, "EmulateModeset", buffer, sizeof(buffer) ))
+         emulate_modeset = IS_OPTION_TRUE( buffer[0] );
+ 
++    {
++        const char *value = getenv( "EMBER_PHYS_MODES" );
++        ember_phys_modes = value && !strcmp( value, "1" );
++        /* Reuse source physical/current mapping, never call host modesetting. */
++        if (ember_phys_modes) emulate_modeset = TRUE;
++    }
++
+ #undef IS_OPTION_TRUE
+ 
+     if (app_compat_flags)

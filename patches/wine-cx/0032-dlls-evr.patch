@@ -1,0 +1,31 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 32/95] dlls-evr: Ember changes
+
+Base: CrossOver 26.3.0 FOSS sources/wine
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/evr/mixer.c b/dlls/evr/mixer.c
+index deedf03..65f5501 100644
+--- a/dlls/evr/mixer.c
++++ b/dlls/evr/mixer.c
+@@ -778,7 +778,7 @@ static HRESULT video_mixer_collect_output_types(struct video_mixer *mixer, const
+                 sizeof(aperture), NULL)))
+         {
+             width = aperture.OffsetX.value + aperture.Area.cx;
+-            height = aperture.OffsetX.value + aperture.Area.cy;
++            height = aperture.OffsetY.value + aperture.Area.cy;
+         }
+         else
+         {
+diff --git a/dlls/evr/presenter.c b/dlls/evr/presenter.c
+index 7ad59cc..6383ae0 100644
+--- a/dlls/evr/presenter.c
++++ b/dlls/evr/presenter.c
+@@ -1446,6 +1446,7 @@ static HRESULT WINAPI video_presenter_control_SetVideoWindow(IMFVideoDisplayCont
+     {
+         if (presenter->swapchain)
+             IDirect3DSwapChain9_Release(presenter->swapchain);
++        presenter->swapchain = NULL;
+         presenter->video_window = window;
+         hr = video_presenter_create_swapchain(presenter);
+     }

@@ -1,0 +1,20 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 11/46] dlls-mf: Ember changes
+
+Base: Wine 11.18
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/mf/sar.c b/dlls/mf/sar.c
+index 69bece3..c6ebdcc 100644
+--- a/dlls/mf/sar.c
++++ b/dlls/mf/sar.c
+@@ -2145,7 +2145,8 @@ static void audio_renderer_render(struct audio_renderer *renderer, IMFAsyncResul
+ 
+     if (list_empty(&renderer->queue))
+     {
+-        if (!(renderer->flags & SAR_SAMPLE_REQUESTED))
++        if (!(renderer->flags & SAR_SAMPLE_REQUESTED)
++                && (renderer->clock_state != MFCLOCK_STATE_STOPPED || renderer->flags & SAR_PREROLLED))
+         {
+             IMFMediaEventQueue_QueueEventParamVar(renderer->stream_event_queue, MEStreamSinkRequestSample, &GUID_NULL, S_OK, NULL);
+             renderer->flags |= SAR_SAMPLE_REQUESTED;

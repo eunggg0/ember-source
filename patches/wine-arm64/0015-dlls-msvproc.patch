@@ -1,0 +1,165 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 15/46] dlls-msvproc: Ember changes
+
+Base: Wine 11.18
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/msvproc/video_processor.c b/dlls/msvproc/video_processor.c
+index f2ad3e0..e18ebde 100644
+--- a/dlls/msvproc/video_processor.c
++++ b/dlls/msvproc/video_processor.c
+@@ -32,6 +32,7 @@
+ #include "mftransform.h"
+ 
+ #include <libavutil/avutil.h>
++#include <libavutil/cpu.h>
+ #include <libavutil/imgutils.h>
+ #include <libavutil/opt.h>
+ #include <libswscale/swscale.h>
+@@ -173,9 +174,34 @@ static int fill_arrays_with_format(uint8_t *planes[4], int strides[4], AVBufferR
+ {
+     enum AVPixelFormat pix_fmt = pixel_format_from_video_subtype(&format->guidFormat);
+     UINT width = format->videoInfo.dwWidth, height = format->videoInfo.dwHeight;
+-    int size;
++    int size, ret;
++
++    if ((ret = av_image_check_size(width, height, 0, NULL)) < 0)
++        return ret;
++    if ((ret = av_image_fill_linesizes(strides, pix_fmt, width)) < 0)
++        return ret;
++
++    if (pitch)
++    {
++        /* Lock2DSize reports the physical pitch, including row padding. */
++        if (pitch == INT32_MIN || abs(pitch) < strides[0])
++            return AVERROR(EINVAL);
++        strides[0] = abs(pitch);
++        if (pix_fmt == AV_PIX_FMT_YUV420P)
++            strides[1] = strides[2] = strides[0] / 2 + strides[0] % 2;
++        else if (pix_fmt == AV_PIX_FMT_YUV411P)
++            strides[1] = strides[2] = strides[0] / 4 + !!(strides[0] % 4);
++        else if (pix_fmt == AV_PIX_FMT_NV12)
++        {
++            if (strides[0] < strides[1])
++                return AVERROR(EINVAL);
++            strides[1] = strides[0];
++        }
++    }
+ 
+-    size = av_image_fill_arrays(planes, strides, buffer->data, pix_fmt, width, height, 1);
++    /* Compute all plane sizes before forming pointers into the caller's buffer. */
++    if ((size = av_image_fill_pointers(planes, pix_fmt, height, NULL, strides)) < 0)
++        return size;
+     TRACE("buffer %p / %#Ix size %d pitch %ld, planes %p,%p,%p strides %d,%d,%d\n", buffer->data, buffer->size,
+             size, pitch, planes[0], planes[1], planes[2], strides[0], strides[1], strides[2]);
+     if (size > buffer->size)
+@@ -185,19 +211,9 @@ static int fill_arrays_with_format(uint8_t *planes[4], int strides[4], AVBufferR
+         return -1;
+     }
+ 
+-    if (pitch && abs(pitch) != strides[0])
+-    {
+-        int new_strides[4] = {0};
+-        for (int i = 0; i < 4; i++) new_strides[i] = (abs(pitch) * strides[i]) / strides[0];
+-        for (int i = 1; i < 4 && planes[i]; i++)
+-        {
+-            size_t height = (planes[i] - planes[i - 1]) / strides[i - 1];
+-            planes[i] = planes[i - 1] + height * new_strides[i - 1];
+-        }
+-        memcpy(strides, new_strides, sizeof(new_strides));
+-    }
++    av_image_fill_pointers(planes, pix_fmt, height, buffer->data, strides);
+ 
+-    if ((format->videoInfo.VideoFlags & MFVideoFlag_BottomUpLinearRep) && pitch <= 0)
++    if (pitch < 0 || (!pitch && (format->videoInfo.VideoFlags & MFVideoFlag_BottomUpLinearRep)))
+     {
+         planes[0] = planes[0] + strides[0] * (format->videoInfo.dwHeight - 1);
+         strides[0] = -strides[0];
+@@ -253,7 +269,8 @@ static int video_frame_copy_from_buffer(AVFrame *frame, const MFVIDEOFORMAT *for
+ 
+     ERR("frame %s, format %p, buffer %p\n", debugstr_avframe(frame), format, buffer);
+ 
+-    size = fill_arrays_with_format(input_planes, input_strides, buffer, format, pitch);
++    if ((size = fill_arrays_with_format(input_planes, input_strides, buffer, format, pitch)) < 0)
++        return size;
+     av_image_copy(frame->data, frame->linesize, (const UINT8 **)input_planes, input_strides,
+             frame->format, format->videoInfo.dwWidth, format->videoInfo.dwHeight);
+     return size;
+@@ -267,10 +284,12 @@ static int video_frame_copy_to_buffer(AVFrame *frame, const MFVIDEOFORMAT *forma
+ 
+     ERR("frame %s, format %p, buffer %p\n", debugstr_avframe(frame), format, buffer);
+ 
+-    size = fill_arrays_with_format(output_planes, output_strides, buffer, format, pitch);
++    if ((size = fill_arrays_with_format(output_planes, output_strides, buffer, format, pitch)) < 0)
++        return size;
+     av_image_copy(output_planes, output_strides, (const UINT8 **)frame->data, frame->linesize,
+             frame->format, format->videoInfo.dwWidth, format->videoInfo.dwHeight);
+-    return size;
++    /* Sample length describes the contiguous image, not a mapped surface's pitch. */
++    return av_image_get_buffer_size(frame->format, format->videoInfo.dwWidth, format->videoInfo.dwHeight, 1);
+ }
+ 
+ static const GUID *const input_types[] =
+@@ -344,20 +363,21 @@ static HRESULT video_processor_process_frame(struct video_processor *impl, AVFra
+     AVFrame output_frame = {0};
+     AVBufferRef *buffer;
+     IMFSample *sample;
+-    int size, ret;
++    int ret;
+     LONG pitch;
+     HRESULT hr;
+ 
+     if (!(buffer = buffer_from_media_buffer(output->pBuffer, 0, &pitch)))
+         return E_OUTOFMEMORY;
+-    if ((size = video_frame_wrap_buffer(&output_frame, impl->output_format, buffer, pitch)) < 0)
+-        av_frame_move_ref(&output_frame, &impl->output_frame);
++    /* Alignment alone does not guarantee the tail padding swscale may write.
++     * Keep SIMD stores in the AVFrame allocated by av_frame_get_buffer(). */
++    av_frame_move_ref(&output_frame, &impl->output_frame);
+ 
+     TRACE("input %s output %s\n", debugstr_avframe(input_frame), debugstr_avframe(&output_frame));
+ 
+     if ((ret = sws_scale_frame(impl->context, &output_frame, input_frame)) < 0)
+         ERR("error ret %d (%s)\n", -ret, av_err2str(ret));
+-    else if ((ret = size) < 0)
++    else
+         ret = video_frame_copy_to_buffer(&output_frame, impl->output_format, buffer, pitch);
+ 
+     av_buffer_unref(&buffer);
+@@ -419,10 +439,17 @@ static HRESULT video_processor_process_input(struct video_processor *impl, const
+     if ((ret = video_frame_wrap_buffer(&impl->current_frame, impl->input_format, buffer, pitch)) < 0)
+     {
+         ret = video_frame_copy_from_buffer(&impl->input_frame, impl->input_format, buffer, pitch);
+-        av_frame_move_ref(&impl->current_frame, &impl->input_frame);
++        if (ret >= 0)
++            av_frame_move_ref(&impl->current_frame, &impl->input_frame);
+     }
+     av_buffer_unref(&buffer);
+ 
++    if (ret < 0)
++    {
++        av_frame_unref(&impl->current_frame);
++        return E_FAIL;
++    }
++
+     if (SUCCEEDED(hr = IMediaBuffer_QueryInterface(input->pBuffer, &IID_IMFSample, (void **)&sample)))
+     {
+         if (FAILED(IMFSample_GetSampleTime(sample, &pts)))
+@@ -556,6 +583,17 @@ static HRESULT video_processor_init(struct video_processor *impl)
+         goto failed;
+     video_frame_init_aperture(&impl->output_frame, impl->input_format);
+ 
++#ifdef __arm64ec__
++    /* Ember perfpush2(10-03): 원인(arm64ec yuv2rgb_neon.S 의 compute_rgb 가 B 합을 읽기 전에 덮음)을 고쳐 NEON 을 다시 쓴다
++     * (swstest 456 조합이 윗물 aarch64 NEON 과 같음, 720p NV12→BGRA 1.63→0.17ms). EMBER_SWS_CPU=0 이면 예전처럼 C 경로. */
++    /* Ember(10-03 compat2): ARM64EC 용 swscale NEON(libs/ffmpeg/libswscale/arm64ec 의 .S)이 NV12→RGB32 에서 한 칸 걸러
++     * 파랑을 잃어 세로 줄무늬가 생긴다(발헤임 FEX 인트로, mfshared 실측: 이웃 화소 차 25.2 → C 경로 3.3, 기준 ffmpeg 3.3).
++     * 이 dll 안의 ffmpeg 정적 사본만 C 경로로.(옛 우회, 아래 perfpush2 로 대체) */
++    {
++        char buf[8];
++        if (GetEnvironmentVariableA("EMBER_SWS_CPU", buf, sizeof(buf)) && buf[0] == '0') av_force_cpu_flags(0);
++    }
++#endif
+     av_opt_set(impl->context, "sws_flags", "neighbor", 0);
+     av_opt_set_int(impl->context, "threads", 0, 0);
+     av_opt_set_int(impl->context, "srcw", impl->input_frame.width, 0);

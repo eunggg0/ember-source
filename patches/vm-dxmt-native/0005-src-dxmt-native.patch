@@ -1,0 +1,67 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 5/7] src-dxmt-native: Ember changes
+
+Base: utmapp/dxmt 66e27f37 (GitHub archive)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/src/dxmt-native/dxmt_native.cpp b/src/dxmt-native/dxmt_native.cpp
+index bf75292..cd5baeb 100644
+--- a/src/dxmt-native/dxmt_native.cpp
++++ b/src/dxmt-native/dxmt_native.cpp
+@@ -13,6 +13,7 @@
+ #include "log/log.hpp"
+ #include "dxmt_native.h"
+ #include "../d3d11/d3d11_resource.hpp"
++#include "dxmt_xsync.hpp"
+ 
+ #include <directx-native/dxn_log.h>
+ 
+@@ -79,3 +80,22 @@ dxmt_d3d11_buffer_external_cookie(void *d3d11_buffer, const void *mapped_ptr, ui
+              ? 0
+              : -1;
+ }
++
++/* Ember sharedorder-1030 embedder extras (optional; the render server dlsyms
++ * them and works without). */
++extern "C" uint32_t
++dxmt_ember_sharedorder_abi(void) {
++  /* Low half: the sync-page format of this library (kXSyncVersion; 1 = v1
++   * page, 2 = v2 page with blocked state / quarantine -- gateauto-1030 raised
++   * it from the constant 1 so a capset probe can tell v2 from v1).  Bits
++   * 16..17: the active NPT_SHARED_ORDER mode of THIS process (0 off, 1 war,
++   * 2 raw, 3 both); render workers inherit the same environment, so a probe
++   * in the QEMU process sees the mode the workers will run with. */
++  static_assert(dxmt::kXSyncVersion == 2, "gateauto-1030: abi tracks the v2 sync page");
++  return (uint32_t)dxmt::kXSyncVersion | ((uint32_t)dxmt::XSyncGetConfig().mode << 16);
++}
++
++extern "C" void
++dxmt_ember_set_gpu_error_callback(void (*cb)(void *user, uint64_t frame, const char *description), void *user) {
++  dxmt::XSyncSetGpuErrorCallback(cb, user);
++}
+diff --git a/src/dxmt-native/dxmt_native.exports b/src/dxmt-native/dxmt_native.exports
+index 904cf71..6660567 100644
+--- a/src/dxmt-native/dxmt_native.exports
++++ b/src/dxmt-native/dxmt_native.exports
+@@ -30,3 +30,7 @@ _dxmt_event_wait
+ _dxmt_native_abi_version
+ _dxmt_d3d11_buffer_bind_external_fd
+ _dxmt_d3d11_buffer_external_cookie
++
++# Ember sharedorder-1030
++_dxmt_ember_sharedorder_abi
++_dxmt_ember_set_gpu_error_callback
+diff --git a/src/dxmt-native/meson.build b/src/dxmt-native/meson.build
+index 59d5d86..9a7d26d 100644
+--- a/src/dxmt-native/meson.build
++++ b/src/dxmt-native/meson.build
+@@ -36,7 +36,8 @@ dxmt_native_umbrella = shared_library('dxmt-native',
+   link_whole          : dxmt_native_whole,
+   dependencies        : dxmt_native_deps,
+   include_directories : [ dxmt_include_path ],
+-  link_args           : [ '-Wl,-exported_symbols_list,' + join_paths(meson.current_build_dir(), 'dxmt-native.exports') ],
++  link_args           : [ '-Wl,-exported_symbols_list,' + join_paths(meson.current_build_dir(), 'dxmt-native.exports'),
++                          '-Wl,-framework,IOSurface', '-Wl,-framework,CoreFoundation' ],
+   link_depends        : [ dxmt_native_exports ],
+   install             : true,
+ )

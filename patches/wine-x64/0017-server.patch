@@ -1,0 +1,945 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 17/17] server: Ember changes
+
+Base: Wine 11.0
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/server/Makefile.in b/server/Makefile.in
+index 84a6bd7..a84b771 100644
+--- a/server/Makefile.in
++++ b/server/Makefile.in
+@@ -1,6 +1,8 @@
+ PROGRAMS = wineserver
+ 
+ SOURCES = \
++	ember_shield_gate.h \
++	ember_shield_route.h \
+ 	async.c \
+ 	atom.c \
+ 	change.c \
+diff --git a/server/async.c b/server/async.c
+index 907d5f5..a86e4c8 100644
+--- a/server/async.c
++++ b/server/async.c
+@@ -325,6 +325,15 @@ void queue_async( struct async_queue *queue, struct async *async )
+     if (!async->is_system) set_fd_signaled( async->fd, 0 );
+ }
+ 
++/* Move a pending request between queues of the same fd, preserving ownership. */
++void requeue_async( struct async_queue *queue, struct async *async )
++{
++    assert( async->queue );
++    list_remove( &async->queue_entry );
++    async->queue = queue;
++    list_add_tail( &queue->queue, &async->queue_entry );
++}
++
+ /* create an async on a given queue of a fd */
+ struct async *create_async( struct fd *fd, struct thread *thread, const struct async_data *data, struct iosb *iosb )
+ {
+diff --git a/server/device.c b/server/device.c
+index 3eed743..7ed78e4 100644
+--- a/server/device.c
++++ b/server/device.c
+@@ -671,11 +671,41 @@ static void device_file_flush( struct fd *fd, struct async *async )
+     queue_irp( file, &params, async );
+ }
+ 
++/* Ember 진단: WINESERVER_IOCTL_STATS=1 이면 장치별 ioctl 코드 횟수를 5초마다 stderr 에 찍는다 */
++static void ember_ioctl_stats( struct device_file *file, ioctl_code_t code )
++{
++    static int enabled = -1;
++    static struct { struct device *device; ioctl_code_t code; unsigned int count; } slots[64];
++    static unsigned int nslots;
++    static timeout_t last;
++    unsigned int i;
++
++    if (enabled < 0) enabled = getenv( "WINESERVER_IOCTL_STATS" ) != NULL;
++    if (!enabled) return;
++    for (i = 0; i < nslots; i++) if (slots[i].device == file->device && slots[i].code == code) break;
++    if (i == nslots && nslots < 64) { slots[nslots].device = file->device; slots[nslots].code = code; slots[nslots].count = 0; nslots++; }
++    if (i < 64) slots[i].count++;
++    if (!last) last = current_time;
++    if (current_time - last >= 5 * TICKS_PER_SEC)
++    {
++        fprintf( stderr, "ember-ioctl-stats (%.1fs):", (current_time - last) / (double)TICKS_PER_SEC );
++        for (i = 0; i < nslots; i++)
++        {
++            if (!slots[i].count) continue;
++            fprintf( stderr, " dev=%p code=%08x n=%u;", slots[i].device, slots[i].code, slots[i].count );
++            slots[i].count = 0;
++        }
++        fprintf( stderr, "\n" );
++        last = current_time;
++    }
++}
++
+ static void device_file_ioctl( struct fd *fd, ioctl_code_t code, struct async *async )
+ {
+     struct device_file *file = get_fd_user( fd );
+     union irp_params params;
+ 
++    ember_ioctl_stats( file, code );
+     memset( &params, 0, sizeof(params) );
+     params.ioctl.type = IRP_CALL_IOCTL;
+     params.ioctl.code = code;
+diff --git a/server/ember_shield_gate.h b/server/ember_shield_gate.h
+new file mode 100644
+index 0000000..f57ff4b
+--- /dev/null
++++ b/server/ember_shield_gate.h
+@@ -0,0 +1,58 @@
++/* Ember-owned asynchronous preconnect transport. No Wine/GPL product code. */
++#ifndef EMBER_SHIELD_GATE_H
++#define EMBER_SHIELD_GATE_H
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++#include <stdint.h>
++struct es_gate {
++ int fd; uint64_t id, deadline, connection, instance; unsigned pid, verified, signed_valid, same_signer;
++ char local[sizeof(((struct sockaddr_un *)0)->sun_path)];
++ struct sockaddr_un host;
++ char address[128];
++};
++static void es_gate_close(struct es_gate *g) {
++ if(g->fd>=0)close(g->fd);g->fd=-1;if(g->local[0])unlink(g->local);g->local[0]=0;
++}
++static void es_gate_message(struct es_gate *g,const char *kind,int allow,int timeout) {
++ char b[640];int n=snprintf(b,sizeof b,"{\"version\":1,\"kind\":\"%s\",\"request_id\":%llu,\"pid\":%u,\"instance\":%llu,\"connection_id\":%llu,\"address\":\"%s\",\"identity_verified\":%s,\"signed_valid\":%s,\"trusted_same_signer\":%s,\"allow\":%s,\"timeout\":%s}",kind,(unsigned long long)g->id,g->pid,(unsigned long long)g->instance,(unsigned long long)g->connection,g->address,g->verified?"true":"false",g->signed_valid?"true":"false",g->same_signer?"true":"false",allow?"true":"false",timeout?"true":"false");
++ if(n>0 && (size_t)n<sizeof b)sendto(g->fd,b,(size_t)n,0,(struct sockaddr *)&g->host,sizeof g->host);
++}
++static int es_gate_open(struct es_gate *g,const char *host,unsigned pid,const char *address,uint64_t id,uint64_t instance,unsigned verified,unsigned signed_valid,unsigned same_signer,uint64_t now) {
++ struct sockaddr_un local;struct stat st;char parent[108],*slash;
++ memset(g,0,sizeof *g);g->fd=-1;
++ if(!host || host[0]!='/' || strlen(host)>=sizeof g->host.sun_path || strlen(address)>=sizeof g->address)return 0;
++ snprintf(parent,sizeof parent,"%s",host);slash=strrchr(parent,'/');if(!slash || slash==parent)return 0;*slash=0;
++ if(lstat(parent,&st) || !S_ISDIR(st.st_mode) || st.st_uid!=getuid() || (st.st_mode&077))return 0;
++ if(lstat(host,&st) || !S_ISSOCK(st.st_mode) || st.st_uid!=getuid() || (st.st_mode&077))return 0;
++ g->host.sun_family=AF_UNIX;snprintf(g->host.sun_path,sizeof g->host.sun_path,"%s",host);
++ g->id=id;g->instance=instance;g->verified=verified;g->signed_valid=signed_valid;g->same_signer=same_signer;g->connection=id;g->pid=pid;g->deadline=now+5000;snprintf(g->address,sizeof g->address,"%s",address);
++ if(snprintf(g->local,sizeof g->local,"%s/q%u-%llx",parent,(unsigned)getpid(),(unsigned long long)id)>=(int)sizeof g->local)return 0;
++ g->fd=socket(AF_UNIX,SOCK_DGRAM,0);if(g->fd<0)return 0;
++ fcntl(g->fd,F_SETFD,FD_CLOEXEC);fcntl(g->fd,F_SETFL,O_NONBLOCK);
++ memset(&local,0,sizeof local);local.sun_family=AF_UNIX;snprintf(local.sun_path,sizeof local.sun_path,"%s",g->local);
++ if(bind(g->fd,(struct sockaddr *)&local,sizeof local) || chmod(g->local,0600)){es_gate_close(g);return 0;}
++ es_gate_message(g,"question.request",1,0);return 1;
++}
++/* 0 pending; 1 allow; -1 deny. A missing UI always expires to allow. */
++static int es_gate_poll(struct es_gate *g,uint64_t now) {
++ char b[512];struct sockaddr_un from;socklen_t len=sizeof from;ssize_t n;
++ if(now>=g->deadline){es_gate_message(g,"question.result",1,1);return 1;}
++ n=recvfrom(g->fd,b,sizeof b-1,0,(struct sockaddr *)&from,&len);
++ if(n>0 && from.sun_family==AF_UNIX && !strncmp(from.sun_path,g->host.sun_path,sizeof from.sun_path)) {
++  char *id,*allow,*end;uint64_t value;b[n]=0;
++  id=strstr(b,"\"request_id\"");allow=strstr(b,"\"allow\"");
++  if(!id || !allow || !(id=strchr(id,':')) || !(allow=strchr(allow,':')))return 0;
++  value=strtoull(id+1,&end,10);if(end==id+1 || value!=g->id || (*end!=',' && *end!='}' && *end!=' ' && *end!='\n'))return 0;
++  do{allow++;}while(*allow==' ' || *allow=='\t');
++  if(!strncmp(allow,"true",4) && (allow[4]==',' || allow[4]=='}' || allow[4]==' ' || allow[4]=='\n')){es_gate_message(g,"question.result",1,0);return 1;}
++  if(!strncmp(allow,"false",5) && (allow[5]==',' || allow[5]=='}' || allow[5]==' ' || allow[5]=='\n')){es_gate_message(g,"question.result",0,0);return -1;}
++ }
++ return 0;
++}
++#endif
+diff --git a/server/ember_shield_route.h b/server/ember_shield_route.h
+new file mode 100644
+index 0000000..f69dd7e
+--- /dev/null
++++ b/server/ember_shield_route.h
+@@ -0,0 +1,43 @@
++#ifndef EMBER_SHIELD_ROUTE_H
++#define EMBER_SHIELD_ROUTE_H
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <unistd.h>
++#include <stdint.h>
++#include <string.h>
++#ifdef __APPLE__
++#include <libproc.h>
++#endif
++static inline uint64_t es_process_birth(unsigned pid) {
++#ifdef __APPLE__
++ struct proc_bsdinfo info;
++ if(proc_pidinfo((int)pid,PROC_PIDTBSDINFO,0,&info,sizeof info)!=(int)sizeof info)return 0;
++ return info.pbi_start_tvsec*1000000ull+info.pbi_start_tvusec;
++#else
++ (void)pid;return 0; /* Unsupported platform does not trust routes. */
++#endif
++}
++static inline int es_private_directory(int parent,const char *name) {
++ struct stat st;int fd=openat(parent,name,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
++ if(fd<0)return -1;
++ if(fstat(fd,&st) || !S_ISDIR(st.st_mode) || st.st_uid!=getuid() || (st.st_mode&077)){close(fd);return -1;}
++ return fd;
++}
++static inline int es_route_read(int root,unsigned pid,char *socket_path,size_t cap,uint64_t *instance,unsigned *verified,unsigned *signed_valid,unsigned *same_signer) {
++ int shield,clients,fd,result=0;struct stat st;char name[32],path[108],header[48];unsigned cautious,matched,signed_flag,trusted;unsigned long long birth,generation;FILE *f;
++ uint64_t expected=es_process_birth(pid);if(!expected)return 0;
++ if((shield=es_private_directory(root,".ember-shield"))<0)return 0;
++ clients=es_private_directory(shield,"clients");close(shield);if(clients<0)return 0;
++ snprintf(name,sizeof name,"%u",pid);fd=openat(clients,name,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);close(clients);if(fd<0)return 0;
++ if(fstat(fd,&st) || !S_ISREG(st.st_mode) || st.st_uid!=getuid() || (st.st_mode&077) || st.st_size>512){close(fd);return 0;}
++ f=fdopen(fd,"r");if(!f){close(fd);return 0;}
++ if(fgets(header,sizeof header,f) && !strcmp(header,"EMBER_SHIELD_ROUTE_V2\n") &&
++    fscanf(f,"%llu %llu %u %u %u %u\n%107[^\n]",&birth,&generation,&cautious,&matched,&signed_flag,&trusted,path)==7 &&
++    birth==expected && generation && matched<=1 && signed_flag<=1 && trusted<=1 && cautious==1 && path[0]=='/' && strlen(path)<cap) {
++  snprintf(socket_path,cap,"%s",path);*instance=generation;*verified=matched;*signed_valid=signed_flag;*same_signer=trusted;result=1;
++ }
++ fclose(f);return result;
++}
++#endif
+diff --git a/server/file.h b/server/file.h
+index e1485e4..9c267a4 100644
+--- a/server/file.h
++++ b/server/file.h
+@@ -258,6 +258,7 @@ extern struct async *create_request_async( struct fd *fd, unsigned int comp_flag
+                                            int is_system );
+ extern obj_handle_t async_handoff( struct async *async, data_size_t *result, int force_blocking );
+ extern void queue_async( struct async_queue *queue, struct async *async );
++extern void requeue_async( struct async_queue *queue, struct async *async );
+ extern void async_set_timeout( struct async *async, timeout_t timeout, unsigned int status );
+ extern void async_set_result( struct object *obj, unsigned int status, apc_param_t total );
+ extern void async_set_completion_callback( struct async *async, async_completion_callback func, void *private );
+diff --git a/server/inproc_sync.c b/server/inproc_sync.c
+index a291d10..d2cddc7 100644
+--- a/server/inproc_sync.c
++++ b/server/inproc_sync.c
+@@ -240,6 +240,297 @@ static int get_obj_inproc_sync( struct object *obj, int *type )
+     return fd;
+ }
+ 
++int inproc_sync_publish_timer( struct object *obj, timeout_t due, unsigned int period_ms )
++{
++    return 0;
++}
++
++#elif defined(__APPLE__)   /* macOS: 공유 메모리 + __ulock 으로 직접 구현한다 */
++
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <unistd.h>
++#include "wine/inproc_sync_macos.h"
++
++extern int __ulock_wake( uint32_t operation, void *addr, uint64_t wake_value );
++#define UL_COMPARE_AND_WAIT_SHARED 3
++#define ULF_WAKE_ALL               0x00000100
++
++static struct macos_sync_global *macos_global;
++
++/* macOS 에는 /dev/ntsync 같은 커널 장치가 없다.
++ * 그 자리에 전역 깨우기 카운터를 담은 공유 메모리를 하나 두고, 그 fd 를 넘긴다.
++ * 클라이언트는 이 값이 0 이상이면 in-process 동기화가 있다고 본다.
++ *
++ * 기본으로 켠다. WINEMSYNC=0 으로 끄면 예전처럼 서버가 모든 대기를 맡는다. */
++int get_inproc_device_fd(void)
++{
++    static int fd = -2;
++
++    if (fd == -2)
++    {
++        const char *opt = getenv( "WINEMSYNC" );
++        char name[64];
++        void *map;
++
++        fd = -1;
++        if (opt && !atoi( opt )) return fd;
++
++        snprintf( name, sizeof(name), "/wine-sync-global-%u", (unsigned int)getpid() );
++        shm_unlink( name );
++        if ((fd = shm_open( name, O_RDWR | O_CREAT | O_EXCL, 0600 )) == -1) return fd = -1;
++        shm_unlink( name );
++        if (ftruncate( fd, MACOS_SYNC_MAP_SIZE ) == -1) goto failed;
++        map = mmap( NULL, MACOS_SYNC_MAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
++        if (map == MAP_FAILED) goto failed;
++        memset( map, 0, MACOS_SYNC_MAP_SIZE );
++        macos_global = map;
++    }
++    return fd;
++
++failed:
++    close( fd );
++    return fd = -1;
++}
++
++struct inproc_sync
++{
++    struct object            obj;
++    enum inproc_sync_type    type;
++    int                      fd;
++    struct macos_sync_state *state;   /* 공유 메모리. 누가 기다리기 전엔 NULL(지연 생성) */
++    struct list              entry;
++    /* state 가 없을 때의 초기값. 파일 잠금·IRP 마다 내부 동기화 객체가 생기는데 대부분 아무도 기다리지 않는다.
++     * shm_open+mmap 을 그때마다 하면(실측 wineserver 6%) 낭비라, fd 를 요청하는 쪽이 있을 때만 만든다. */
++    int                      init_manual;
++    unsigned int             init_max;
++    unsigned int             init_count;
++    int                      init_owner;
++    int                      init_abandoned;
++};
++
++static struct list inproc_mutexes = LIST_INIT( inproc_mutexes );
++
++static void inproc_sync_dump( struct object *obj, int verbose );
++static int inproc_sync_signal( struct object *obj, unsigned int access, int signal );
++static void inproc_sync_destroy( struct object *obj );
++
++static const struct object_ops inproc_sync_ops =
++{
++    sizeof(struct inproc_sync), &no_type, inproc_sync_dump, no_add_queue, NULL, NULL, NULL,
++    inproc_sync_signal, no_get_fd, default_get_sync, default_map_access, default_get_sd,
++    default_set_sd, default_get_full_name, no_lookup_name, directory_link_name,
++    default_unlink_name, no_open_file, no_kernel_obj_list, no_close_handle, inproc_sync_destroy,
++};
++
++static int macos_sync_materialize( struct inproc_sync *sync );
++
++int get_inproc_sync_fd( struct inproc_sync *sync )
++{
++    if (!sync) return -1;
++    if (macos_sync_materialize( sync ) < 0) return -1;
++    return sync->fd;
++}
++
++/* 자는 사람이 없으면 깨우기 syscall 을 부르지 않는다.
++ * 게임은 대부분 이미 신호가 와 있는 객체를 건드린다. 그 길에서 syscall 을 빼는 게 핵심이다. */
++static void wake_waiters( struct macos_sync_state *state )
++{
++    __atomic_add_fetch( &state->seq, 1, __ATOMIC_SEQ_CST );
++    if (__atomic_load_n( &state->waiters, __ATOMIC_SEQ_CST ))
++        __ulock_wake( UL_COMPARE_AND_WAIT_SHARED | ULF_WAKE_ALL, &state->seq, 0 );
++    if (!macos_global) return;
++    /* 객체 여러 개를 기다리는 쪽은 전역 카운터만 보고 있다. 같이 깨워 준다.
++     * 다만 이 객체를 목록에 넣은 사람이 없으면 전역은 건드리지 않는다.
++     * 안 그러면 신호 한 번에 온 시스템의 대기자가 다 깨어난다. */
++    if (!__atomic_load_n( &state->multi, __ATOMIC_SEQ_CST )) return;
++    __atomic_add_fetch( &macos_global->seq, 1, __ATOMIC_SEQ_CST );
++    if (__atomic_load_n( &macos_global->waiters, __ATOMIC_SEQ_CST ))
++        __ulock_wake( UL_COMPARE_AND_WAIT_SHARED | ULF_WAKE_ALL, &macos_global->seq, 0 );
++}
++
++/* 객체 하나마다 공유 메모리 한 장을 만든다.
++ * 이름을 붙여 열자마자 지워서, fd 를 받은 쪽만 볼 수 있게 한다. */
++static struct inproc_sync *alloc_macos_sync( enum inproc_sync_type type, int manual,
++                                             unsigned int count, unsigned int max, int owner )
++{
++    static unsigned int counter;
++    struct inproc_sync *sync;
++    char name[64];
++    void *map;
++    int fd;
++
++    if (!(sync = alloc_object( &inproc_sync_ops ))) return NULL;
++
++    sync->type  = type;
++    sync->fd    = -1;
++    sync->state = NULL;
++    sync->init_manual = manual;
++    sync->init_max = max;
++    sync->init_count = count;
++    sync->init_owner = owner;
++    sync->init_abandoned = 0;
++    list_init( &sync->entry );
++    if (type == INPROC_SYNC_MUTEX) list_add_tail( &inproc_mutexes, &sync->entry );
++    (void)counter; (void)name; (void)map; (void)fd;
++    return sync;
++}
++
++/* 공유 메모리를 실제로 만든다. 클라이언트가 fd 를 요청할 때(기다리려 할 때) 처음 한 번. */
++static int macos_sync_materialize( struct inproc_sync *sync )
++{
++    static unsigned int counter;
++    char name[64];
++    void *map;
++    int fd;
++
++    if (sync->state) return 0;
++    snprintf( name, sizeof(name), "/wine-sync-%u-%u", (unsigned int)getpid(), ++counter );
++    shm_unlink( name );
++    fd = shm_open( name, O_RDWR | O_CREAT | O_EXCL, 0600 );
++    shm_unlink( name );
++    if (fd == -1 || ftruncate( fd, MACOS_SYNC_MAP_SIZE ) == -1)
++    {
++        if (fd != -1) close( fd );
++        return -1;
++    }
++    map = mmap( NULL, MACOS_SYNC_MAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
++    if (map == MAP_FAILED)
++    {
++        close( fd );
++        return -1;
++    }
++    memset( map, 0, MACOS_SYNC_MAP_SIZE );
++    sync->fd    = fd;
++    sync->state = map;
++    sync->state->type      = sync->type;
++    sync->state->manual    = sync->init_manual;
++    sync->state->max       = sync->init_max;
++    sync->state->count     = sync->init_count;
++    sync->state->owner     = sync->init_owner;
++    sync->state->abandoned = sync->init_abandoned;
++    return 0;
++}
++
++struct inproc_sync *create_inproc_internal_sync( int manual, int signaled )
++{
++    return alloc_macos_sync( INPROC_SYNC_INTERNAL, manual, signaled ? 1 : 0, 0, 0 );
++}
++
++struct inproc_sync *create_inproc_event_sync( int manual, int signaled )
++{
++    return alloc_macos_sync( INPROC_SYNC_EVENT, manual, signaled ? 1 : 0, 0, 0 );
++}
++
++struct inproc_sync *create_inproc_mutex_sync( thread_id_t owner, unsigned int count )
++{
++    return alloc_macos_sync( INPROC_SYNC_MUTEX, 0, count, 0, owner );
++}
++
++struct inproc_sync *create_inproc_semaphore_sync( unsigned int initial, unsigned int max )
++{
++    return alloc_macos_sync( INPROC_SYNC_SEMAPHORE, 0, initial, max, 0 );
++}
++
++static void inproc_sync_dump( struct object *obj, int verbose )
++{
++    struct inproc_sync *sync = (struct inproc_sync *)obj;
++    fprintf( stderr, "in-process sync (macOS) fd=%d type=%u\n", sync->fd, sync->type );
++}
++
++void signal_inproc_sync( struct inproc_sync *sync )
++{
++    if (!sync) return;
++    if (!sync->state) { sync->init_count = 1; return; }   /* 아직 아무도 안 본다. 초기값만 바꾼다 */
++    /* 이미 켜져 있었으면 새로 깰 사람이 없다. */
++    if (__atomic_exchange_n( &sync->state->count, 1, __ATOMIC_SEQ_CST )) return;
++    wake_waiters( sync->state );
++}
++
++void reset_inproc_sync( struct inproc_sync *sync )
++{
++    if (!sync) return;
++    if (!sync->state) { sync->init_count = 0; return; }
++    __atomic_store_n( &sync->state->count, 0, __ATOMIC_SEQ_CST );
++}
++
++/* 대기 타이머를 프로세스 안에서 처리하게 한다. 만료 시각만 공유 메모리에 적고 대기자를 한 번 깨워
++ * 새 시각에 맞춰 다시 자게 한다. due 0 은 취소: 이미 만료했는데 아직 소모되지 않았으면 신호 상태로 남긴다. */
++int inproc_sync_publish_timer( struct object *obj, timeout_t due, unsigned int period_ms )
++{
++    struct inproc_sync *sync = (struct inproc_sync *)obj;
++
++    if (!obj || obj->ops != &inproc_sync_ops) return 0;
++    if (macos_sync_materialize( sync ) < 0) return 0;
++    if (!due)
++    {
++        long long old = __atomic_load_n( &sync->state->due, __ATOMIC_SEQ_CST );
++        if (old && current_time >= old) __atomic_store_n( &sync->state->count, 1, __ATOMIC_SEQ_CST );
++    }
++    __atomic_store_n( &sync->state->period_ms, period_ms, __ATOMIC_SEQ_CST );
++    __atomic_store_n( &sync->state->due, (long long)due, __ATOMIC_SEQ_CST );
++    wake_waiters( sync->state );
++    return 1;
++}
++
++static int inproc_sync_signal( struct object *obj, unsigned int access, int signal )
++{
++    struct inproc_sync *sync = (struct inproc_sync *)obj;
++    assert( obj->ops == &inproc_sync_ops );
++    /* 뮤텍스/세마포어로는 불려 오지 않는다. 이벤트 계열만 신호를 받는다. */
++    assert( sync->type == INPROC_SYNC_INTERNAL || sync->type == INPROC_SYNC_EVENT );
++    assert( signal == 0 || signal == 1 );
++
++    if (signal) signal_inproc_sync( sync );
++    else reset_inproc_sync( sync );
++    return 1;
++}
++
++static void inproc_sync_destroy( struct object *obj )
++{
++    struct inproc_sync *sync = (struct inproc_sync *)obj;
++    if (sync->type == INPROC_SYNC_MUTEX) list_remove( &sync->entry );
++    if (sync->state) munmap( sync->state, MACOS_SYNC_MAP_SIZE );
++    if (sync->fd != -1) close( sync->fd );
++}
++
++static int get_obj_inproc_sync( struct object *obj, int *type )
++{
++    struct object *sync;
++    int fd = -1;
++
++    if (!(sync = get_obj_sync( obj ))) return -1;
++    if (sync->ops == &inproc_sync_ops)
++    {
++        struct inproc_sync *inproc = (struct inproc_sync *)sync;
++        *type = inproc->type;
++        if (macos_sync_materialize( inproc ) < 0) fd = -1;
++        else fd = inproc->fd;
++    }
++    release_object( sync );
++    return fd;
++}
++
++/* 스레드가 뮤텍스를 쥔 채 죽으면 다음에 잡는 쪽에 알려 줘야 한다. */
++void abandon_inproc_mutexes( thread_id_t tid )
++{
++    struct inproc_sync *mutex;
++
++    LIST_FOR_EACH_ENTRY( mutex, &inproc_mutexes, struct inproc_sync, entry )
++    {
++        if (!mutex->state)
++        {
++            if (mutex->init_owner == (int)tid) { mutex->init_owner = 0; mutex->init_count = 0; mutex->init_abandoned = 1; }
++            continue;
++        }
++        if (__atomic_load_n( &mutex->state->owner, __ATOMIC_SEQ_CST ) != tid) continue;
++        __atomic_store_n( &mutex->state->count, 0, __ATOMIC_SEQ_CST );
++        __atomic_store_n( &mutex->state->abandoned, 1, __ATOMIC_SEQ_CST );
++        __atomic_store_n( &mutex->state->owner, 0, __ATOMIC_SEQ_CST );
++        wake_waiters( mutex->state );
++    }
++}
++
+ #else /* NTSYNC_IOC_EVENT_READ */
+ 
+ int get_inproc_device_fd(void)
+@@ -280,6 +571,11 @@ void reset_inproc_sync( struct inproc_sync *sync )
+ {
+ }
+ 
++int inproc_sync_publish_timer( struct object *obj, timeout_t due, unsigned int period_ms )
++{
++    return 0;
++}
++
+ void abandon_inproc_mutexes( thread_id_t tid )
+ {
+ }
+diff --git a/server/object.h b/server/object.h
+index cab8ad2..b98378d 100644
+--- a/server/object.h
++++ b/server/object.h
+@@ -254,6 +254,8 @@ extern struct inproc_sync *create_inproc_mutex_sync( thread_id_t owner, unsigned
+ extern void abandon_inproc_mutexes( thread_id_t owner );
+ extern void signal_inproc_sync( struct inproc_sync *sync );
+ extern void reset_inproc_sync( struct inproc_sync *sync );
++/* Ember: 대기 타이머를 클라이언트가 처리하게 만료 시각을 공유 메모리에 적는다. 1 이면 서버 타임아웃 불필요 */
++extern int inproc_sync_publish_timer( struct object *sync, timeout_t due, unsigned int period_ms );
+ 
+ /* serial functions */
+ 
+diff --git a/server/protocol.def b/server/protocol.def
+index 0ac6429..50fd55d 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -1721,6 +1721,7 @@ enum server_fd_type
+ @REQ(send_socket)
+     unsigned int flags;         /* SERVER_SOCKET_IO_* flags */
+     struct async_data async;    /* async I/O parameters */
++    VARARG(destination,bytes); /* optional WS_sockaddr for pre-send UDP gate */
+ @REPLY
+     obj_handle_t wait;          /* handle to wait on for blocking send */
+     unsigned int options;       /* device open options */
+diff --git a/server/request_trace.h b/server/request_trace.h
+index ec36688..e22a1e4 100644
+--- a/server/request_trace.h
++++ b/server/request_trace.h
+@@ -770,6 +770,7 @@ static void dump_send_socket_request( const struct send_socket_request *req )
+ {
+     fprintf( stderr, " flags=%08x", req->flags );
+     dump_async_data( ", async=", &req->async );
++    dump_varargs_bytes( ", destination=", cur_size );
+ }
+ 
+ static void dump_send_socket_reply( const struct send_socket_reply *req )
+diff --git a/server/sock.c b/server/sock.c
+index 7785d3c..3b84be3 100644
+--- a/server/sock.c
++++ b/server/sock.c
+@@ -113,6 +113,9 @@
+ #include "wine/afd.h"
+ #include "wine/rbtree.h"
+ 
++#include <netdb.h>
++#include "ember_shield_gate.h"
++#include "ember_shield_route.h"
+ #include "process.h"
+ #include "file.h"
+ #include "handle.h"
+@@ -197,6 +200,15 @@ struct accept_req
+     unsigned int recv_len, local_len;
+ };
+ 
++struct shield_pending
++{
++    struct es_gate gate;
++    struct timeout_user *timer;
++    struct sock *sock;
++    union unix_sockaddr address;
++    socklen_t address_len;
++};
++
+ struct connect_req
+ {
+     struct async *async;
+@@ -207,6 +219,10 @@ struct connect_req
+ 
+ struct send_req
+ {
++    struct es_gate shield_gate;
++    struct timeout_user *shield_timer;
++    unsigned int shield_counted;
++    struct async *async;
+     struct iosb *iosb;
+     struct sock *sock;
+ };
+@@ -262,6 +278,7 @@ struct sock
+     timeout_t           connect_time;/* time the socket was connected */
+     struct sock        *deferred;    /* socket that waits for a deferred accept */
+     struct async_queue  read_q;      /* queue for asynchronous reads */
++    struct async_queue  shield_send_q; /* UDP requests awaiting a pre-send decision */
+     struct async_queue  write_q;     /* queue for asynchronous writes */
+     struct async_queue  ifchange_q;  /* queue for interface change notifications */
+     struct async_queue  accept_q;    /* queue for asynchronous accepts */
+@@ -272,6 +289,7 @@ struct sock
+     struct list         accept_list; /* list of pending accept requests */
+     struct accept_req  *accept_recv_req; /* pending accept-into request which will recv on this socket */
+     struct connect_req *connect_req; /* pending connection request */
++    struct shield_pending *shield; /* optional, socket-owned preconnect gate */
+     struct poll_req    *main_poll;   /* main poll */
+     union win_sockaddr  addr;        /* socket name */
+     int                 addr_len;    /* socket name length */
+@@ -1063,10 +1081,23 @@ static void complete_async_accept_recv( struct accept_req *req )
+     fill_accept_output( req );
+ }
+ 
++static unsigned int shield_pending_count;
++static void shield_cancel( struct sock *sock )
++{
++    struct shield_pending *p = sock->shield;
++    if (!p) return;
++    sock->shield = NULL;
++    if (p->timer) remove_timeout_user( p->timer );
++    es_gate_close( &p->gate );
++    free( p );
++    --shield_pending_count;
++}
++
+ static void free_connect_req( void *private )
+ {
+     struct connect_req *req = private;
+ 
++    shield_cancel( req->sock );
+     req->sock->connect_req = NULL;
+     release_object( req->async );
+     release_object( req->iosb );
+@@ -1546,6 +1577,8 @@ static int sock_get_poll_events( struct fd *fd )
+ 
+     assert( sock->obj.ops == &sock_ops );
+ 
++    if (sock->shield) return -1; /* no OS connect until response; no POLLOUT spin */
++
+     if (!sock->type) /* not initialized yet */
+         return -1;
+ 
+@@ -1712,6 +1745,8 @@ static int sock_close_handle( struct object *obj, struct process *process, obj_h
+         struct accept_req *accept_req, *accept_next;
+         struct poll_req *poll_req, *poll_next;
+ 
++        shield_cancel( sock );
++        async_wake_up( &sock->shield_send_q, STATUS_CANCELLED );
+         if (sock->accept_recv_req)
+             async_terminate( sock->accept_recv_req->async, STATUS_CANCELLED );
+ 
+@@ -1752,6 +1787,8 @@ static void sock_destroy( struct object *obj )
+ 
+     assert( obj->ops == &sock_ops );
+ 
++    shield_cancel( sock );
++
+     /* FIXME: special socket shutdown stuff? */
+ 
+     for (i = 0; i < 2; ++i)
+@@ -1770,6 +1807,7 @@ static void sock_destroy( struct object *obj )
+     sock_release_ifchange( sock );
+     free_async_queue( &sock->read_q );
+     free_async_queue( &sock->write_q );
++    free_async_queue( &sock->shield_send_q );
+     free_async_queue( &sock->ifchange_q );
+     free_async_queue( &sock->accept_q );
+     free_async_queue( &sock->connect_q );
+@@ -1800,6 +1838,7 @@ static struct sock *create_socket(void)
+     sock->ifchange_obj = NULL;
+     sock->accept_recv_req = NULL;
+     sock->connect_req = NULL;
++    sock->shield = NULL;
+     sock->main_poll = NULL;
+     memset( &sock->addr, 0, sizeof(sock->addr) );
+     sock->addr_len = 0;
+@@ -1823,6 +1862,7 @@ static struct sock *create_socket(void)
+     sock->bound_addr[0] = sock->bound_addr[1] = NULL;
+     init_async_queue( &sock->read_q );
+     init_async_queue( &sock->write_q );
++    init_async_queue( &sock->shield_send_q );
+     init_async_queue( &sock->ifchange_q );
+     init_async_queue( &sock->accept_q );
+     init_async_queue( &sock->connect_q );
+@@ -2531,6 +2571,104 @@ static struct accept_req *alloc_accept_req( struct sock *sock, struct sock *acce
+     return req;
+ }
+ 
++static void shield_connect_timer( void *private )
++{
++    struct shield_pending *p = private;
++    struct sock *sock = p->sock;
++    int result, ret, error = 0, unix_fd = get_unix_fd( sock->fd );
++    socklen_t len;
++    union unix_sockaddr local;
++    p->timer = NULL;
++    result = es_gate_poll( &p->gate, monotonic_time / 10000 );
++    if (!result)
++    {
++        p->timer = add_timeout_user( -200000, shield_connect_timer, p );
++        if (p->timer) return;
++        /* Allocation failure follows the same fail-open contract. */
++        result = 1;
++        es_gate_message( &p->gate, "question.result", 1, 1 );
++    }
++    if (result < 0) error = EACCES;
++    else
++    {
++        ret = connect( unix_fd, &p->address.addr, p->address_len );
++        if (ret < 0 && errno == ECONNABORTED)
++            ret = connect( unix_fd, &p->address.addr, p->address_len );
++        if (ret < 0 && errno != EINPROGRESS) error = errno;
++        sock->peer_addr_len = sockaddr_from_unix( &p->address, &sock->peer_addr.addr, sizeof(sock->peer_addr) );
++        len = sizeof(local);
++        if (!getsockname( unix_fd, &local.addr, &len ))
++            sock->addr_len = sockaddr_from_unix( &local, &sock->addr.addr, sizeof(sock->addr) );
++        sock->bound = 1;
++    }
++    grab_object( sock );
++    shield_cancel( sock );
++    if (error)
++    {
++        sock->state = SOCK_UNCONNECTED;
++        sock->errors[AFD_POLL_BIT_CONNECT_ERR] = error;
++        if (sock->connect_req) async_terminate( sock->connect_req->async, sock_get_ntstatus( error ) );
++        post_socket_event( sock, AFD_POLL_BIT_CONNECT_ERR );
++        post_sock_messages( sock );
++        complete_async_polls( sock, POLLERR, error );
++    }
++    else if (sock->type == WS_SOCK_DGRAM)
++    {
++        sock->state = SOCK_CONNECTIONLESS;
++        if (sock->connect_req) complete_async_connect( sock );
++    }
++    else
++    {
++        sock->state = SOCK_CONNECTING;
++        /* For immediate success the regular writable poll completes async/FD_CONNECT. */
++    }
++    sock_reselect( sock );
++    release_object( sock );
++}
++
++static int shield_hold_connect( struct sock *sock, struct async *async,
++                                const struct afd_connect_params *params,
++                                union unix_sockaddr *address, socklen_t len, unsigned int send_len )
++{
++    static unsigned long long sequence;
++    char host[108];
++    uint64_t instance;
++    unsigned int verified, signed_valid, same_signer;
++    struct shield_pending *p;
++    struct connect_req *req = NULL;
++    char numeric[128];
++    if (shield_pending_count >= 64 || !es_route_read( config_dir_fd, current->process->unix_pid, host, sizeof(host), &instance, &verified, &signed_valid, &same_signer )) return 0;
++    /* Datagram sendto has a separate path; never misrepresent a held UDP connect as protection. */
++    if (sock->type != WS_SOCK_STREAM && sock->type != WS_SOCK_DGRAM) return 0;
++    if (getnameinfo( &address->addr, len, numeric, sizeof(numeric), NULL, 0, NI_NUMERICHOST )) return 0;
++    if (!(p = calloc( 1, sizeof(*p) ))) return 0;
++    if (!es_gate_open( &p->gate, host, current->process->unix_pid, numeric,
++                       ((unsigned long long)getpid() << 32) ^ ++sequence, instance, verified, signed_valid, same_signer, monotonic_time / 10000 ))
++    { free( p ); return 0; }
++    p->gate.instance = instance;
++    p->sock = sock; p->address = *address; p->address_len = len;
++    p->timer = add_timeout_user( -200000, shield_connect_timer, p );
++    if (!p->timer) { es_gate_close( &p->gate ); free( p ); return 0; }
++    if (!(params->synchronous && sock->nonblocking))
++    {
++        if (!(req = mem_alloc( sizeof(*req) )))
++        { remove_timeout_user( p->timer ); es_gate_close( &p->gate ); free( p ); return 0; }
++        req->async = (struct async *)grab_object( async );
++        req->iosb = async_get_iosb( async );
++        req->sock = (struct sock *)grab_object( sock );
++        req->addr_len = params->addr_len; req->send_len = send_len; req->send_cursor = 0;
++        async_set_completion_callback( async, free_connect_req, req );
++        sock->connect_req = req;
++        queue_async( &sock->connect_q, async );
++    }
++    sock->shield = p; ++shield_pending_count;
++    sock->state = SOCK_CONNECTING;
++    allow_fd_caching( sock->fd );
++    sock_reselect( sock );
++    set_error( req ? STATUS_PENDING : STATUS_DEVICE_NOT_READY );
++    return 1;
++}
++
+ static void sock_ioctl( struct fd *fd, ioctl_code_t code, struct async *async )
+ {
+     struct sock *sock = get_fd_user( fd );
+@@ -2710,7 +2848,7 @@ static void sock_ioctl( struct fd *fd, ioctl_code_t code, struct async *async )
+             return;
+         }
+ 
+-        if (sock->connect_req)
++        if (sock->connect_req || sock->shield)
+         {
+             set_error( STATUS_INVALID_PARAMETER );
+             return;
+@@ -2746,6 +2884,8 @@ static void sock_ioctl( struct fd *fd, ioctl_code_t code, struct async *async )
+         if (unix_addr.addr.sa_family == AF_INET && !memcmp( &unix_addr.in.sin_addr, magic_loopback_addr, 4 ))
+             unix_addr.in.sin_addr.s_addr = htonl( INADDR_LOOPBACK );
+ 
++        if (shield_hold_connect( sock, async, params, &unix_addr, unix_len, send_len )) return;
++
+         memcpy( &peer_addr, &unix_addr, sizeof(unix_addr) );
+         ret = connect( unix_fd, &unix_addr.addr, unix_len );
+         if (ret < 0 && errno == ECONNABORTED)
+@@ -4045,12 +4185,70 @@ DECL_HANDLER(recv_socket)
+     release_object( sock );
+ }
+ 
++/* Timers poll the existing private IPC; the server event loop never waits. */
++static void shield_send_timer( void *private )
++{
++    struct send_req *req = private;
++    struct async *async = req->async;
++    struct sock *sock = req->sock;
++    int result;
++    req->shield_timer = NULL;
++    if (req->iosb->status != STATUS_PENDING) return;
++    result = es_gate_poll( &req->shield_gate, monotonic_time / 10000 );
++    if (!result)
++    {
++        req->shield_timer = add_timeout_user( -200000, shield_send_timer, req );
++        if (req->shield_timer) return;
++        result = 1;
++        es_gate_message( &req->shield_gate, "question.result", 1, 1 );
++    }
++    es_gate_close( &req->shield_gate );
++    req->shield_counted = 0;
++    --shield_pending_count;
++    /* Requeue before alerting: an EAGAIN client retry must regain normal POLLOUT. */
++    requeue_async( &sock->write_q, async );
++    grab_object( sock );
++    async_terminate( async, result < 0 ? STATUS_ACCESS_DENIED : STATUS_ALERTED );
++    sock_reselect( sock );
++    release_object( sock );
++}
++
++static int shield_hold_send( struct send_req *req, const struct WS_sockaddr *address, unsigned int length )
++{
++    static unsigned long long sequence;
++    union unix_sockaddr unix_address;
++    socklen_t len;
++    char host[108], numeric[128];
++    uint64_t instance;
++    unsigned int verified, signed_valid, same_signer;
++    if (shield_pending_count >= 64 || req->sock->type != WS_SOCK_DGRAM || !length ||
++        length > sizeof(union win_sockaddr) ||
++        !es_route_read( config_dir_fd, current->process->unix_pid, host, sizeof(host),
++                        &instance, &verified, &signed_valid, &same_signer )) return 0;
++    len = sockaddr_to_unix( address, length, &unix_address );
++    if (!len || (unix_address.addr.sa_family != AF_INET && unix_address.addr.sa_family != AF_INET6) ||
++        getnameinfo( &unix_address.addr, len, numeric, sizeof(numeric), NULL, 0, NI_NUMERICHOST )) return 0;
++    if (!es_gate_open( &req->shield_gate, host, current->process->unix_pid, numeric,
++                       ((unsigned long long)getpid() << 32) ^ ++sequence, instance,
++                       verified, signed_valid, same_signer, monotonic_time / 10000 )) return 0;
++    req->shield_timer = add_timeout_user( -200000, shield_send_timer, req );
++    if (!req->shield_timer) { es_gate_close( &req->shield_gate ); return 0; }
++    req->shield_counted = 1;
++    ++shield_pending_count;
++    return 1;
++}
++
+ static void send_socket_completion_callback( void *private )
+ {
+     struct send_req *send_req = private;
+     struct iosb *iosb = send_req->iosb;
+     struct sock *sock = send_req->sock;
+ 
++    if (send_req->shield_counted) --shield_pending_count;
++    if (send_req->shield_timer) remove_timeout_user( send_req->shield_timer );
++    es_gate_close( &send_req->shield_gate );
++    release_object( send_req->async );
++
+     if (iosb->status != STATUS_SUCCESS)
+     {
+         /* send() calls only clear and reselect events if unsuccessful. */
+@@ -4138,13 +4336,20 @@ DECL_HANDLER(send_socket)
+                                        req->flags & SERVER_SOCKET_IO_SYSTEM )))
+     {
+         struct send_req *send_req;
++        int shield_held = 0;
+         struct iosb *iosb = async_get_iosb( async );
+ 
+         if ((send_req = mem_alloc( sizeof(*send_req) )))
+         {
++            memset( send_req, 0, sizeof(*send_req) );
++            send_req->shield_gate.fd = -1;
++            send_req->async = (struct async *)grab_object( async );
+             send_req->iosb = (struct iosb *)grab_object( iosb );
+             send_req->sock = (struct sock *)grab_object( sock );
+             async_set_completion_callback( async, send_socket_completion_callback, send_req );
++            if (status == STATUS_ALERTED || status == STATUS_PENDING || status == STATUS_DEVICE_NOT_READY)
++                shield_held = shield_hold_send( send_req, get_req_data(), get_req_data_size() );
++            if (shield_held) status = STATUS_PENDING;
+         }
+         else if (status == STATUS_PENDING || status == STATUS_DEVICE_NOT_READY)
+             status = STATUS_NO_MEMORY;
+@@ -4158,7 +4363,7 @@ DECL_HANDLER(send_socket)
+ 
+         if (status == STATUS_PENDING || status == STATUS_ALERTED)
+         {
+-            queue_async( &sock->write_q, async );
++            queue_async( shield_held ? &sock->shield_send_q : &sock->write_q, async );
+             sock_reselect( sock );
+         }
+ 
+diff --git a/server/timer.c b/server/timer.c
+index a4309d5..2ed523f 100644
+--- a/server/timer.c
++++ b/server/timer.c
+@@ -166,6 +166,8 @@ static int cancel_timer( struct timer *timer )
+ {
+     int signaled = timer->signaled;
+ 
++    inproc_sync_publish_timer( timer->sync, 0, 0 );   /* 로컬 타이머 취소 */
++
+     if (timer->timeout)
+     {
+         remove_timeout_user( timer->timeout );
+@@ -197,7 +199,13 @@ static int set_timer( struct timer *timer, timeout_t expire, unsigned int period
+     timer->arg      = arg;
+     if (callback) timer->thread = (struct thread *)grab_object( current );
+     if (expire != TIMEOUT_INFINITE)
+-        timer->timeout = add_timeout_user( expire, timer_callback, timer );
++    {
++        /* Ember: APC 없는 타이머는 클라이언트가 만료를 처리한다(macOS in-process 동기화).
++         * 서버 타임아웃·신호·깨우기 왕복이 만료마다 드는 비용을 없앤다. */
++        timeout_t due = (expire <= 0) ? current_time - expire : max( expire, current_time );
++        if (callback || !inproc_sync_publish_timer( timer->sync, due, period ))
++            timer->timeout = add_timeout_user( expire, timer_callback, timer );
++    }
+     return signaled;
+ }
+ 

@@ -1230,10 +1230,18 @@ index fd31bd9..921c01b 100644
  };
  
 diff --git a/src/d3d11/d3d11_swapchain.cpp b/src/d3d11/d3d11_swapchain.cpp
-index d182587..78cb0fd 100644
+index d182587..cde976d 100644
 --- a/src/d3d11/d3d11_swapchain.cpp
 +++ b/src/d3d11/d3d11_swapchain.cpp
-@@ -18,12 +18,22 @@
+@@ -10,6 +10,7 @@
+ #include "dxmt_hud_state.hpp"
+ #include "dxmt_statistics.hpp"
+ #include "dxmt_presenter.hpp"
++#include "ember_stoke_stats.hpp"
+ #include "log/log.hpp"
+ #include "d3d11_resource.hpp"
+ #include "d3d11_device.hpp"
+@@ -18,12 +19,22 @@
  #include "util_string.hpp"
  #include "util_win32_compat.h"
  #include "util_hotpatch.h"
@@ -1256,7 +1264,7 @@ index d182587..78cb0fd 100644
  #include <cfloat>
  #include <format>
  
-@@ -39,9 +49,11 @@ WMTPixelFormat ConvertSwapChainFormat(DXGI_FORMAT format) {
+@@ -39,9 +50,11 @@ WMTPixelFormat ConvertSwapChainFormat(DXGI_FORMAT format) {
    switch (format) {
    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
@@ -1268,7 +1276,7 @@ index d182587..78cb0fd 100644
      return WMTPixelFormatBGRA8Unorm;
    case DXGI_FORMAT_R10G10B10A2_UNORM:
      return WMTPixelFormatRGB10A2Unorm;
-@@ -168,6 +180,16 @@ public:
+@@ -168,6 +181,16 @@ public:
  
      preferred_max_frame_rate =
          Config::getInstance().getOption<int>("d3d11.preferredMaxFrameRate", 0);
@@ -1285,7 +1293,7 @@ index d182587..78cb0fd 100644
      wsi::WsiMode current_mode;
      if (wsi::getCurrentDisplayMode(monitor_, &current_mode) &&
          current_mode.refreshRate.denominator != 0 &&
-@@ -199,19 +221,37 @@ public:
+@@ -199,19 +222,37 @@ public:
      if (desc_.BufferUsage & DXGI_USAGE_UNORDERED_ACCESS)
        backbuffer_desc_.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
  
@@ -1325,7 +1333,7 @@ index d182587..78cb0fd 100644
    HRESULT
    STDMETHODCALLTYPE
    QueryInterface(REFIID riid, void **ppvObject) final {
-@@ -250,6 +290,7 @@ public:
+@@ -250,6 +291,7 @@ public:
      return Present1(sync_interval, flags, nullptr);
    };
  
@@ -1333,7 +1341,7 @@ index d182587..78cb0fd 100644
    HRESULT
    STDMETHODCALLTYPE
    GetBuffer(UINT buffer_idx, REFIID riid, void **surface) final {
-@@ -436,6 +477,7 @@ public:
+@@ -436,6 +478,7 @@ public:
      return S_OK;
    }
  
@@ -1341,7 +1349,7 @@ index d182587..78cb0fd 100644
    HRESULT
    STDMETHODCALLTYPE
    GetFullscreenState(BOOL *pFullscreen, IDXGIOutput **ppTarget) final {
-@@ -453,6 +495,7 @@ public:
+@@ -453,6 +496,7 @@ public:
      return hr;
    };
  
@@ -1349,7 +1357,19 @@ index d182587..78cb0fd 100644
    HRESULT
    STDMETHODCALLTYPE
    GetDesc(DXGI_SWAP_CHAIN_DESC *pDesc) final {
-@@ -567,6 +610,7 @@ public:
+@@ -533,6 +577,11 @@ public:
+       info.output_format =upscaled_backbuffer_->texture()->pixelFormat();
+       metalfx_scaler = new SpatialScaler(device_->GetMTLDevice(), info);
+       D3D11_ASSERT(metalfx_scaler && "otherwise metalfx failed to initialize");
++      // Ember Lift(작업명, lift-1027): EMBER_LIFT=1 이면 공간 업스케일 대신 libEmberLift(광류 시간 업스케일).
++      // 스왑체인당 문맥 하나(앞 프레임·출력 이력을 들고 있다). 크기가 바뀌면 라이브러리가 이력을 버린다 — 같은 크기여도 버리게 표시.
++      if (EmberLift::enabled() && !lift_)
++        lift_ = new EmberLift(device_->GetMTLDevice());
++      lift_reset_ = true;
+     }
+ 
+     return S_OK;
+@@ -567,6 +616,7 @@ public:
      fullscreen_desc_.Scaling = newDisplayMode.Scaling;
  
      if (fullscreen_desc_.Windowed) {
@@ -1357,7 +1377,7 @@ index d182587..78cb0fd 100644
        wsi::resizeWindow(hWnd, &window_state_, newDisplayMode.Width,
                          newDisplayMode.Height);
      } else {
-@@ -663,6 +707,7 @@ public:
+@@ -663,6 +713,7 @@ public:
      return S_OK;
    };
  
@@ -1365,7 +1385,7 @@ index d182587..78cb0fd 100644
    HRESULT
    STDMETHODCALLTYPE
    GetDesc1(DXGI_SWAP_CHAIN_DESC1 *pDesc) final {
-@@ -739,6 +784,9 @@ public:
+@@ -739,6 +790,9 @@ public:
             const DXGI_PRESENT_PARAMETERS *pPresentParameters) final {
      if (SyncInterval > 4)
        return DXGI_ERROR_INVALID_CALL;
@@ -1375,7 +1395,7 @@ index d182587..78cb0fd 100644
  
      HRESULT hr = S_OK;
      bool window_minimized = wsi::isMinimized(hWnd);
-@@ -764,6 +812,9 @@ public:
+@@ -764,6 +818,9 @@ public:
        device_context_->Commit();
        return hr;
      }
@@ -1385,7 +1405,7 @@ index d182587..78cb0fd 100644
  
      double vsync_duration =
          std::max(SyncInterval * 1.0 /
-@@ -771,19 +822,43 @@ public:
+@@ -771,38 +828,105 @@ public:
                                                 : init_refresh_rate_),
                   preferred_max_frame_rate ? 1.0 / preferred_max_frame_rate : 0);
  
@@ -1419,7 +1439,23 @@ index d182587..78cb0fd 100644
 +      // Ember: EMBER_FG_PRE_UPSCALE=1 — 보간을 MetalFX 앞(렌더 해상도)에서 하고 표시할 프레임마다 한 번씩 키운다.
 +      // 보간 사본·혼합·MC 가 출력 해상도(4K) 대신 렌더 해상도에서 돌아 GPU 가 꽉 찬 게임에서 덜 뺏는다.
 +      // (loagpu) 환경 변수 또는 C:\ember-d11.cfg 의 EMBER_FG_PRE_UPSCALE — 게임 중에도 바꿀 수 있다(약 1초마다 다시 읽음)
-+      const bool pre_up = EmberD11Get(kEmberD11FgPreUp) == 1 && presenter->frameGeneration();
++      // Ember Lift: 시간 업스케일은 진짜 프레임만 이력에 넣어야 해서 '보간 먼저(PRE_UPSCALE)' 와 같이 못 쓴다 → Lift 가 이기고,
++      // 보간은 키운 뒤(화면 해상도)에서 한다(DESIGN.md §4, 2단계에서 광류 공유로 비용을 줄인다).
++      const bool lift_on = lift_ && lift_->ready() && EmberD11Get(kEmberD11Lift) != 0;
++      if (lift_on && !lift_was_on_) lift_reset_ = true;   // 껐다 켜면 이력 버림(번호는 이어지므로 라이브러리가 모른다)
++      lift_was_on_ = lift_on;
++      const bool pre_up = !lift_on && EmberD11Get(kEmberD11FgPreUp) == 1 && presenter->frameGeneration();
++      // stoke3-1028: 보간 끔이면 키우기(MetalFX 공간·Lift)를 표시 안에서 드로어블에 바로(EMBER_D11_STOKE_DIRECT=1, 기본 끔).
++      // Lift 가 한 번이라도 실패했으면 Lift 로는 바로 쓰지 않는다(드로어블 형식이 달라 MetalFX 로 대신할 수 없음) — 그땐 예전 길.
++      const bool stoke_direct = !pre_up && !presenter->frameGeneration() && EmberD11Get(kEmberD11StokeDirect) == 1 &&
++                                !(lift_on && lift_->failed());
++      uint32_t lift_flags = 0;
++      if (lift_on) {
++        if (lift_reset_) lift_flags |= emberlift::kInReset;
++        if (desc_.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) lift_flags |= emberlift::kInSourceScRGB;
++        else if (colorspace_ == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020) lift_flags |= emberlift::kInSourcePQ;
++        lift_reset_ = false;
++      }
        chunk->emitcc([
 -        this, vsync_duration, backbuffer = backbuffer_->texture(),
 +        this, vsync_duration, game_pace, backbuffer = backbuffer_->texture(),
@@ -1427,11 +1463,26 @@ index d182587..78cb0fd 100644
          upscaled = upscaled_backbuffer_->texture(),
 -        scaler = this->metalfx_scaler, state = presenter->synchronizeLayerProperties()
 +        scaler = this->metalfx_scaler, state = presenter->synchronizeLayerProperties(),
-+        handoff = present_handoff, pre_up
++        handoff = present_handoff, pre_up, stoke_direct,
++        lift = lift_on ? this->lift_ : Rc<EmberLift>(), lift_frame = lift_on ? ++lift_frame_ : 0, lift_flags
        ](ArgumentEncodingContext &ctx) mutable {
++        // stoke3-1028: Stoke 지표 파일용 — 이번 방식·크기(Lift 방식은 라이브러리가 지난번에 실제로 쓴 것, 실패면 MetalFX 공간)
++        {
++          uint32_t m = emberstoke::kModeMfxSpatial;
++          if (lift) {
++            switch (lift->lastMode()) {
++            case 0: m = emberstoke::kModeLiftSpatial; break;
++            case 1: m = emberstoke::kModeLiftEmber; break;
++            case 2: m = emberstoke::kModeLiftMfx; break;
++            default: break;
++            }
++          }
++          emberstoke::notePresent(m, (uint32_t)backbuffer->width(), (uint32_t)backbuffer->height(), (uint32_t)upscaled->width(),
++                                  (uint32_t)upscaled->height(), presenter->frameGeneration(), presenter->stokeDirectUsed());
++        }
          auto &scaler_info = ctx.currentFrameStatistics().last_scaler_info;
          scaler_info.type = ScalerType::Spatial;
-@@ -791,18 +866,22 @@ public:
+         scaler_info.input_width = backbuffer->width();
          scaler_info.input_height = backbuffer->height();
          scaler_info.output_width = upscaled->width();
          scaler_info.output_height = upscaled->height();
@@ -1439,6 +1490,12 @@ index d182587..78cb0fd 100644
 -        ctx.present(upscaled, presenter, vsync_duration, state.metadata);
 +        if (pre_up) {
 +          ctx.presentUpscaled(backbuffer, upscaled, scaler, presenter, vsync_duration, state.metadata, handoff, game_pace);
++        } else if (stoke_direct) {
++          ctx.presentStokeDirect(backbuffer, upscaled, scaler, lift, lift_frame, lift_flags, presenter, vsync_duration,
++                                 state.metadata, handoff, game_pace);
++        } else if (lift) {
++          ctx.liftUpscale(backbuffer, upscaled, lift, scaler, lift_frame, lift_flags, presenter);
++          ctx.present(upscaled, presenter, vsync_duration, state.metadata, handoff, game_pace);
 +        } else {
 +          ctx.upscale(backbuffer, upscaled, scaler);
 +          ctx.present(upscaled, presenter, vsync_duration, state.metadata, handoff, game_pace);
@@ -1455,11 +1512,13 @@ index d182587..78cb0fd 100644
 +        backbuffer = backbuffer_->texture(), handoff = present_handoff
        ](ArgumentEncodingContext &ctx) mutable {
 -        ctx.present(backbuffer, presenter, vsync_duration, state.metadata);
++        emberstoke::notePresent(emberstoke::kModeNative, (uint32_t)backbuffer->width(), (uint32_t)backbuffer->height(),
++                                (uint32_t)backbuffer->width(), (uint32_t)backbuffer->height(), presenter->frameGeneration(), false);
 +        ctx.present(backbuffer, presenter, vsync_duration, state.metadata, handoff, game_pace);
          ReleaseSemaphore(present_semaphore_, 1, nullptr);
          this->UpdateStatistics(ctx.queue().statistics, ctx.currentFrameId());
        });
-@@ -811,7 +890,77 @@ public:
+@@ -811,7 +935,77 @@ public:
  
      lock.unlock(); // since PresentBoundary() will and should only stall current thread
  
@@ -1537,7 +1596,7 @@ index d182587..78cb0fd 100644
  
      return hr;
    };
-@@ -1080,7 +1229,85 @@ private:
+@@ -1080,7 +1274,85 @@ private:
    DXGI_COLOR_SPACE_TYPE colorspace_ = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
    double init_refresh_rate_ = DBL_MAX;
    int preferred_max_frame_rate = 0;
@@ -1623,7 +1682,19 @@ index d182587..78cb0fd 100644
    Rc<Presenter> presenter;
    ModeSetGuard modeset_guard_;
    dxmt::mutex mutex_;
-@@ -1120,20 +1347,35 @@ CreateSwapChain(
+@@ -1089,6 +1361,11 @@ private:
+ 
+   std::conditional<EnableMetalFX, Rc<SpatialScaler>, std::monostate>::type metalfx_scaler;
+   std::conditional<EnableMetalFX, Com<D3D11ResourceCommon>, std::monostate>::type upscaled_backbuffer_;
++  // Ember Lift(작업명): EnableMetalFX 스왑체인에서만. 없거나 라이브러리가 없으면 공간 업스케일 그대로.
++  std::conditional<EnableMetalFX, Rc<EmberLift>, std::monostate>::type lift_;
++  uint64_t lift_frame_ = 0;
++  bool lift_reset_ = true;
++  bool lift_was_on_ = false;
+   float scale_factor = 1.0;
+ };
+ 
+@@ -1120,20 +1397,35 @@ CreateSwapChain(
        pDesc->BufferCount != 1) {
      WARN("CreateSwapChain: unsupported swap effect ", pDesc->SwapEffect, " with backbuffer size ", pDesc->BufferCount);
    }

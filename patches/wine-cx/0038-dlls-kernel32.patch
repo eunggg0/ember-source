@@ -1,0 +1,74 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 38/95] dlls-kernel32: Ember changes
+
+Base: CrossOver 26.3.0 FOSS sources/wine
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/kernel32/kernel32.spec b/dlls/kernel32/kernel32.spec
+index 6a35f53..1cea7e0 100644
+--- a/dlls/kernel32/kernel32.spec
++++ b/dlls/kernel32/kernel32.spec
+@@ -1222,8 +1222,8 @@
+ @ stdcall -import RaiseFailFastException(ptr ptr long)
+ @ stdcall -import ReadConsoleA(long ptr long ptr ptr)
+ @ stdcall -import ReadConsoleInputA(long ptr long ptr)
+-@ stub ReadConsoleInputExA
+-@ stub ReadConsoleInputExW
++@ stdcall -import ReadConsoleInputExA(long ptr long ptr long)
++@ stdcall -import ReadConsoleInputExW(long ptr long ptr long)
+ @ stdcall -import ReadConsoleInputW(long ptr long ptr)
+ @ stdcall -import ReadConsoleOutputA(long ptr long long ptr)
+ @ stdcall -import ReadConsoleOutputAttribute(long ptr long long ptr)
+@@ -1508,6 +1508,7 @@
+ @ stdcall SetThreadpoolThreadMaximum(ptr long) NTDLL.TpSetPoolMaxThreads
+ @ stdcall SetThreadpoolThreadMinimum(ptr long) NTDLL.TpSetPoolMinThreads
+ @ stdcall SetThreadpoolTimer(ptr ptr long long) NTDLL.TpSetTimer
++@ stdcall SetThreadpoolTimerEx(ptr ptr long long) NTDLL.TpSetTimerEx
+ @ stdcall SetThreadpoolWait(ptr long ptr) NTDLL.TpSetWait
+ @ stdcall -import SetTimeZoneInformation(ptr)
+ @ stub SetTimerQueueTimer
+diff --git a/dlls/kernel32/module.c b/dlls/kernel32/module.c
+index ed15e57..f02559b 100644
+--- a/dlls/kernel32/module.c
++++ b/dlls/kernel32/module.c
+@@ -262,6 +262,27 @@ BOOL WINAPI GetBinaryTypeA( LPCSTR lpApplicationName, LPDWORD lpBinaryType )
+     return GetBinaryTypeW(NtCurrentTeb()->StaticUnicodeString.Buffer, lpBinaryType);
+ }
+ 
++static BOOL needs_int3_hack(void)
++{
++    WCHAR env[2];
++#if defined(__i386__) || defined(__x86_64__)
++    return GetEnvironmentVariableW( L"PROTON_ENABLE_INT3_HACK", env, ARRAY_SIZE(env) ) == 1
++           && env[0] == '1';
++#else
++    return FALSE;
++#endif
++}
++
++#if defined(__i386__) || defined(__x86_64__)
++__attribute__((naked))
++#endif
++static void int3_stub( void )
++{
++#if defined(__i386__) || defined(__x86_64__)
++    __asm__ volatile( ".byte 0xCC, 0xCC, 0xCC, 0xCC" );
++#endif
++}
++
+ /***********************************************************************
+  *           GetProcAddress   		(KERNEL32.@)
+  *
+@@ -285,6 +306,12 @@ FARPROC get_proc_address( HMODULE hModule, LPCSTR function )
+     {
+         ANSI_STRING     str;
+ 
++        if (needs_int3_hack() && (strcmp( function, "KiUserApcDispatcher" ) == 0 || strcmp( function, "KiUserCallbackDispatcher" ) == 0))
++        {
++            FIXME( "HACK: returning int3 stub instead of %s\n", function );
++            return (FARPROC)&int3_stub;
++        }
++
+         RtlInitAnsiString( &str, function );
+         if (!set_ntstatus( LdrGetProcedureAddress( hModule, &str, 0, (void**)&fp ))) return NULL;
+     }

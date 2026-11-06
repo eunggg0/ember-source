@@ -1,0 +1,12 @@
+0001-src-airconv.patch
+0002-src-d3d10.patch
+0003-src-d3d11.patch
+0004-src-d3d12.patch
+0005-src-dxgi.patch
+0006-src-dxmt.patch
+0007-src-nvapi.patch
+0008-src-nvngx.patch
+0009-src-util.patch
+0010-src-winemetal.patch
+0011-tests.patch
+0012-top.patch

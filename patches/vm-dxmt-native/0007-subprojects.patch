@@ -1,0 +1,2176 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 7/7] subprojects: Ember changes
+
+Base: utmapp/dxmt 66e27f37 (GitHub archive)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/subprojects/.wraplock b/subprojects/.wraplock
+new file mode 100644
+index 0000000..e69de29
+diff --git a/subprojects/directx-native/.gitignore b/subprojects/directx-native/.gitignore
+new file mode 100644
+index 0000000..cbb1885
+--- /dev/null
++++ b/subprojects/directx-native/.gitignore
+@@ -0,0 +1,3 @@
++/build*/
++/subprojects/
++.DS_Store
+diff --git a/subprojects/directx-native/LICENSE b/subprojects/directx-native/LICENSE
+new file mode 100644
+index 0000000..7575370
+--- /dev/null
++++ b/subprojects/directx-native/LICENSE
+@@ -0,0 +1,191 @@
++
++                                 Apache License
++                           Version 2.0, January 2004
++                        http://www.apache.org/licenses/
++
++   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
++
++   1. Definitions.
++
++      "License" shall mean the terms and conditions for use, reproduction,
++      and distribution as defined by Sections 1 through 9 of this document.
++
++      "Licensor" shall mean the copyright owner or entity authorized by
++      the copyright owner that is granting the License.
++
++      "Legal Entity" shall mean the union of the acting entity and all
++      other entities that control, are controlled by, or are under common
++      control with that entity. For the purposes of this definition,
++      "control" means (i) the power, direct or indirect, to cause the
++      direction or management of such entity, whether by contract or
++      otherwise, or (ii) ownership of fifty percent (50%) or more of the
++      outstanding shares, or (iii) beneficial ownership of such entity.
++
++      "You" (or "Your") shall mean an individual or Legal Entity
++      exercising permissions granted by this License.
++
++      "Source" form shall mean the preferred form for making modifications,
++      including but not limited to software source code, documentation
++      source, and configuration files.
++
++      "Object" form shall mean any form resulting from mechanical
++      transformation or translation of a Source form, including but
++      not limited to compiled object code, generated documentation,
++      and conversions to other media types.
++
++      "Work" shall mean the work of authorship, whether in Source or
++      Object form, made available under the License, as indicated by a
++      copyright notice that is included in or attached to the work
++      (an example is provided in the Appendix below).
++
++      "Derivative Works" shall mean any work, whether in Source or Object
++      form, that is based on (or derived from) the Work and for which the
++      editorial revisions, annotations, elaborations, or other modifications
++      represent, as a whole, an original work of authorship. For the purposes
++      of this License, Derivative Works shall not include works that remain
++      separable from, or merely link (or bind by name) to the interfaces of,
++      the Work and Derivative Works thereof.
++
++      "Contribution" shall mean any work of authorship, including
++      the original version of the Work and any modifications or additions
++      to that Work or Derivative Works thereof, that is intentionally
++      submitted to the Licensor for inclusion in the Work by the copyright owner
++      or by an individual or Legal Entity authorized to submit on behalf of
++      the copyright owner. For the purposes of this definition, "submitted"
++      means any form of electronic, verbal, or written communication sent
++      to the Licensor or its representatives, including but not limited to
++      communication on electronic mailing lists, source code control systems,
++      and issue tracking systems that are managed by, or on behalf of, the
++      Licensor for the purpose of discussing and improving the Work, but
++      excluding communication that is conspicuously marked or otherwise
++      designated in writing by the copyright owner as "Not a Contribution."
++
++      "Contributor" shall mean Licensor and any individual or Legal Entity
++      on behalf of whom a Contribution has been received by the Licensor and
++      subsequently incorporated within the Work.
++
++   2. Grant of Copyright License. Subject to the terms and conditions of
++      this License, each Contributor hereby grants to You a perpetual,
++      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++      copyright license to reproduce, prepare Derivative Works of,
++      publicly display, publicly perform, sublicense, and distribute the
++      Work and such Derivative Works in Source or Object form.
++
++   3. Grant of Patent License. Subject to the terms and conditions of
++      this License, each Contributor hereby grants to You a perpetual,
++      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++      (except as stated in this section) patent license to make, have made,
++      use, offer to sell, sell, import, and otherwise transfer the Work,
++      where such license applies only to those patent claims licensable
++      by such Contributor that are necessarily infringed by their
++      Contribution(s) alone or by combination of their Contribution(s)
++      with the Work to which such Contribution(s) was submitted. If You
++      institute patent litigation against any entity (including a
++      cross-claim or counterclaim in a lawsuit) alleging that the Work
++      or a Contribution incorporated within the Work constitutes direct
++      or contributory patent infringement, then any patent licenses
++      granted to You under this License for that Work shall terminate
++      as of the date such litigation is filed.
++
++   4. Redistribution. You may reproduce and distribute copies of the
++      Work or Derivative Works thereof in any medium, with or without
++      modifications, and in Source or Object form, provided that You
++      meet the following conditions:
++
++      (a) You must give any other recipients of the Work or
++          Derivative Works a copy of this License; and
++
++      (b) You must cause any modified files to carry prominent notices
++          stating that You changed the files; and
++
++      (c) You must retain, in the Source form of any Derivative Works
++          that You distribute, all copyright, patent, trademark, and
++          attribution notices from the Source form of the Work,
++          excluding those notices that do not pertain to any part of
++          the Derivative Works; and
++
++      (d) If the Work includes a "NOTICE" text file as part of its
++          distribution, then any Derivative Works that You distribute must
++          include a readable copy of the attribution notices contained
++          within such NOTICE file, excluding any notices that do not
++          pertain to any part of the Derivative Works, in at least one
++          of the following places: within a NOTICE text file distributed
++          as part of the Derivative Works; within the Source form or
++          documentation, if provided along with the Derivative Works; or,
++          within a display generated by the Derivative Works, if and
++          wherever such third-party notices normally appear. The contents
++          of the NOTICE file are for informational purposes only and
++          do not modify the License. You may add Your own attribution
++          notices within Derivative Works that You distribute, alongside
++          or as an addendum to the NOTICE text from the Work, provided
++          that such additional attribution notices cannot be construed
++          as modifying the License.
++
++      You may add Your own copyright statement to Your modifications and
++      may provide additional or different license terms and conditions
++      for use, reproduction, or distribution of Your modifications, or
++      for any such Derivative Works as a whole, provided Your use,
++      reproduction, and distribution of the Work otherwise complies with
++      the conditions stated in this License.
++
++   5. Submission of Contributions. Unless You explicitly state otherwise,
++      any Contribution intentionally submitted for inclusion in the Work
++      by You to the Licensor shall be under the terms and conditions of
++      this License, without any additional terms or conditions.
++      Notwithstanding the above, nothing herein shall supersede or modify
++      the terms of any separate license agreement you may have executed
++      with Licensor regarding such Contributions.
++
++   6. Trademarks. This License does not grant permission to use the trade
++      names, trademarks, service marks, or product names of the Licensor,
++      except as required for reasonable and customary use in describing the
++      origin of the Work and reproducing the content of the NOTICE file.
++
++   7. Disclaimer of Warranty. Unless required by applicable law or
++      agreed to in writing, Licensor provides the Work (and each
++      Contributor provides its Contributions) on an "AS IS" BASIS,
++      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
++      implied, including, without limitation, any warranties or conditions
++      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
++      PARTICULAR PURPOSE. You are solely responsible for determining the
++      appropriateness of using or redistributing the Work and assume any
++      risks associated with Your exercise of permissions under this License.
++
++   8. Limitation of Liability. In no event and under no legal theory,
++      whether in tort (including negligence), contract, or otherwise,
++      unless required by applicable law (such as deliberate and grossly
++      negligent acts) or agreed to in writing, shall any Contributor be
++      liable to You for damages, including any direct, indirect, special,
++      incidental, or consequential damages of any character arising as a
++      result of this License or out of the use or inability to use the
++      Work (including but not limited to damages for loss of goodwill,
++      work stoppage, computer failure or malfunction, or any and all
++      other commercial damages or losses), even if such Contributor
++      has been advised of the possibility of such damages.
++
++   9. Accepting Warranty or Additional Liability. While redistributing
++      the Work or Derivative Works thereof, You may choose to offer,
++      and charge a fee for, acceptance of support, warranty, indemnity,
++      or other liability obligations and/or rights consistent with this
++      License. However, in accepting such obligations, You may act only
++      on Your own behalf and on Your sole responsibility, not on behalf
++      of any other Contributor, and only if You agree to indemnify,
++      defend, and hold each Contributor harmless for any liability
++      incurred by, or claims asserted against, such Contributor by reason
++      of your accepting any such warranty or additional liability.
++
++   END OF TERMS AND CONDITIONS
++
++   Copyright 2026 Turing Software LLC
++
++   Licensed under the Apache License, Version 2.0 (the "License");
++   you may not use this file except in compliance with the License.
++   You may obtain a copy of the License at
++
++       http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing, software
++   distributed under the License is distributed on an "AS IS" BASIS,
++   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++   See the License for the specific language governing permissions and
++   limitations under the License.
+diff --git a/subprojects/directx-native/README.md b/subprojects/directx-native/README.md
+new file mode 100644
+index 0000000..b686a21
+--- /dev/null
++++ b/subprojects/directx-native/README.md
+@@ -0,0 +1,74 @@
++# directx-native
++
++A small C library holding the contract between a native (non-Windows)
++implementation of the D3D APIs -- a *backend* -- and the process that loads
++it and drives it -- the *embedder*: the layout of shared-resource handles,
++the plain-C functions an embedder resolves beside the D3D entry points, and
++the Win32-style events and anonymous shared memory both sides need.
++
++Each backend exports the embedder functions under a symbol prefix of its own
++choosing (`<prefix><suffix>`); this library defines only the suffixes and
++signatures.
++
++## Contents
++
++| Header | What |
++| --- | --- |
++| `dxn_version.h` | `DXN_ABI_VERSION`, the one version every party agrees on. |
++| `dxn_shared.h` | Shared-resource descriptors (`dxn_shared_texture`, `_fence`, `_buffer`) that a native shared `HANDLE` points to, plus `dxn_shared_check()`. Identical layout on both platforms. |
++| `dxn_embedder.h` | The dlsym'd embedder API: symbol suffixes and `PFN_dxn_*` typedefs, plus `<prefix>native_abi_version`. |
++| `dxn_event.h` | Win32-style events. On Linux a HANDLE is an eventfd, used directly with syscalls. On macOS it is a kqueue-backed object implemented here, with a pollable, `SCM_RIGHTS`-passable fd, and owned by the binary that created it. |
++| `dxn_shm.h` | Anonymous shared memory (POSIX shm on macOS, sealed memfd on Linux) and windowed mapping. |
++| `dxn_log.h` | One log callback for the library's diagnostics. |
++
++`directx_native.h` includes all of them.
++
++## Versioning
++
++`DXN_ABI_VERSION` is bumped on **any** change to a struct layout, a field's
++meaning, an enum value, a symbol name or a function signature in these
++headers. There is no compatibility window. Every consumer pins one revision
++of this repository, and:
++
++* every descriptor carries `DXN_SHARED_VERSION`, and importers reject a
++  descriptor whose magic, version or `struct_size` differs;
++* every backend exports `<prefix>native_abi_version()`
++  (`DXN_DEFINE_NATIVE_ABI_VERSION`), and the embedder refuses a backend
++  whose answer differs from its own `DXN_ABI_VERSION`.
++
++The project version (`meson.build`) follows semver over the same surface.
++
++## Building and consuming
++
++The library is built **only as a static archive** (`static_library()`, PIC,
++hidden visibility, nothing installed) and is consumed as a meson
++subproject. Add `subprojects/directx-native.wrap`:
++
++```ini
++[wrap-git]
++url = <this repository>
++revision = <commit>
++depth = 1
++
++[provide]
++dependency_names = directx-native, directx-native-headers
++```
++
++then:
++
++```meson
++directx_native_dep = dependency('directx-native')          # code + headers
++directx_native_headers_dep = dependency('directx-native-headers')  # headers only
++```
++
++Standalone:
++
++```sh
++meson setup build && meson test -C build
++```
++
++Supported hosts: macOS and Linux.
++
++## License
++
++Apache-2.0, see `LICENSE`.
+diff --git a/subprojects/directx-native/include/directx-native/directx_native.h b/subprojects/directx-native/include/directx-native/directx_native.h
+new file mode 100644
+index 0000000..490fd45
+--- /dev/null
++++ b/subprojects/directx-native/include/directx-native/directx_native.h
+@@ -0,0 +1,19 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * directx-native: the contract between a native (non-Windows) D3D
++ * implementation and the embedder that loads and drives it.
++ */
++
++#ifndef DIRECTX_NATIVE_H
++#define DIRECTX_NATIVE_H
++
++#include "dxn_version.h"
++#include "dxn_shared.h"
++#include "dxn_event.h"
++#include "dxn_shm.h"
++#include "dxn_log.h"
++#include "dxn_embedder.h"
++
++#endif /* DIRECTX_NATIVE_H */
+diff --git a/subprojects/directx-native/include/directx-native/dxn_embedder.h b/subprojects/directx-native/include/directx-native/dxn_embedder.h
+new file mode 100644
+index 0000000..a79de49
+--- /dev/null
++++ b/subprojects/directx-native/include/directx-native/dxn_embedder.h
+@@ -0,0 +1,124 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * The embedder API: the plain-C functions a native D3D backend exports
++ * beside D3D11CreateDevice / D3D12CreateDevice / CreateDXGIFactory*, which
++ * an embedder resolves with dlsym.
++ *
++ * Every symbol is <prefix><suffix>: this header defines the suffixes, and
++ * the prefix is the backend's own, agreed between it and its embedder.  A
++ * backend may export all of them from one library or split them across its
++ * D3D11 and D3D12 libraries, and need export only those it supports.
++ *
++ * Anything a backend hands out behind a pointer (an event HANDLE, a shared
++ * resource descriptor) belongs to the backend's own copy of this library:
++ * the embedder reaches it only through these exports, or through a kernel
++ * fd the backend gave it, never through its own copy of the code.
++ *
++ * Every library that exports any of these also exports
++ * <prefix>native_abi_version, returning the DXN_ABI_VERSION it was built
++ * with; an embedder refuses the library's embedder API unless that equals
++ * its own DXN_ABI_VERSION.  Define it with DXN_DEFINE_NATIVE_ABI_VERSION.
++ *
++ * All of these use the platform's plain C calling convention (SysV), NOT
++ * the MS ABI of the D3D entry points and COM methods.  HRESULTs are int32_t,
++ * COM pointers are void *, IIDs point at the 16-byte GUID.
++ */
++
++#ifndef DXN_EMBEDDER_H
++#define DXN_EMBEDDER_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include "dxn_event.h"
++#include "dxn_version.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* -- Every backend ------------------------------------------------------ */
++
++#define DXN_SYM_NATIVE_ABI_VERSION "native_abi_version"
++typedef uint32_t (*PFN_dxn_native_abi_version)(void);
++
++/* Defines the exported <prefix>native_abi_version() (with its prototype, so
++ * -Wmissing-prototypes builds stay clean).  In C++, prefix it with
++ * extern "C". */
++#define DXN_DEFINE_NATIVE_ABI_VERSION(prefix)                               \
++    __attribute__((visibility("default"))) uint32_t                        \
++    prefix##native_abi_version(void);                                      \
++    __attribute__((visibility("default"))) uint32_t                        \
++    prefix##native_abi_version(void) { return DXN_ABI_VERSION; }
++
++/* -- Events (macOS) ---------------------------------------------------- */
++/* The backend's event HANDLEs (dxn_event.h): the embedder creates them
++ * through the backend's exports, passes them wherever the backend's D3D APIs
++ * take an event HANDLE (SetEventOnCompletion, ...), and observes them only
++ * through dup_fd.  It never signals, waits on or otherwise touches one with
++ * its own copy of this library, and never mixes handles of two backends.
++ * On Linux an event HANDLE is an eventfd and there is nothing to export. */
++
++#define DXN_SYM_EVENT_CREATE "event_create"
++#define DXN_SYM_EVENT_CLOSE  "event_close"
++#define DXN_SYM_EVENT_DUP_FD "event_dup_fd"
++
++typedef void *(*PFN_dxn_event_create)(int manual_reset, int initial_state);
++typedef void (*PFN_dxn_event_close)(void *handle);
++typedef int (*PFN_dxn_event_dup_fd)(void *handle);
++
++/* -- Shared handles ----------------------------------------------------- */
++
++/* CloseHandle for an NT-style shared handle (the CreateSharedHandle family,
++ * dxn_shared.h): closes the descriptor's fd and frees it.  Returns 0, or a
++ * negative error for NULL, a legacy GetSharedHandle value, an
++ * already-closed handle or anything the backend did not vend (then nothing
++ * is touched).  Optional: a backend without it ties NT handles to the
++ * exporting resource. */
++#define DXN_SYM_SHARED_HANDLE_CLOSE "shared_handle_close"
++typedef int (*PFN_dxn_shared_handle_close)(void *handle);
++
++/* -- Imported placed-buffer heaps (D3D12) ------------------------------- */
++/* Import a window of a shared-memory object as an ID3D12Heap on `device` (an
++ * ID3D12Device *): buffers later placed on it via CreatePlacedResource alias
++ * those pages exactly (heap offset preserved), so a CPU writer of the object
++ * and the GPU see one allocation.  `fd` is borrowed.  On success *heap is an
++ * AddRef'd interface `iid` (normally IID_ID3D12Heap). */
++
++/* macOS: [offset, offset + size) of a shm fd; offset page-aligned, size
++ * nonzero and at most 4 GiB, the window inside the object.  heap_type /
++ * heap_flags are the app's D3D12_HEAP_TYPE / D3D12_HEAP_FLAGS (advisory). */
++#define DXN_SYM_OPEN_EXISTING_HEAP_FROM_FD "open_existing_heap_from_fd"
++typedef int32_t (*PFN_dxn_open_existing_heap_from_fd)(
++    void *device, int fd, uint64_t offset, uint64_t size, uint32_t heap_type,
++    uint32_t heap_flags, const void *iid, void **heap);
++
++/* Linux: a whole dma-buf of `size` bytes. */
++#define DXN_SYM_OPEN_EXISTING_HEAP_FROM_DMABUF "open_existing_heap_from_dmabuf"
++typedef int32_t (*PFN_dxn_open_existing_heap_from_dmabuf)(
++    void *device, int dmabuf_fd, uint64_t size, const void *iid, void **heap);
++
++/* -- Externally-backed D3D11 DYNAMIC buffers ---------------------------- */
++/* Make the embedder's memory fd (macOS: its shm object; Linux: a dma-buf of
++ * it) the storage of one rename allocation of a DYNAMIC ID3D11Buffer, so a
++ * Map writes the bytes the GPU reads with no copy.  backing_length must
++ * cover the buffer and be page aligned.  The fd is dup'ed; the caller keeps
++ * its own.  The allocation is tagged with `cookie` and queued for a later
++ * Map(WRITE_DISCARD) rename.  Returns an HRESULT. */
++#define DXN_SYM_D3D11_BUFFER_BIND_EXTERNAL_FD "d3d11_buffer_bind_external_fd"
++typedef int32_t (*PFN_dxn_d3d11_buffer_bind_external_fd)(
++    void *d3d11_buffer, int fd, uint64_t backing_length, uint32_t cookie);
++
++/* 0 and *out_cookie if mapped_ptr (from ID3D11DeviceContext::Map) is an
++ * external allocation of that buffer, -1 if it is ordinary device memory. */
++#define DXN_SYM_D3D11_BUFFER_EXTERNAL_COOKIE "d3d11_buffer_external_cookie"
++typedef int (*PFN_dxn_d3d11_buffer_external_cookie)(
++    void *d3d11_buffer, const void *mapped_ptr, uint32_t *out_cookie);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* DXN_EMBEDDER_H */
+diff --git a/subprojects/directx-native/include/directx-native/dxn_event.h b/subprojects/directx-native/include/directx-native/dxn_event.h
+new file mode 100644
+index 0000000..55f158c
+--- /dev/null
++++ b/subprojects/directx-native/include/directx-native/dxn_event.h
+@@ -0,0 +1,94 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Win32-style event objects for native D3D implementations.
++ *
++ * Off Windows there is no NT event a HANDLE could name, so each platform
++ * needs a convention for what an event HANDLE is:
++ *
++ *   Linux: the HANDLE is an eventfd(2), cast to a pointer; signaled ==
++ *     counter > 0.  It is a kernel object with no user-space state, so any
++ *     binary can create, signal, poll or close one with plain syscalls, and
++ *     this library provides no functions for it.
++ *   macOS: there is no kernel object with event semantics that can also be
++ *     passed across processes (macOS refuses to send a kqueue fd), so the
++ *     HANDLE is a pointer to user-space state, and the functions below
++ *     implement it.
++ *
++ * A macOS event HANDLE is a small tagged box referencing a refcounted
++ * core; every dxn_event_duplicate() of it is another box on the same core,
++ * so a signal through any handle is seen through all of them.  The core
++ * owns a kqueue whose single EVFILT_USER registration IS the signaled
++ * state (manual-reset without EV_CLEAR, auto-reset with it), plus a
++ * lazily-created pipe mirroring that state for dxn_event_dup_fd.  The box
++ * begins with a uint32_t magic word (dxn_event_is_event() tests it), which
++ * lets a backend that vends other kinds of handle (e.g. semaphores) tell
++ * them apart.  Cost: one fd, three once dup_fd has been called.
++ *
++ * Ownership: this library is linked statically, so every binary carries
++ * its own private copy of the code, and the layout of the box and core is
++ * not part of the contract.  A handle may only be operated on by the copy
++ * that created it.  A backend creates the events its D3D APIs accept and
++ * exports create / close / dup_fd for its embedder (dxn_embedder.h); the
++ * embedder treats the handle as opaque and observes it only through the fd.
++ */
++
++#ifndef DXN_EVENT_H
++#define DXN_EVENT_H
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define DXN_WAIT_INFINITE UINT64_MAX
++
++typedef enum dxn_wait_status {
++    DXN_WAIT_SIGNALED = 0,
++    DXN_WAIT_TIMEOUT  = 1,
++    DXN_WAIT_FAILED   = -1, /* not an event handle, or the wait itself failed */
++} dxn_wait_status;
++
++#ifdef __APPLE__
++
++/* CreateEvent: manual_reset / initial_state are BOOLs (non-zero = true).
++ * NULL on failure (fd exhaustion: raise RLIMIT_NOFILE). */
++void *dxn_event_create(int manual_reset, int initial_state);
++
++/* SetEvent / ResetEvent.  No-ops (with a warning) on non-event handles. */
++void dxn_event_signal(void *handle);
++void dxn_event_clear(void *handle);
++
++/* CloseHandle.  The core lives until its last handle is closed; fds
++ * returned by dxn_event_dup_fd survive the close. */
++void dxn_event_close(void *handle);
++
++/* DuplicateHandle: a second, independent HANDLE onto the same event.  Use it
++ * to pin an event for an asynchronous signal path (a GPU completion
++ * callback) that may run after the owner closed the original.  NULL on
++ * allocation failure or a non-event handle. */
++void *dxn_event_duplicate(void *handle);
++
++/* A NEW fd (caller owns; close(2) it) that polls readable (POLLIN) while the
++ * event is signaled, and is passable across processes.  -1 on failure or a
++ * non-event handle.  Auto-reset caveat: a dxn_event_wait that consumes the
++ * signal also clears the fd; a poller that only observes it does not
++ * consume it. */
++int dxn_event_dup_fd(void *handle);
++
++/* WaitForSingleObject with a nanosecond timeout (DXN_WAIT_INFINITE for no
++ * timeout).  Auto-reset events are consumed by the waiter that wins. */
++dxn_wait_status dxn_event_wait(void *handle, uint64_t timeout_ns);
++
++/* Nonzero when handle is a live event from this library. */
++int dxn_event_is_event(const void *handle);
++
++#endif /* __APPLE__ */
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* DXN_EVENT_H */
+diff --git a/subprojects/directx-native/include/directx-native/dxn_log.h b/subprojects/directx-native/include/directx-native/dxn_log.h
+new file mode 100644
+index 0000000..936e060
+--- /dev/null
++++ b/subprojects/directx-native/include/directx-native/dxn_log.h
+@@ -0,0 +1,36 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Diagnostics from the library are routed through one callback so each
++ * embedding backend can feed them to its own logger.  With no callback set
++ * the library is silent.
++ */
++
++#ifndef DXN_LOG_H
++#define DXN_LOG_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef enum dxn_log_level {
++    DXN_LOG_ERROR = 0,
++    DXN_LOG_WARN  = 1,
++    DXN_LOG_INFO  = 2,
++    DXN_LOG_DEBUG = 3,
++} dxn_log_level;
++
++/* `message` is a complete line without a trailing newline. */
++typedef void (*dxn_log_fn)(dxn_log_level level, const char *message,
++                           void *user);
++
++/* Install (or with NULL remove) the callback.  Set it once during start-up,
++ * before other threads call into the library. */
++void dxn_set_log_callback(dxn_log_fn fn, void *user);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* DXN_LOG_H */
+diff --git a/subprojects/directx-native/include/directx-native/dxn_shared.h b/subprojects/directx-native/include/directx-native/dxn_shared.h
+new file mode 100644
+index 0000000..aeacbba
+--- /dev/null
++++ b/subprojects/directx-native/include/directx-native/dxn_shared.h
+@@ -0,0 +1,233 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Cross-process shared-resource descriptors.
++ *
++ * On a native (non-Windows) D3D implementation a shared-resource HANDLE --
++ * what IDXGIResource::GetSharedHandle, IDXGIResource1/ID3D11Fence::
++ * CreateSharedHandle and ID3D12Device::CreateSharedHandle return, and what
++ * ID3D11Device::OpenSharedResource / OpenSharedFence and ID3D12Device::
++ * OpenSharedHandle take -- is a pointer to one of the descriptors below.
++ *
++ * A descriptor is copy-by-value.  The ONLY live resource it references is
++ * its fd, which a consumer transports out-of-band (SCM_RIGHTS over a unix
++ * socket) and writes back into the receiver's copy of the descriptor before
++ * opening it: the fd is the token, the struct is the layout.  The pointer
++ * itself is process-local and means nothing in another process.
++ *
++ * What the fd is depends on the platform the exporter runs on:
++ *
++ *   macOS: an anonymous POSIX shm object (dxn_shm_create).  Textures are
++ *     linear, one plane.
++ *   Linux: a dma-buf for textures and buffers, a Vulkan opaque fd of a
++ *     timeline semaphore for fences.
++ *
++ * The layouts are the same on both platforms (fixed-width fields only, no
++ * D3D or Windows headers); fields a platform has no use for are zero.
++ *
++ * Ownership follows the two Windows regimes:
++ *
++ *   Legacy handles (IDXGIResource::GetSharedHandle): owned by the exporting
++ *   resource, valid while it is alive, never closed by the caller; repeated
++ *   calls return the same HANDLE.  dup() the fd to outlive the exporter.
++ *
++ *   NT-style handles (the CreateSharedHandle family): each call returns a
++ *   new descriptor owning its own duplicate of the fd, valid after the
++ *   resource is released.  The consumer closes it exactly once through the
++ *   backend's DXN_SYM_SHARED_HANDLE_CLOSE export (a backend without one
++ *   ties NT handles to the exporter like legacy ones).
++ *
++ *   Importers read the caller's descriptor synchronously during the open
++ *   call and dup() the fd; the caller keeps ownership of both.
++ *
++ * Every importer validates with dxn_shared_check() and fails the open with
++ * E_INVALIDARG on a mismatch instead of reading a layout it does not have.
++ */
++
++#ifndef DXN_SHARED_H
++#define DXN_SHARED_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include "dxn_version.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Carried in every descriptor; equal to the DXN_ABI_VERSION it was
++ * introduced with and bumped together with it. */
++#define DXN_SHARED_VERSION 1u
++
++#define DXN_SHARED_TEXTURE_MAGIC 0x744E5844u /* 'DXNt' */
++#define DXN_SHARED_FENCE_MAGIC   0x664E5844u /* 'DXNf' */
++#define DXN_SHARED_BUFFER_MAGIC  0x624E5844u /* 'DXNb' */
++
++#define DXN_SHARED_MAX_PLANES 4u
++
++/* Vendor MiscFlags bit (D3D11 CreateTexture2D MiscFlags / D3D12 heap flags),
++ * combined with the API's SHARED flag: force a linear layout
++ * (DRM_FORMAT_MOD_LINEAR on Linux), so the export can be consumed by scanout
++ * paths without modifier plumbing.  Stripped from the resource's public
++ * description. */
++#define DXN_MISC_LINEAR_EXPORT 0x40000000u
++
++/* The common prefix of every descriptor.  Each descriptor below begins with
++ * exactly these members, so any HANDLE can be inspected through this view
++ * before its type is known. */
++typedef struct dxn_shared_header {
++    uint32_t magic;       /* DXN_SHARED_*_MAGIC */
++    uint32_t version;     /* DXN_SHARED_VERSION */
++    uint32_t struct_size; /* sizeof the full descriptor */
++    int32_t  fd;          /* process-local; send via SCM_RIGHTS, then patch */
++} dxn_shared_header;
++
++/* D3D-level description of a shared texture: D3D11_TEXTURE2D_DESC plus the
++ * texture layout, every field a 32-bit enum or UINT. */
++typedef struct dxn_texture_meta {
++    uint32_t width;
++    uint32_t height;
++    uint32_t mip_levels;
++    uint32_t array_size;
++    uint32_t dxgi_format;      /* DXGI_FORMAT */
++    uint32_t sample_count;     /* DXGI_SAMPLE_DESC */
++    uint32_t sample_quality;
++    uint32_t usage;            /* D3D11_USAGE */
++    uint32_t bind_flags;
++    uint32_t cpu_access_flags;
++    uint32_t misc_flags;
++    uint32_t texture_layout;   /* D3D11_TEXTURE_LAYOUT */
++} dxn_texture_meta;
++
++typedef struct dxn_shared_plane {
++    uint64_t offset;           /* byte offset of the plane within fd */
++    uint64_t pitch;            /* bytes per row, byte-exact for the consumer */
++} dxn_shared_plane;
++
++typedef struct dxn_shared_texture {
++    uint32_t magic;            /* DXN_SHARED_TEXTURE_MAGIC */
++    uint32_t version;          /* DXN_SHARED_VERSION */
++    uint32_t struct_size;      /* sizeof(dxn_shared_texture) */
++    int32_t  fd;
++    dxn_texture_meta meta;
++    uint64_t drm_modifier;     /* Linux; 0 (linear) on macOS */
++    uint32_t plane_count;      /* 1..DXN_SHARED_MAX_PLANES; 1 on macOS */
++    uint32_t reserved;         /* 0 */
++    dxn_shared_plane planes[DXN_SHARED_MAX_PLANES];
++    /* Linux: the exporter's whole memory allocation, which the planes lie
++     *   within (import validation).
++     * macOS: the logical surface bytes (pitch * rows), NOT page-padded,
++     *   starting planes[0].offset into fd.  planes[0].offset is 0 for a
++     *   committed surface, which owns its whole object, and nonzero for one
++     *   placed in a shared heap (a window into the heap's object), not
++     *   necessarily page-aligned.  A keyed-mutex state page, when the
++     *   texture has one, follows at planes[0].offset +
++     *   dxn_shm_page_align(size). */
++    uint64_t size;
++} dxn_shared_texture;
++
++typedef struct dxn_shared_fence {
++    uint32_t magic;            /* DXN_SHARED_FENCE_MAGIC */
++    uint32_t version;          /* DXN_SHARED_VERSION */
++    uint32_t struct_size;      /* sizeof(dxn_shared_fence) */
++    /* macOS: a shm companion buffer whose uint64 value slot is at offset 0.
++     * Linux: a Vulkan opaque fd of a timeline semaphore; importing binds the
++     *   consumer's semaphore to the same payload (same driver on both ends). */
++    int32_t  fd;
++    uint32_t flags;            /* D3D11_FENCE_FLAG / D3D12_FENCE_FLAGS */
++    uint32_t reserved;         /* 0 */
++    uint64_t initial_value;
++} dxn_shared_fence;
++
++/* D3D buffers created with the shared flag (D3D11_RESOURCE_MISC_SHARED,
++ * D3D12_HEAP_FLAG_SHARED). */
++typedef struct dxn_shared_buffer {
++    uint32_t magic;            /* DXN_SHARED_BUFFER_MAGIC */
++    uint32_t version;          /* DXN_SHARED_VERSION */
++    uint32_t struct_size;      /* sizeof(dxn_shared_buffer) */
++    int32_t  fd;
++    uint32_t bind_flags;
++    uint32_t misc_flags;
++    uint32_t cpu_access_flags;
++    uint32_t reserved;         /* 0 */
++    uint64_t size;             /* logical byte length */
++    /* Byte offset of the buffer within fd, page-aligned: 0 for a committed
++     * buffer, nonzero for one placed in a shared heap.  Map at this offset. */
++    uint64_t offset;
++} dxn_shared_buffer;
++
++/* Initialise the common prefix of a descriptor for export. */
++#define DXN_SHARED_INIT(desc, type_magic)                \
++    do {                                                 \
++        (desc)->magic = (type_magic);                    \
++        (desc)->version = DXN_SHARED_VERSION;            \
++        (desc)->struct_size = (uint32_t)sizeof(*(desc)); \
++    } while (0)
++
++/* Validate a HANDLE claimed to be a descriptor of the given magic and size:
++ * nonzero only when the prefix matches exactly.  The fd is not checked
++ * (an exporter-side descriptor may legitimately carry -1 before export). */
++static inline int
++dxn_shared_check(const void *handle, uint32_t magic, size_t size)
++{
++    const dxn_shared_header *h = (const dxn_shared_header *)handle;
++    return h && h->magic == magic && h->version == DXN_SHARED_VERSION &&
++           h->struct_size == (uint32_t)size;
++}
++
++/* The magic of a HANDLE that passes as some descriptor, else 0. */
++static inline uint32_t
++dxn_shared_type(const void *handle)
++{
++    const dxn_shared_header *h = (const dxn_shared_header *)handle;
++    if (!h || h->version != DXN_SHARED_VERSION)
++        return 0;
++    switch (h->magic) {
++    case DXN_SHARED_TEXTURE_MAGIC:
++        return h->struct_size == sizeof(dxn_shared_texture) ? h->magic : 0;
++    case DXN_SHARED_FENCE_MAGIC:
++        return h->struct_size == sizeof(dxn_shared_fence) ? h->magic : 0;
++    case DXN_SHARED_BUFFER_MAGIC:
++        return h->struct_size == sizeof(dxn_shared_buffer) ? h->magic : 0;
++    default:
++        return 0;
++    }
++}
++
++#ifdef __cplusplus
++#define DXN_STATIC_ASSERT(c, m) static_assert(c, m)
++#else
++#define DXN_STATIC_ASSERT(c, m) _Static_assert(c, m)
++#endif
++
++/* The layout is ABI: identical on every platform and both architectures. */
++DXN_STATIC_ASSERT(sizeof(dxn_shared_header) == 16, "dxn_shared_header");
++DXN_STATIC_ASSERT(sizeof(dxn_texture_meta) == 48, "dxn_texture_meta");
++DXN_STATIC_ASSERT(offsetof(dxn_shared_texture, meta) == 16 &&
++                  offsetof(dxn_shared_texture, drm_modifier) == 64 &&
++                  offsetof(dxn_shared_texture, plane_count) == 72 &&
++                  offsetof(dxn_shared_texture, planes) == 80 &&
++                  offsetof(dxn_shared_texture, size) == 144 &&
++                  sizeof(dxn_shared_texture) == 152, "dxn_shared_texture");
++DXN_STATIC_ASSERT(offsetof(dxn_shared_fence, flags) == 16 &&
++                  offsetof(dxn_shared_fence, initial_value) == 24 &&
++                  sizeof(dxn_shared_fence) == 32, "dxn_shared_fence");
++DXN_STATIC_ASSERT(offsetof(dxn_shared_buffer, bind_flags) == 16 &&
++                  offsetof(dxn_shared_buffer, size) == 32 &&
++                  offsetof(dxn_shared_buffer, offset) == 40 &&
++                  sizeof(dxn_shared_buffer) == 48, "dxn_shared_buffer");
++DXN_STATIC_ASSERT(offsetof(dxn_shared_texture, fd) ==
++                      offsetof(dxn_shared_header, fd) &&
++                  offsetof(dxn_shared_fence, fd) ==
++                      offsetof(dxn_shared_header, fd) &&
++                  offsetof(dxn_shared_buffer, fd) ==
++                      offsetof(dxn_shared_header, fd),
++                  "descriptor prefix");
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* DXN_SHARED_H */
+diff --git a/subprojects/directx-native/include/directx-native/dxn_shm.h b/subprojects/directx-native/include/directx-native/dxn_shm.h
+new file mode 100644
+index 0000000..ddcb5f1
+--- /dev/null
++++ b/subprojects/directx-native/include/directx-native/dxn_shm.h
+@@ -0,0 +1,62 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Anonymous shared memory: the backing of macOS shared resources (see
++ * dxn_shared.h) and of any other cross-process page a backend hands out.
++ *
++ *   macOS: a POSIX shm object created O_EXCL under a random name and
++ *     unlinked at once, so the fd is the only name.  Under App Sandbox
++ *     (APP_SANDBOX_GROUP_ID set) the name lives in the app group container
++ *     as macOS requires, within the PSHMNAMLEN budget.
++ *   Linux: a memfd sealed against shrinking (F_SEAL_SHRINK), which udmabuf
++ *     requires to turn it into a dma-buf.
++ *
++ * Every fd is close-on-exec.
++ */
++
++#ifndef DXN_SHM_H
++#define DXN_SHM_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* The granularity of every shm size and mapping.  On macOS at least 16 KiB:
++ * Apple Silicon kernel/GPU pages are 16 KiB, and an x86_64 process under
++ * Rosetta sees getpagesize() == 4096 -- a mapping only 4 KiB-aligned there
++ * leaves its final real page partly described and the GPU without a
++ * mapping for the tail. */
++size_t dxn_shm_page_size(void);
++
++/* Round n up to dxn_shm_page_size(). */
++uint64_t dxn_shm_page_align(uint64_t n);
++
++/* A new anonymous shm object of `size` bytes (zero-filled).  Returns the fd,
++ * or -1 with errno set. */
++int dxn_shm_create(uint64_t size);
++
++typedef struct dxn_shm_mapping {
++    void  *ptr;    /* the byte at the requested offset */
++    void  *base;   /* start of the mapping (page floor of the offset) */
++    size_t length; /* mapped bytes from base, page-aligned */
++} dxn_shm_mapping;
++
++/* Map [offset, offset + size) of fd read-write, MAP_SHARED.  The mapping
++ * starts at the page floor of offset, so offset need not be page-aligned.
++ * The window is checked against the object's size first (fstat), so a short
++ * fd fails here instead of faulting (SIGBUS) on first touch.  Returns 0 and
++ * fills *out on success, -1 with errno set (EINVAL for a bad window). */
++int dxn_shm_map(int fd, uint64_t offset, uint64_t size, dxn_shm_mapping *out);
++
++/* Undo dxn_shm_map; a zeroed mapping is a no-op. */
++void dxn_shm_unmap(dxn_shm_mapping *mapping);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* DXN_SHM_H */
+diff --git a/subprojects/directx-native/include/directx-native/dxn_version.h b/subprojects/directx-native/include/directx-native/dxn_version.h
+new file mode 100644
+index 0000000..3e71391
+--- /dev/null
++++ b/subprojects/directx-native/include/directx-native/dxn_version.h
+@@ -0,0 +1,39 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * directx-native versioning.
++ *
++ * DXN_ABI_VERSION is the one number every party to the host <-> backend
++ * contract agrees on: the shared-resource descriptors (dxn_shared.h), the
++ * embedder symbols and their signatures (dxn_embedder.h), and the event
++ * HANDLE conventions (dxn_event.h).  It is bumped on ANY change to a struct
++ * layout, a field's meaning, an enum value, a symbol name or a function
++ * signature in those headers -- there is no compatibility window: every
++ * consumer is rebuilt against the same revision, and a backend that
++ * reports another version is refused at load (see
++ * DXN_SYM_NATIVE_ABI_VERSION).
++ *
++ * DXN_SHARED_VERSION, carried inside every descriptor, moves with it: a
++ * descriptor is only ever read by a peer built from the same revision.
++ */
++
++#ifndef DXN_VERSION_H
++#define DXN_VERSION_H
++
++#include <stdint.h>
++
++#define DXN_ABI_VERSION 1u
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* DXN_ABI_VERSION as compiled into this copy of the library. */
++uint32_t dxn_abi_version(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* DXN_VERSION_H */
+diff --git a/subprojects/directx-native/meson.build b/subprojects/directx-native/meson.build
+new file mode 100644
+index 0000000..10129b5
+--- /dev/null
++++ b/subprojects/directx-native/meson.build
+@@ -0,0 +1,89 @@
++# Copyright 2026 Turing Software LLC
++# SPDX-License-Identifier: Apache-2.0
++#
++# directx-native is consumed as a meson subproject and only ever linked
++# statically: static_library() (not library()) makes it immune to
++# default_library, and the archive is never installed.  The objects are PIC with hidden
++# visibility so they can go into a consumer's shared library without
++# leaking dxn_* into its exported ABI.  Only the headers may be installed
++# (option install_headers), for consumers whose public headers include them.
++
++project(
++  'directx-native',
++  'c',
++  version: '1.0.0',
++  license: 'Apache-2.0',
++  meson_version: '>=0.58.0',
++  default_options: [
++    'c_std=c11',
++    'warning_level=2',
++    'werror=true',
++  ],
++)
++
++cc = meson.get_compiler('c')
++system = host_machine.system()
++
++inc = include_directories('include')
++
++dxn_sources = files(
++  'src/dxn_log.c',
++  'src/dxn_shm.c',
++  'src/dxn_version.c',
++)
++
++dxn_deps = []
++
++if system == 'darwin'
++  dxn_sources += files(
++    'src/dxn_event_kqueue.c',
++    'src/dxn_shm_darwin.c',
++  )
++  # arc4random, clock_gettime_nsec_np and PSHMNAMLEN are Darwin extensions
++  # hidden by a strict -std=c11.
++  add_project_arguments('-D_DARWIN_C_SOURCE', language: 'c')
++elif system == 'linux'
++  # memfd_create, F_ADD_SEALS and the POSIX calls the tests use are hidden
++  # by a strict -std=c11.
++  add_project_arguments('-D_GNU_SOURCE', language: 'c')
++  dxn_sources += files('src/dxn_shm_linux.c')
++else
++  error('directx-native supports macOS and Linux, not ' + system)
++endif
++
++dxn_deps += dependency('threads')
++
++dxn_lib = static_library(
++  'directx-native',
++  dxn_sources,
++  include_directories: inc,
++  dependencies: dxn_deps,
++  pic: true,
++  gnu_symbol_visibility: 'hidden',
++  install: false,
++)
++
++# The full library: headers + the static archive.
++directx_native_dep = declare_dependency(
++  include_directories: inc,
++  link_with: dxn_lib,
++  dependencies: dxn_deps,
++  version: meson.project_version(),
++)
++meson.override_dependency('directx-native', directx_native_dep)
++
++# Headers only, for embedders that consume the descriptors and the embedder
++# API but none of the code (no link, no static copy of the globals).
++directx_native_headers_dep = declare_dependency(
++  include_directories: inc,
++  version: meson.project_version(),
++)
++meson.override_dependency('directx-native-headers', directx_native_headers_dep)
++
++if get_option('install_headers')
++  install_subdir('include/directx-native', install_dir: get_option('includedir'))
++endif
++
++if get_option('tests') and not meson.is_subproject()
++  subdir('tests')
++endif
+diff --git a/subprojects/directx-native/meson_options.txt b/subprojects/directx-native/meson_options.txt
+new file mode 100644
+index 0000000..b16b603
+--- /dev/null
++++ b/subprojects/directx-native/meson_options.txt
+@@ -0,0 +1,7 @@
++# Copyright 2026 Turing Software LLC
++# SPDX-License-Identifier: Apache-2.0
++
++option('tests', type: 'boolean', value: true,
++       description: 'Build the unit tests (only when built as the main project)')
++option('install_headers', type: 'boolean', value: false,
++       description: 'Install the headers, for a consumer whose own installed headers include them (the archive is never installed)')
+diff --git a/subprojects/directx-native/src/dxn_event_kqueue.c b/subprojects/directx-native/src/dxn_event_kqueue.c
+new file mode 100644
+index 0000000..78dc286
+--- /dev/null
++++ b/subprojects/directx-native/src/dxn_event_kqueue.c
+@@ -0,0 +1,358 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Win32-style events, kqueue-backed (macOS).  See dxn_event.h for the model:
++ * the kqueue trigger is the signaled state, plus a lazily-created pipe
++ * mirror for the cross-process pollable fd.
++ *
++ *  - manual-reset registers EVFILT_USER without EV_CLEAR (the trigger stays
++ *    pending, every waiter/poller sees it until an explicit clear);
++ *    auto-reset registers with EV_CLEAR (retrieval consumes the trigger, and
++ *    the kernel wakes exactly one blocked waiter).  kqueue provides Win32
++ *    semantics directly; the kqueue is the serializer.
++ *  - clearing deletes and re-adds the registration -- the only way to
++ *    un-trigger EVFILT_USER.
++ *  - the exported fd is a pipe: signal writes a token, clear drains it.
++ *    pipe_mtx orders lazy creation against signal: a signal sets the kqueue
++ *    trigger BEFORE taking the lock and creation primes the pipe under the
++ *    lock AFTER peeking, so a first dup racing a signal never loses the edge
++ *    (whichever critical section runs second observes the other's effect).
++ *
++ * The core is shared by every duplicate of a handle, so a signal through
++ * any of them reaches both the kqueue and the one exported pipe.
++ */
++
++#include "directx-native/dxn_event.h"
++
++#include "dxn_private.h"
++
++#include <errno.h>
++#include <fcntl.h>
++#include <pthread.h>
++#include <stdatomic.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/event.h>
++#include <time.h>
++#include <unistd.h>
++
++#define EVT_MAGIC 0x654E5844u /* 'DXNe' */
++
++struct dxn_evt_core {
++    _Atomic uint32_t refs;
++    int manual_reset; /* immutable after creation */
++    int kq;           /* the signaled state; immutable after creation */
++    pthread_mutex_t pipe_mtx;
++    int pipe_r; /* read end handed out (dup'd) by dxn_event_dup_fd */
++    int pipe_w; /* write end poked alongside the kqueue trigger */
++};
++
++/* A HANDLE: the magic tag (first, see dxn_event.h) plus the shared core. */
++struct dxn_evt {
++    uint32_t magic;
++    struct dxn_evt_core *core;
++};
++
++static struct dxn_evt *
++as_event(void *h)
++{
++    struct dxn_evt *e = h;
++    if (!e || e->magic != EVT_MAGIC) {
++        if (h)
++            DXN_WARN("event: op on non-event handle %p", h);
++        return NULL;
++    }
++    return e;
++}
++
++static int
++event_register(int kq, int manual_reset)
++{
++    struct kevent ev;
++    uint16_t flags = EV_ADD | EV_ENABLE;
++    if (!manual_reset)
++        flags |= EV_CLEAR;
++    EV_SET(&ev, 1, EVFILT_USER, flags, 0, 0, NULL);
++    return kevent(kq, &ev, 1, NULL, 0, NULL) == 0;
++}
++
++/* Close-on-exec and non-blocking (macOS has no pipe2). */
++static void
++set_cloexec_nonblock(int fd)
++{
++    int fdflags = fcntl(fd, F_GETFD);
++    if (fdflags >= 0)
++        fcntl(fd, F_SETFD, fdflags | FD_CLOEXEC);
++    int stflags = fcntl(fd, F_GETFL);
++    if (stflags >= 0)
++        fcntl(fd, F_SETFL, stflags | O_NONBLOCK);
++}
++
++/* Peek at the signaled state.  Manual-reset: a zero-timeout read is
++ * non-consuming (no EV_CLEAR).  Auto-reset: the read consumes the trigger,
++ * so re-arm it with NOTE_TRIGGER -- a waiter whose wakeup this stole is
++ * re-woken by the re-trigger, and the state stays signaled throughout. */
++static int
++event_peek_signaled(struct dxn_evt_core *c)
++{
++    struct kevent out;
++    struct timespec zero = {0, 0};
++    if (kevent(c->kq, NULL, 0, &out, 1, &zero) <= 0)
++        return 0;
++    if (!c->manual_reset) {
++        struct kevent ev;
++        EV_SET(&ev, 1, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
++        kevent(c->kq, &ev, 1, NULL, 0, NULL);
++    }
++    return 1;
++}
++
++static void
++pipe_write_token(int w)
++{
++    if (w < 0)
++        return;
++    const uint8_t b = 1;
++    ssize_t n;
++    do {
++        n = write(w, &b, 1);
++    } while (n < 0 && errno == EINTR);
++    /* EAGAIN: a token is already pending -- the "signaled" edge is
++     * preserved, which is all a poller needs. */
++}
++
++static void
++pipe_drain(int r)
++{
++    if (r < 0)
++        return;
++    uint8_t buf[64];
++    ssize_t n;
++    do {
++        n = read(r, buf, sizeof(buf));
++    } while (n > 0 || (n < 0 && errno == EINTR));
++}
++
++static int
++event_ensure_pipe(struct dxn_evt_core *c)
++{
++    pthread_mutex_lock(&c->pipe_mtx);
++    if (c->pipe_r >= 0) {
++        pthread_mutex_unlock(&c->pipe_mtx);
++        return 1;
++    }
++    int fds[2];
++    if (pipe(fds) != 0) {
++        pthread_mutex_unlock(&c->pipe_mtx);
++        DXN_ERROR("event: pipe() failed for exported fd: %s",
++                  strerror(errno));
++        return 0;
++    }
++    set_cloexec_nonblock(fds[0]);
++    set_cloexec_nonblock(fds[1]);
++    c->pipe_r = fds[0];
++    c->pipe_w = fds[1];
++    /* Prime the pipe if the event is already signaled so a dup taken after
++     * the signal still reports readable. */
++    if (event_peek_signaled(c))
++        pipe_write_token(c->pipe_w);
++    pthread_mutex_unlock(&c->pipe_mtx);
++    return 1;
++}
++
++static void
++event_signal_core(struct dxn_evt_core *c)
++{
++    struct kevent ev;
++    EV_SET(&ev, 1, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
++    kevent(c->kq, &ev, 1, NULL, 0, NULL);
++    /* Trigger is set; take the lock only to poke the pipe. */
++    pthread_mutex_lock(&c->pipe_mtx);
++    pipe_write_token(c->pipe_w);
++    pthread_mutex_unlock(&c->pipe_mtx);
++}
++
++static void
++event_clear_core(struct dxn_evt_core *c)
++{
++    struct kevent ev;
++    EV_SET(&ev, 1, EVFILT_USER, EV_DELETE, 0, 0, NULL);
++    kevent(c->kq, &ev, 1, NULL, 0, NULL);
++    event_register(c->kq, c->manual_reset);
++    pthread_mutex_lock(&c->pipe_mtx);
++    pipe_drain(c->pipe_r);
++    pthread_mutex_unlock(&c->pipe_mtx);
++}
++
++static void
++core_unref(struct dxn_evt_core *c)
++{
++    if (atomic_fetch_sub_explicit(&c->refs, 1, memory_order_acq_rel) != 1)
++        return;
++    if (c->pipe_r >= 0)
++        close(c->pipe_r);
++    if (c->pipe_w >= 0)
++        close(c->pipe_w);
++    close(c->kq);
++    pthread_mutex_destroy(&c->pipe_mtx);
++    free(c);
++}
++
++static struct dxn_evt *
++box_alloc(struct dxn_evt_core *c)
++{
++    struct dxn_evt *e = malloc(sizeof(*e));
++    if (!e)
++        return NULL;
++    e->magic = EVT_MAGIC;
++    e->core = c;
++    return e;
++}
++
++void *
++dxn_event_create(int manual_reset, int initial_state)
++{
++    int kq = kqueue();
++    if (kq < 0) {
++        DXN_ERROR("event: kqueue() failed: %s (fd exhaustion? raise "
++                  "RLIMIT_NOFILE)", strerror(errno));
++        return NULL;
++    }
++    int fdflags = fcntl(kq, F_GETFD);
++    if (fdflags >= 0)
++        fcntl(kq, F_SETFD, fdflags | FD_CLOEXEC);
++    if (!event_register(kq, manual_reset)) {
++        close(kq);
++        return NULL;
++    }
++
++    struct dxn_evt_core *c = calloc(1, sizeof(*c));
++    if (!c) {
++        close(kq);
++        return NULL;
++    }
++    atomic_store_explicit(&c->refs, 1, memory_order_relaxed);
++    c->manual_reset = manual_reset != 0;
++    c->kq = kq;
++    pthread_mutex_init(&c->pipe_mtx, NULL);
++    c->pipe_r = -1;
++    c->pipe_w = -1;
++    if (initial_state)
++        event_signal_core(c);
++
++    struct dxn_evt *e = box_alloc(c);
++    if (!e)
++        core_unref(c);
++    return e;
++}
++
++void
++dxn_event_signal(void *handle)
++{
++    struct dxn_evt *e = as_event(handle);
++    if (e)
++        event_signal_core(e->core);
++}
++
++void
++dxn_event_clear(void *handle)
++{
++    struct dxn_evt *e = as_event(handle);
++    if (e)
++        event_clear_core(e->core);
++}
++
++void
++dxn_event_close(void *handle)
++{
++    struct dxn_evt *e = as_event(handle);
++    if (!e)
++        return;
++    e->magic = 0;
++    core_unref(e->core);
++    free(e);
++}
++
++void *
++dxn_event_duplicate(void *handle)
++{
++    struct dxn_evt *e = as_event(handle);
++    if (!e)
++        return NULL;
++    atomic_fetch_add_explicit(&e->core->refs, 1, memory_order_relaxed);
++    struct dxn_evt *d = box_alloc(e->core);
++    if (!d)
++        core_unref(e->core);
++    return d;
++}
++
++int
++dxn_event_dup_fd(void *handle)
++{
++    struct dxn_evt *e = as_event(handle);
++    if (!e)
++        return -1;
++    if (!event_ensure_pipe(e->core))
++        return -1;
++    pthread_mutex_lock(&e->core->pipe_mtx);
++    int fd = e->core->pipe_r >= 0
++                 ? fcntl(e->core->pipe_r, F_DUPFD_CLOEXEC, 0) : -1;
++    pthread_mutex_unlock(&e->core->pipe_mtx);
++    return fd;
++}
++
++dxn_wait_status
++dxn_event_wait(void *handle, uint64_t timeout_ns)
++{
++    struct dxn_evt *e = as_event(handle);
++    if (!e)
++        return DXN_WAIT_FAILED;
++
++    uint64_t deadline = 0;
++    if (timeout_ns != DXN_WAIT_INFINITE)
++        deadline = clock_gettime_nsec_np(CLOCK_MONOTONIC) + timeout_ns;
++
++    for (;;) {
++        struct timespec ts;
++        struct timespec *tsp = NULL;
++        if (timeout_ns != DXN_WAIT_INFINITE) {
++            uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
++            uint64_t left = deadline > now ? deadline - now : 0;
++            ts.tv_sec = (time_t)(left / 1000000000ull);
++            ts.tv_nsec = (long)(left % 1000000000ull);
++            tsp = &ts;
++        }
++        struct kevent out;
++        int n = kevent(e->core->kq, NULL, 0, &out, 1, tsp);
++        if (n > 0) {
++            /* Auto-reset: this waiter consumed the single trigger, so the
++             * pollable pipe must clear too.  Manual-reset stays signaled.
++             * The drain can also eat the token of a second signal that
++             * landed after our kevent consumed the trigger; if the event is
++             * signaled again already, put a token back so the exported fd
++             * stays in sync with the kqueue state. */
++            if (!e->core->manual_reset) {
++                pthread_mutex_lock(&e->core->pipe_mtx);
++                pipe_drain(e->core->pipe_r);
++                if (event_peek_signaled(e->core))
++                    pipe_write_token(e->core->pipe_w);
++                pthread_mutex_unlock(&e->core->pipe_mtx);
++            }
++            return DXN_WAIT_SIGNALED;
++        }
++        if (n == 0)
++            return DXN_WAIT_TIMEOUT;
++        if (errno != EINTR) {
++            DXN_WARN("event: kevent wait failed: %s", strerror(errno));
++            return DXN_WAIT_FAILED;
++        }
++    }
++}
++
++int
++dxn_event_is_event(const void *handle)
++{
++    const struct dxn_evt *e = handle;
++    return e && e->magic == EVT_MAGIC;
++}
+diff --git a/subprojects/directx-native/src/dxn_log.c b/subprojects/directx-native/src/dxn_log.c
+new file mode 100644
+index 0000000..9353de1
+--- /dev/null
++++ b/subprojects/directx-native/src/dxn_log.c
+@@ -0,0 +1,33 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include "dxn_private.h"
++
++#include <stdarg.h>
++#include <stdio.h>
++
++static dxn_log_fn log_fn;
++static void *log_user;
++
++void
++dxn_set_log_callback(dxn_log_fn fn, void *user)
++{
++    log_user = user;
++    log_fn = fn;
++}
++
++void
++dxn_logf(dxn_log_level level, const char *fmt, ...)
++{
++    dxn_log_fn fn = log_fn;
++    if (!fn)
++        return;
++    char buf[512];
++    va_list ap;
++    va_start(ap, fmt);
++    vsnprintf(buf, sizeof(buf), fmt, ap);
++    va_end(ap);
++    fn(level, buf, log_user);
++}
+diff --git a/subprojects/directx-native/src/dxn_private.h b/subprojects/directx-native/src/dxn_private.h
+new file mode 100644
+index 0000000..20edf25
+--- /dev/null
++++ b/subprojects/directx-native/src/dxn_private.h
+@@ -0,0 +1,22 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#ifndef DXN_PRIVATE_H
++#define DXN_PRIVATE_H
++
++#include "directx-native/dxn_log.h"
++
++#if defined(__GNUC__) || defined(__clang__)
++#define DXN_PRINTF(f, a) __attribute__((format(printf, f, a)))
++#else
++#define DXN_PRINTF(f, a)
++#endif
++
++void dxn_logf(dxn_log_level level, const char *fmt, ...) DXN_PRINTF(2, 3);
++
++#define DXN_ERROR(...) dxn_logf(DXN_LOG_ERROR, __VA_ARGS__)
++#define DXN_WARN(...)  dxn_logf(DXN_LOG_WARN, __VA_ARGS__)
++
++#endif /* DXN_PRIVATE_H */
+diff --git a/subprojects/directx-native/src/dxn_shm.c b/subprojects/directx-native/src/dxn_shm.c
+new file mode 100644
+index 0000000..b2602ed
+--- /dev/null
++++ b/subprojects/directx-native/src/dxn_shm.c
+@@ -0,0 +1,61 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Platform-neutral half of dxn_shm.h: alignment and mapping.
++ */
++
++#include "directx-native/dxn_shm.h"
++
++#include <errno.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++
++uint64_t
++dxn_shm_page_align(uint64_t n)
++{
++    const uint64_t page = (uint64_t)dxn_shm_page_size();
++    return (n + page - 1) & ~(page - 1);
++}
++
++int
++dxn_shm_map(int fd, uint64_t offset, uint64_t size, dxn_shm_mapping *out)
++{
++    memset(out, 0, sizeof(*out));
++    if (fd < 0 || size == 0 || offset + size < offset) {
++        errno = EINVAL;
++        return -1;
++    }
++    struct stat st;
++    if (fstat(fd, &st) != 0)
++        return -1;
++    if (st.st_size < 0 || offset + size > (uint64_t)st.st_size) {
++        errno = EINVAL;
++        return -1;
++    }
++
++    const uint64_t page = (uint64_t)dxn_shm_page_size();
++    const uint64_t floor = offset & ~(page - 1);
++    const uint64_t length = dxn_shm_page_align(offset - floor + size);
++    if (length > (uint64_t)SIZE_MAX) {
++        errno = EINVAL;
++        return -1;
++    }
++    void *base = mmap(NULL, (size_t)length, PROT_READ | PROT_WRITE, MAP_SHARED,
++                      fd, (off_t)floor);
++    if (base == MAP_FAILED)
++        return -1;
++    out->base = base;
++    out->length = (size_t)length;
++    out->ptr = (uint8_t *)base + (offset - floor);
++    return 0;
++}
++
++void
++dxn_shm_unmap(dxn_shm_mapping *mapping)
++{
++    if (mapping->base)
++        munmap(mapping->base, mapping->length);
++    memset(mapping, 0, sizeof(*mapping));
++}
+diff --git a/subprojects/directx-native/src/dxn_shm_darwin.c b/subprojects/directx-native/src/dxn_shm_darwin.c
+new file mode 100644
+index 0000000..b5a3da0
+--- /dev/null
++++ b/subprojects/directx-native/src/dxn_shm_darwin.c
+@@ -0,0 +1,100 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Anonymous POSIX shm objects (macOS).
++ */
++
++#include "directx-native/dxn_shm.h"
++
++#include "dxn_private.h"
++
++#include <errno.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++/* PSHMNAMLEN (the shm name limit) lives in <sys/posix_shm.h>, which only
++ * the macOS SDK ships; the iOS-family SDKs share the same kernel limit. */
++#if __has_include(<sys/posix_shm.h>)
++#include <sys/posix_shm.h>
++#endif
++#ifndef PSHMNAMLEN
++#define PSHMNAMLEN 31
++#endif
++
++/* Apple Silicon pages are 16 KiB; see dxn_shm.h for Rosetta. */
++#define MIN_PAGE_SIZE 16384u
++
++/* An app group prefix must leave room for "/", a slot digit and one nonce
++ * digit within PSHMNAMLEN. */
++#define APP_SANDBOX_GROUP_ID_MAX (PSHMNAMLEN - 3)
++
++size_t
++dxn_shm_page_size(void)
++{
++    size_t pg = (size_t)getpagesize();
++    return pg < MIN_PAGE_SIZE ? MIN_PAGE_SIZE : pg;
++}
++
++int
++dxn_shm_create(uint64_t size)
++{
++    if (size > (uint64_t)INT64_MAX) {
++        errno = EINVAL;
++        return -1;
++    }
++
++    /* Under App Sandbox a shm name must live in the app group container,
++     * i.e. be prefixed with the group identifier instead of '/'; anything
++     * else is denied.  The PSHMNAMLEN budget then leaves no room for a tag
++     * or the pid, so the name is just a slot digit plus as much of the
++     * nonce as fits. */
++    const char *group = getenv("APP_SANDBOX_GROUP_ID");
++    if (group && !group[0])
++        group = NULL;
++    if (group && strlen(group) > APP_SANDBOX_GROUP_ID_MAX) {
++        DXN_ERROR("shm: APP_SANDBOX_GROUP_ID is %zu chars, at most %d fit",
++                  strlen(group), (int)APP_SANDBOX_GROUP_ID_MAX);
++        errno = EINVAL;
++        return -1;
++    }
++
++    const size_t nonce_room = group ? PSHMNAMLEN - strlen(group) - 2 : 8;
++    const unsigned nonce_digits = (unsigned)(nonce_room < 8 ? nonce_room : 8);
++    const unsigned nonce = arc4random() >> (32 - 4 * nonce_digits);
++    int fd = -1;
++    /* A sandboxed slot must stay a single hex digit to fit the name. */
++    const unsigned slots = group ? 16 : 32;
++    for (unsigned i = 0; i < slots; i++) {
++        char name[PSHMNAMLEN + 1];
++        if (group)
++            snprintf(name, sizeof(name), "%s/%x%0*x", group, i,
++                     (int)nonce_digits, nonce);
++        else
++            snprintf(name, sizeof(name), "/dxn-%d-%x-%x", (int)getpid(),
++                     nonce, i);
++        fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
++        if (fd >= 0) {
++            shm_unlink(name); /* anonymous from here on */
++            break;
++        }
++        if (errno != EEXIST)
++            return -1;
++    }
++    if (fd < 0)
++        return -1;
++
++    int fdflags = fcntl(fd, F_GETFD);
++    if (fdflags < 0 || fcntl(fd, F_SETFD, fdflags | FD_CLOEXEC) < 0 ||
++        ftruncate(fd, (off_t)size) != 0) {
++        const int saved_errno = errno;
++        close(fd);
++        errno = saved_errno;
++        return -1;
++    }
++    return fd;
++}
+diff --git a/subprojects/directx-native/src/dxn_shm_linux.c b/subprojects/directx-native/src/dxn_shm_linux.c
+new file mode 100644
+index 0000000..6478627
+--- /dev/null
++++ b/subprojects/directx-native/src/dxn_shm_linux.c
+@@ -0,0 +1,41 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Anonymous shared memory (Linux): sealed memfds.
++ */
++
++#include "directx-native/dxn_shm.h"
++
++#include <errno.h>
++#include <fcntl.h>
++#include <stdint.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++size_t
++dxn_shm_page_size(void)
++{
++    return (size_t)sysconf(_SC_PAGESIZE);
++}
++
++int
++dxn_shm_create(uint64_t size)
++{
++    if (size > (uint64_t)INT64_MAX) {
++        errno = EINVAL;
++        return -1;
++    }
++    int fd = memfd_create("dxn-shm", MFD_CLOEXEC | MFD_ALLOW_SEALING);
++    if (fd < 0)
++        return -1;
++    /* udmabuf refuses a memfd that could shrink under its pages. */
++    if (ftruncate(fd, (off_t)size) != 0 ||
++        fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK) != 0) {
++        const int saved_errno = errno;
++        close(fd);
++        errno = saved_errno;
++        return -1;
++    }
++    return fd;
++}
+diff --git a/subprojects/directx-native/src/dxn_version.c b/subprojects/directx-native/src/dxn_version.c
+new file mode 100644
+index 0000000..7401e4f
+--- /dev/null
++++ b/subprojects/directx-native/src/dxn_version.c
+@@ -0,0 +1,12 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include "directx-native/dxn_version.h"
++
++uint32_t
++dxn_abi_version(void)
++{
++    return DXN_ABI_VERSION;
++}
+diff --git a/subprojects/directx-native/tests/dxn_test.h b/subprojects/directx-native/tests/dxn_test.h
+new file mode 100644
+index 0000000..cfd017a
+--- /dev/null
++++ b/subprojects/directx-native/tests/dxn_test.h
+@@ -0,0 +1,21 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#ifndef DXN_TEST_H
++#define DXN_TEST_H
++
++#include <stdio.h>
++#include <stdlib.h>
++
++#define CHECK(cond)                                                       \
++    do {                                                                  \
++        if (!(cond)) {                                                    \
++            fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__,       \
++                    __LINE__, #cond);                                     \
++            exit(1);                                                      \
++        }                                                                 \
++    } while (0)
++
++#endif /* DXN_TEST_H */
+diff --git a/subprojects/directx-native/tests/meson.build b/subprojects/directx-native/tests/meson.build
+new file mode 100644
+index 0000000..fcbd705
+--- /dev/null
++++ b/subprojects/directx-native/tests/meson.build
+@@ -0,0 +1,18 @@
++# Copyright 2026 Turing Software LLC
++# SPDX-License-Identifier: Apache-2.0
++
++c_tests = ['shared', 'shm']
++if host_machine.system() == 'darwin'
++  c_tests += 'event'
++endif
++
++foreach t : c_tests
++  test(t, executable('test_' + t, 'test_' + t + '.c',
++                     dependencies: directx_native_dep))
++endforeach
++
++if add_languages('cpp', required: false, native: false)
++  test('cxx', executable('test_cxx', 'test_cxx.cpp',
++                         dependencies: directx_native_dep,
++                         override_options: ['cpp_std=c++17']))
++endif
+diff --git a/subprojects/directx-native/tests/test_cxx.cpp b/subprojects/directx-native/tests/test_cxx.cpp
+new file mode 100644
+index 0000000..6a7a146
+--- /dev/null
++++ b/subprojects/directx-native/tests/test_cxx.cpp
+@@ -0,0 +1,24 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * The headers are also consumed from C++: they must compile cleanly as C++
++ * and give the same layout.
++ */
++
++#include "directx-native/directx_native.h"
++
++DXN_DEFINE_NATIVE_ABI_VERSION(dxntest_)
++
++static_assert(sizeof(dxn_shared_texture) == 152, "texture");
++static_assert(sizeof(dxn_shared_fence) == 32, "fence");
++static_assert(sizeof(dxn_shared_buffer) == 48, "buffer");
++
++int
++main()
++{
++    PFN_dxn_native_abi_version q = dxntest_native_abi_version;
++    dxn_shared_fence f = {};
++    DXN_SHARED_INIT(&f, DXN_SHARED_FENCE_MAGIC);
++    return (q() == DXN_ABI_VERSION && dxn_shared_type(&f) == DXN_SHARED_FENCE_MAGIC) ? 0 : 1;
++}
+diff --git a/subprojects/directx-native/tests/test_event.c b/subprojects/directx-native/tests/test_event.c
+new file mode 100644
+index 0000000..47f4b7b
+--- /dev/null
++++ b/subprojects/directx-native/tests/test_event.c
+@@ -0,0 +1,225 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Win32 event semantics, duplicates, and the pollable fd (in-process and
++ * after crossing a socket with SCM_RIGHTS).
++ */
++
++#include "directx-native/dxn_event.h"
++#include "directx-native/dxn_log.h"
++
++#include <fcntl.h>
++#include <poll.h>
++#include <pthread.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++#include "dxn_test.h"
++
++#define MS 1000000ull
++
++static int warnings;
++
++static void
++count_log(dxn_log_level level, const char *message, void *user)
++{
++    (void)message;
++    (void)user;
++    if (level <= DXN_LOG_WARN)
++        warnings++;
++}
++
++static int
++readable(int fd)
++{
++    struct pollfd p = { .fd = fd, .events = POLLIN };
++    return poll(&p, 1, 0) == 1 && (p.revents & POLLIN);
++}
++
++/* Send fd across a socketpair and return the receiver's copy. */
++static int
++pass_fd(int fd)
++{
++    int sv[2];
++    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
++    char byte = 0;
++    struct iovec iov = { .iov_base = &byte, .iov_len = 1 };
++    union {
++        char buf[CMSG_SPACE(sizeof(int))];
++        struct cmsghdr align;
++    } u;
++    memset(&u, 0, sizeof(u));
++    struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1,
++                          .msg_control = u.buf,
++                          .msg_controllen = sizeof(u.buf) };
++    struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
++    c->cmsg_level = SOL_SOCKET;
++    c->cmsg_type = SCM_RIGHTS;
++    c->cmsg_len = CMSG_LEN(sizeof(int));
++    memcpy(CMSG_DATA(c), &fd, sizeof(int));
++    CHECK(sendmsg(sv[0], &msg, 0) == 1);
++
++    memset(&u, 0, sizeof(u));
++    msg.msg_controllen = sizeof(u.buf);
++    CHECK(recvmsg(sv[1], &msg, 0) == 1);
++    c = CMSG_FIRSTHDR(&msg);
++    CHECK(c && c->cmsg_type == SCM_RIGHTS);
++    int out;
++    memcpy(&out, CMSG_DATA(c), sizeof(int));
++    close(sv[0]);
++    close(sv[1]);
++    return out;
++}
++
++static void
++test_manual_reset(void)
++{
++    void *e = dxn_event_create(1, 0);
++    CHECK(e && dxn_event_is_event(e));
++    CHECK(dxn_event_wait(e, 0) == DXN_WAIT_TIMEOUT);
++    CHECK(dxn_event_wait(e, 5 * MS) == DXN_WAIT_TIMEOUT);
++    dxn_event_signal(e);
++    /* Manual-reset stays signaled for every wait until cleared. */
++    CHECK(dxn_event_wait(e, 0) == DXN_WAIT_SIGNALED);
++    CHECK(dxn_event_wait(e, DXN_WAIT_INFINITE) == DXN_WAIT_SIGNALED);
++    dxn_event_clear(e);
++    CHECK(dxn_event_wait(e, 0) == DXN_WAIT_TIMEOUT);
++    dxn_event_close(e);
++
++    e = dxn_event_create(1, 1);
++    CHECK(dxn_event_wait(e, 0) == DXN_WAIT_SIGNALED);
++    dxn_event_close(e);
++}
++
++static void
++test_auto_reset(void)
++{
++    void *e = dxn_event_create(0, 1);
++    CHECK(e);
++    CHECK(dxn_event_wait(e, 0) == DXN_WAIT_SIGNALED);
++    CHECK(dxn_event_wait(e, 0) == DXN_WAIT_TIMEOUT);
++    /* Repeated signals collapse into one. */
++    dxn_event_signal(e);
++    dxn_event_signal(e);
++    CHECK(dxn_event_wait(e, 0) == DXN_WAIT_SIGNALED);
++    CHECK(dxn_event_wait(e, 0) == DXN_WAIT_TIMEOUT);
++    dxn_event_close(e);
++}
++
++struct waiter {
++    void *event;
++    dxn_wait_status status;
++};
++
++static void *
++wait_thread(void *arg)
++{
++    struct waiter *w = arg;
++    w->status = dxn_event_wait(w->event, 2000 * MS);
++    return NULL;
++}
++
++static void
++test_auto_reset_wakes_one(void)
++{
++    void *e = dxn_event_create(0, 0);
++    struct waiter w[2] = { { e, DXN_WAIT_FAILED }, { e, DXN_WAIT_FAILED } };
++    pthread_t t[2];
++    for (int i = 0; i < 2; i++)
++        CHECK(pthread_create(&t[i], NULL, wait_thread, &w[i]) == 0);
++    usleep(50 * 1000);
++    dxn_event_signal(e);
++    usleep(100 * 1000);
++    dxn_event_signal(e);
++    for (int i = 0; i < 2; i++)
++        pthread_join(t[i], NULL);
++    /* Two signals, two waiters, each woken exactly once. */
++    CHECK(w[0].status == DXN_WAIT_SIGNALED);
++    CHECK(w[1].status == DXN_WAIT_SIGNALED);
++    CHECK(dxn_event_wait(e, 0) == DXN_WAIT_TIMEOUT);
++    dxn_event_close(e);
++}
++
++static void
++test_duplicate(void)
++{
++    void *e = dxn_event_create(1, 0);
++    void *d = dxn_event_duplicate(e);
++    CHECK(d && d != e && dxn_event_is_event(d));
++    int fd = dxn_event_dup_fd(e);
++    CHECK(fd >= 0);
++    /* The duplicate outlives the original and signals the same core. */
++    dxn_event_close(e);
++    CHECK(!readable(fd));
++    dxn_event_signal(d);
++    CHECK(readable(fd));
++    CHECK(dxn_event_wait(d, 0) == DXN_WAIT_SIGNALED);
++    dxn_event_close(d);
++    /* The fd outlives every handle. */
++    CHECK(readable(fd));
++    close(fd);
++}
++
++static void
++test_dup_fd(void)
++{
++    /* Manual-reset: readable exactly while signaled, also cross-process. */
++    void *e = dxn_event_create(1, 0);
++    int fd = dxn_event_dup_fd(e);
++    CHECK(fd >= 0);
++    CHECK(fcntl(fd, F_GETFD) & FD_CLOEXEC);
++    int remote = pass_fd(fd);
++    CHECK(!readable(fd) && !readable(remote));
++    dxn_event_signal(e);
++    CHECK(readable(fd) && readable(remote));
++    dxn_event_clear(e);
++    CHECK(!readable(fd) && !readable(remote));
++    close(remote);
++    close(fd);
++    dxn_event_close(e);
++
++    /* A dup taken after the signal is already readable. */
++    e = dxn_event_create(0, 1);
++    fd = dxn_event_dup_fd(e);
++    CHECK(readable(fd));
++    /* Auto-reset: the consuming wait clears the fd too. */
++    CHECK(dxn_event_wait(e, 0) == DXN_WAIT_SIGNALED);
++    CHECK(!readable(fd));
++    dxn_event_signal(e);
++    CHECK(readable(fd));
++    close(fd);
++    dxn_event_close(e);
++}
++
++static void
++test_non_events(void)
++{
++    uint32_t not_an_event[4] = { 0x41414141u, 0, 0, 0 };
++    dxn_set_log_callback(count_log, NULL);
++    CHECK(!dxn_event_is_event(not_an_event));
++    CHECK(!dxn_event_is_event(NULL));
++    CHECK(dxn_event_wait(not_an_event, 0) == DXN_WAIT_FAILED);
++    CHECK(dxn_event_dup_fd(not_an_event) == -1);
++    CHECK(dxn_event_duplicate(not_an_event) == NULL);
++    dxn_event_signal(not_an_event);
++    dxn_event_close(not_an_event);
++    CHECK(warnings == 5);
++    /* NULL is a silent no-op. */
++    dxn_event_signal(NULL);
++    CHECK(warnings == 5);
++    dxn_set_log_callback(NULL, NULL);
++}
++
++int
++main(void)
++{
++    test_manual_reset();
++    test_auto_reset();
++    test_auto_reset_wakes_one();
++    test_duplicate();
++    test_dup_fd();
++    test_non_events();
++    return 0;
++}
+diff --git a/subprojects/directx-native/tests/test_shared.c b/subprojects/directx-native/tests/test_shared.c
+new file mode 100644
+index 0000000..c0ae729
+--- /dev/null
++++ b/subprojects/directx-native/tests/test_shared.c
+@@ -0,0 +1,53 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Descriptor prefix validation and the version query.
++ */
++
++#include "directx-native/directx_native.h"
++
++#include <string.h>
++
++#include "dxn_test.h"
++
++int
++main(void)
++{
++    CHECK(dxn_abi_version() == DXN_ABI_VERSION);
++
++    dxn_shared_texture t;
++    memset(&t, 0, sizeof(t));
++    DXN_SHARED_INIT(&t, DXN_SHARED_TEXTURE_MAGIC);
++    t.fd = -1;
++    CHECK(t.struct_size == sizeof(t));
++    CHECK(dxn_shared_check(&t, DXN_SHARED_TEXTURE_MAGIC, sizeof(t)));
++    CHECK(!dxn_shared_check(&t, DXN_SHARED_FENCE_MAGIC, sizeof(t)));
++    CHECK(!dxn_shared_check(NULL, DXN_SHARED_TEXTURE_MAGIC, sizeof(t)));
++    CHECK(dxn_shared_type(&t) == DXN_SHARED_TEXTURE_MAGIC);
++
++    t.version = DXN_SHARED_VERSION + 1;
++    CHECK(!dxn_shared_check(&t, DXN_SHARED_TEXTURE_MAGIC, sizeof(t)));
++    CHECK(dxn_shared_type(&t) == 0);
++    t.version = DXN_SHARED_VERSION;
++    t.struct_size -= 8;
++    CHECK(!dxn_shared_check(&t, DXN_SHARED_TEXTURE_MAGIC, sizeof(t)));
++    CHECK(dxn_shared_type(&t) == 0);
++
++    dxn_shared_fence f;
++    memset(&f, 0, sizeof(f));
++    DXN_SHARED_INIT(&f, DXN_SHARED_FENCE_MAGIC);
++    CHECK(dxn_shared_type(&f) == DXN_SHARED_FENCE_MAGIC);
++    /* A fence must not pass as a texture even with the right magic. */
++    f.magic = DXN_SHARED_TEXTURE_MAGIC;
++    CHECK(dxn_shared_type(&f) == 0);
++
++    dxn_shared_buffer b;
++    memset(&b, 0, sizeof(b));
++    DXN_SHARED_INIT(&b, DXN_SHARED_BUFFER_MAGIC);
++    CHECK(dxn_shared_type(&b) == DXN_SHARED_BUFFER_MAGIC);
++
++    uint32_t junk[4] = { 0x12345678u, DXN_SHARED_VERSION, 16, 0 };
++    CHECK(dxn_shared_type(junk) == 0);
++    return 0;
++}
+diff --git a/subprojects/directx-native/tests/test_shm.c b/subprojects/directx-native/tests/test_shm.c
+new file mode 100644
+index 0000000..0fb0f2f
+--- /dev/null
++++ b/subprojects/directx-native/tests/test_shm.c
+@@ -0,0 +1,78 @@
++/*
++ * Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: Apache-2.0
++ *
++ * Anonymous shm creation, page granularity and windowed mapping.
++ */
++
++#include "directx-native/dxn_shm.h"
++
++#include <errno.h>
++#include <fcntl.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include "dxn_test.h"
++
++int
++main(void)
++{
++    const size_t page = dxn_shm_page_size();
++    CHECK(page >= 4096 && (page & (page - 1)) == 0);
++#ifdef __APPLE__
++    CHECK(page >= 16384);
++#endif
++    CHECK(dxn_shm_page_align(0) == 0);
++    CHECK(dxn_shm_page_align(1) == page);
++    CHECK(dxn_shm_page_align(page) == page);
++    CHECK(dxn_shm_page_align(page + 1) == 2 * page);
++
++    const uint64_t size = 3 * page;
++    int fd = dxn_shm_create(size);
++    CHECK(fd >= 0);
++    CHECK(fcntl(fd, F_GETFD) & FD_CLOEXEC);
++    struct stat st;
++    CHECK(fstat(fd, &st) == 0 && (uint64_t)st.st_size == size);
++
++    /* Two creates never collide. */
++    int fd2 = dxn_shm_create(page);
++    CHECK(fd2 >= 0 && fd2 != fd);
++
++    dxn_shm_mapping whole, window;
++    CHECK(dxn_shm_map(fd, 0, size, &whole) == 0);
++    CHECK(whole.ptr == whole.base && whole.length == size);
++    for (uint64_t i = 0; i < size; i++)
++        CHECK(((uint8_t *)whole.ptr)[i] == 0);
++    memset(whole.ptr, 0xab, size);
++    ((uint8_t *)whole.ptr)[page + 100] = 0x5a;
++
++    /* An unaligned window maps from its page floor. */
++    CHECK(dxn_shm_map(fd, page + 100, 16, &window) == 0);
++    CHECK((uint8_t *)window.ptr - (uint8_t *)window.base == 100);
++    CHECK(window.length == page);
++    CHECK(*(uint8_t *)window.ptr == 0x5a);
++    *(uint8_t *)window.ptr = 0x33;
++    CHECK(((uint8_t *)whole.ptr)[page + 100] == 0x33);
++    dxn_shm_unmap(&window);
++    CHECK(window.base == NULL);
++    dxn_shm_unmap(&window); /* no-op */
++
++    /* Windows past the object fail instead of faulting later. */
++    errno = 0;
++    CHECK(dxn_shm_map(fd, 2 * page, page + 1, &window) == -1 &&
++          errno == EINVAL);
++    CHECK(dxn_shm_map(fd, 0, 0, &window) == -1);
++    CHECK(dxn_shm_map(fd, UINT64_MAX - 1, 4, &window) == -1);
++    CHECK(dxn_shm_map(-1, 0, 4, &window) == -1);
++
++#ifdef __linux__
++    /* The memfd is sealed against shrinking (udmabuf requirement). */
++    CHECK(ftruncate(fd, page) != 0);
++#endif
++
++    dxn_shm_unmap(&whole);
++    close(fd2);
++    close(fd);
++    return 0;
++}

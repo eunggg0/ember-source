@@ -1,0 +1,46 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 18/46] dlls-ntoskrnl.exe: Ember changes
+
+Base: Wine 11.18
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/ntoskrnl.exe/instr.c b/dlls/ntoskrnl.exe/instr.c
+index 31e1e6e..ee6001d 100644
+--- a/dlls/ntoskrnl.exe/instr.c
++++ b/dlls/ntoskrnl.exe/instr.c
+@@ -29,6 +29,7 @@
+ #include "ddk/wdm.h"
+ #include "excpt.h"
+ #include "wine/debug.h"
++#include "wine/usdaddr.h"
+ 
+ #define KSHARED_USER_DATA_PAGE_SIZE 0x1000
+ 
+@@ -490,7 +491,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(int);
+ #define SIB_BASE( sib, rex )    (((sib) & 7) | (((rex) & REX_B) ? 8 : 0))
+ 
+ /* keep in sync with dlls/ntdll/thread.c:thread_init */
+-static const BYTE *wine_user_shared_data = (BYTE *)0x7ffe0000;
++static const BYTE *wine_user_shared_data = (BYTE *)(ULONG_PTR)WINE_USD_ADDR;
+ static const BYTE *user_shared_data      = (BYTE *)0xfffff78000000000;
+ 
+ static inline DWORD64 *get_int_reg( CONTEXT *context, int index )
+@@ -531,6 +532,10 @@ static void store_reg_word( CONTEXT *context, BYTE regmodrm, const BYTE *addr, i
+                 reg[i] ^= addr[i];
+             break;
+     }
++
++    /* A write to a 32-bit register clears its upper half in 64-bit mode. */
++    if (op_size == sizeof(DWORD))
++        *get_int_reg( context, index ) = (DWORD)*get_int_reg( context, index );
+ }
+ 
+ /* store an operand into a byte register */
+@@ -896,6 +901,7 @@ static DWORD emulate_instruction( EXCEPTION_RECORD *rec, CONTEXT *context )
+         {
+             TRACE("USD offset %#x at %p.\n", (unsigned int)offset, (void *)context->Rip);
+             memcpy( &context->Rax, wine_user_shared_data + offset, data_size );
++            if (data_size == sizeof(DWORD)) context->Rax = (DWORD)context->Rax;
+             context->Rip += prefixlen + len + 1;
+             return ExceptionContinueExecution;
+         }

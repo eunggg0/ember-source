@@ -1,0 +1,29 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 12/17] dlls-winhttp: Ember changes
+
+Base: Wine 11.0
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/winhttp/session.c b/dlls/winhttp/session.c
+index e26fdd0..44cce53 100644
+--- a/dlls/winhttp/session.c
++++ b/dlls/winhttp/session.c
+@@ -36,6 +36,9 @@
+ #include "wine/debug.h"
+ #include "winhttp_private.h"
+ 
++#define EMBER_BLOCK_MODULE "winhttp"
++#include "wine/ember_blocklist.h"
++
+ WINE_DEFAULT_DEBUG_CHANNEL(winhttp);
+ 
+ #define DEFAULT_RESOLVE_TIMEOUT             0
+@@ -596,6 +599,8 @@ HINTERNET WINAPI WinHttpConnect( HINTERNET hsession, const WCHAR *server, INTERN
+         SetLastError( ERROR_INVALID_PARAMETER );
+         return NULL;
+     }
++    if (ember_host_deniedW(server)) { SetLastError(ERROR_WINHTTP_NAME_NOT_RESOLVED); return NULL; }
++
+     if (!(session = (struct session *)grab_object( hsession )))
+     {
+         SetLastError( ERROR_INVALID_HANDLE );

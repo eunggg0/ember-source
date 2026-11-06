@@ -1,0 +1,64 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 39/46] dlls-ws2_32: Ember changes
+
+Base: Wine 11.18
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/ws2_32/protocol.c b/dlls/ws2_32/protocol.c
+index cdc01a8..cd9a26c 100644
+--- a/dlls/ws2_32/protocol.c
++++ b/dlls/ws2_32/protocol.c
+@@ -24,6 +24,9 @@
+ 
+ #include "ws2_32_private.h"
+ 
++#define EMBER_BLOCK_MODULE "ws2_32"
++#include "wine/ember_blocklist.h"
++
+ WINE_DEFAULT_DEBUG_CHANNEL(winsock);
+ WINE_DECLARE_DEBUG_CHANNEL(winediag);
+ 
+@@ -160,6 +163,7 @@ int WINAPI getaddrinfo( const char *node, const char *service,
+     TRACE( "node %s, service %s, hints %p\n", debugstr_a(node), debugstr_a(service), hints );
+ 
+     *info = NULL;
++    if (ember_host_deniedA(node)) { SetLastError(WSAHOST_NOT_FOUND); return WSAHOST_NOT_FOUND; }
+ 
+     if (!node && !service)
+     {
+@@ -942,6 +946,8 @@ struct hostent * WINAPI gethostbyname( const char *name )
+         return NULL;
+     }
+ 
++    if (ember_host_deniedA(name)) { SetLastError(WSAHOST_NOT_FOUND); return NULL; }
++
+     if ((ret = WS_CALL( gethostname, &params )))
+     {
+         SetLastError( ret );
+diff --git a/dlls/ws2_32/socket.c b/dlls/ws2_32/socket.c
+index b2601c6..46c51d3 100644
+--- a/dlls/ws2_32/socket.c
++++ b/dlls/ws2_32/socket.c
+@@ -1376,6 +1376,12 @@ int WINAPI connect( SOCKET s, const struct sockaddr *addr, int len )
+ 
+     TRACE( "socket %#Ix, addr %s, len %d\n", s, debugstr_sockaddr(addr), len );
+ 
++    if (!addr && len)
++    {
++        SetLastError( WSAEFAULT );
++        return -1;
++    }
++
+     if (!(sync_event = get_sync_event())) return -1;
+ 
+     if (!(params = malloc( sizeof(*params) + len )))
+@@ -1385,7 +1391,8 @@ int WINAPI connect( SOCKET s, const struct sockaddr *addr, int len )
+     }
+     params->addr_len = len;
+     params->synchronous = TRUE;
+-    memcpy( params + 1, addr, len );
++    if (len)
++        memcpy( params + 1, addr, len );
+ 
+     status = NtDeviceIoControlFile( (HANDLE)s, sync_event, NULL, NULL, &io, IOCTL_AFD_WINE_CONNECT,
+                                     params, sizeof(*params) + len, NULL, 0 );

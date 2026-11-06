@@ -1,0 +1,352 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 16/17] include: Ember changes
+
+Base: Wine 11.0
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/include/Makefile.in b/include/Makefile.in
+index e0987ce..81219d9 100644
+--- a/include/Makefile.in
++++ b/include/Makefile.in
+@@ -1,4 +1,7 @@
+ SOURCES = \
++	wine/ember_blockcount.h \
++	wine/ember_blocklist.h \
++	wine/ember_blocklist_core.h \
+ 	accctrl.h \
+ 	access.idl \
+ 	aclapi.h \
+@@ -991,6 +994,7 @@ SOURCES = \
+ 	wine/server_protocol.h \
+ 	wine/strmbase.h \
+ 	wine/svcctl.idl \
++	wine/inproc_sync_macos.h \
+ 	wine/test.h \
+ 	wine/unixlib.h \
+ 	wine/vulkan.h \
+diff --git a/include/wine/ember_blockcount.h b/include/wine/ember_blockcount.h
+new file mode 100644
+index 0000000..77595b2
+--- /dev/null
++++ b/include/wine/ember_blockcount.h
+@@ -0,0 +1,77 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later
++ * Each DLL/process owns one lifetime-unique snapshot. No shared read/modify/write
++ * file. Filesystem I/O happens only on a denied lookup, at most once per second:
++ * short-lived processes exit before a pool thread runs, so the first denial (and one
++ * snapshot per second after it) is published synchronously; the timer batches the rest.
++ * Abrupt process termination can lose the pending batch. Not a security audit log.
++ */
++#ifndef EMBER_BLOCKCOUNT_H
++#define EMBER_BLOCKCOUNT_H
++#include <stdio.h>
++static DECLSPEC_ALIGN(8) LONG64 ember_block_count;
++static LONG64 ember_block_written;
++static LONG ember_count_writing;
++static LONG64 ember_count_sync_tick;
++static INIT_ONCE ember_count_once = INIT_ONCE_STATIC_INIT;
++static char ember_count_path[256], ember_count_tmp[256];
++static PTP_TIMER ember_count_timer;
++static void CALLBACK ember_count_flush(PTP_CALLBACK_INSTANCE instance, void *context, PTP_TIMER timer)
++{
++    LONG64 value;
++    char text[32];
++    DWORD size, written;
++    HANDLE file;
++    (void)instance; (void)context; (void)timer;
++    if (InterlockedCompareExchange(&ember_count_writing, 1, 0)) return;
++    value = InterlockedCompareExchange64(&ember_block_count, 0, 0);
++    if (value == ember_block_written) goto done;
++    CreateDirectoryA("C:\\EmberShield", NULL);
++    CreateDirectoryA("C:\\EmberShield\\blocked-counts", NULL);
++    size = snprintf(text, sizeof(text), "%llu\n", (unsigned long long)value);
++    file = CreateFileA(ember_count_tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
++                       FILE_ATTRIBUTE_NORMAL, NULL);
++    if (file == INVALID_HANDLE_VALUE) goto done;
++    if (!WriteFile(file, text, size, &written, NULL) || written != size)
++    { CloseHandle(file); DeleteFileA(ember_count_tmp); goto done; }
++    CloseHandle(file);
++    if (MoveFileExA(ember_count_tmp, ember_count_path, MOVEFILE_REPLACE_EXISTING))
++        ember_block_written = value;
++done:
++    InterlockedExchange(&ember_count_writing, 0);
++}
++static BOOL CALLBACK ember_count_init(INIT_ONCE *once, void *parameter, void **context)
++{
++    FILETIME created, exited, kernel, user, due;
++    HMODULE module;
++    (void)once; (void)parameter; (void)context;
++    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return TRUE;
++    /* Pin only after the first denial: callback code must survive DLL unloading. */
++    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
++                           (const WCHAR *)ember_count_flush, &module)) return TRUE;
++    snprintf(ember_count_path, sizeof(ember_count_path),
++             "C:\\EmberShield\\blocked-counts\\%lu-%08lx%08lx-" EMBER_BLOCK_MODULE ".count",
++             (unsigned long)GetCurrentProcessId(), (unsigned long)created.dwHighDateTime,
++             (unsigned long)created.dwLowDateTime);
++    snprintf(ember_count_tmp, sizeof(ember_count_tmp), "%s.tmp", ember_count_path);
++    /* A periodic timer can overlap callbacks; use a dedicated serialized window
++     * below rather than blocking lookups. */
++    /* Relative 1 s: the first denial is already written synchronously. */
++    due.dwLowDateTime = (DWORD)-10000000; due.dwHighDateTime = (DWORD)-1;
++    ember_count_timer = CreateThreadpoolTimer(ember_count_flush, NULL, NULL);
++    if (ember_count_timer) SetThreadpoolTimer(ember_count_timer, &due, 1000, 0);
++    return TRUE;
++}
++static inline void ember_count_denial(void)
++{
++    ULONGLONG now;
++    LONG64 last;
++    InterlockedIncrement64(&ember_block_count);
++    InitOnceExecuteOnce(&ember_count_once, ember_count_init, NULL, NULL);
++    if (!ember_count_path[0]) return;
++    now = GetTickCount64() | 1;
++    last = InterlockedCompareExchange64(&ember_count_sync_tick, 0, 0);
++    if (last && now - (ULONGLONG)last < 1000) return;
++    if (InterlockedCompareExchange64(&ember_count_sync_tick, (LONG64)now, last) != last) return;
++    ember_count_flush(NULL, NULL, NULL);
++}
++#endif
+diff --git a/include/wine/ember_blocklist.h b/include/wine/ember_blocklist.h
+new file mode 100644
+index 0000000..b5aa3d2
+--- /dev/null
++++ b/include/wine/ember_blocklist.h
+@@ -0,0 +1,60 @@
++/* Original Ember candidate. SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef EMBER_BLOCKLIST_H
++#define EMBER_BLOCKLIST_H
++#include "wine/ember_blocklist_core.h"
++#include "wine/ember_blockcount.h"
++/* One immutable snapshot per DLL/process. A configured invalid file denies all
++ * lookups at these entry points; unset means disabled. Restart after updates.
++ * EMBER_BLOCKLIST_FILE is an absolute Wine (e.g. Z:\\...) path to an ASCII list. */
++static INIT_ONCE ember_block_once = INIT_ONCE_STATIC_INIT;
++static struct ember_blocklist ember_blocks;
++static int ember_block_state;
++static BOOL CALLBACK ember_block_init(INIT_ONCE *once, void *parameter, void **context)
++{
++    WCHAR path[32768];
++    DWORD n, got, size;
++    HANDLE file;
++    LARGE_INTEGER length;
++    char *data;
++    (void)once; (void)parameter; (void)context;
++    n = GetEnvironmentVariableW(L"EMBER_BLOCKLIST_FILE", path, ARRAY_SIZE(path));
++    if (!n) return TRUE;
++    ember_block_state = -1;
++    if (n >= ARRAY_SIZE(path) || !(path[0] && path[1] == ':' && (path[2] == '\\' || path[2] == '/'))) return TRUE;
++    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
++    if (file == INVALID_HANDLE_VALUE) return TRUE;
++    if (!GetFileSizeEx(file, &length) || length.QuadPart <= 0 ||
++        length.QuadPart > EMBER_BLOCK_BYTES) { CloseHandle(file); return TRUE; }
++    size = length.QuadPart;
++    data = HeapAlloc(GetProcessHeap(), 0, size);
++    if (data)
++    {
++        if (ReadFile(file, data, size, &got, NULL) && got == size && ember_blocklist_parse(&ember_blocks, data, size)) ember_block_state = 1;
++        HeapFree(GetProcessHeap(), 0, data);
++    }
++    CloseHandle(file);
++    return TRUE;
++}
++static inline int ember_host_deniedA(const char *name)
++{
++    int denied;
++    InitOnceExecuteOnce(&ember_block_once, ember_block_init, NULL, NULL);
++    denied = ember_block_state < 0 || (ember_block_state > 0 && ember_blocklist_contains(&ember_blocks, name));
++    if (denied) ember_count_denial();
++    return denied;
++}
++static inline int ember_host_deniedW(const WCHAR *name)
++{
++    char host[EMBER_HOST_MAX + 2];
++    size_t i;
++    if (!name) return ember_host_deniedA(NULL);
++    for (i = 0; i < ARRAY_SIZE(host)-1 && name[i]; ++i)
++    {
++        if (name[i] > 127) return ember_host_deniedA(NULL);
++        host[i] = name[i];
++    }
++    if (name[i]) return ember_host_deniedA(NULL);
++    host[i] = 0;
++    return ember_host_deniedA(host);
++}
++#endif
+diff --git a/include/wine/ember_blocklist_core.h b/include/wine/ember_blocklist_core.h
+new file mode 100644
+index 0000000..74648b8
+--- /dev/null
++++ b/include/wine/ember_blocklist_core.h
+@@ -0,0 +1,101 @@
++/* Original Ember candidate. SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef EMBER_BLOCKLIST_CORE_H
++#define EMBER_BLOCKLIST_CORE_H
++#include <stddef.h>
++#include <stdlib.h>
++#include <string.h>
++#define EMBER_BLOCK_MAX 150000
++#define EMBER_BLOCK_BYTES (40u * 1024u * 1024u)
++#define EMBER_HOST_MAX 253
++/* Immutable after initialization. One compact arena + sorted pointer index per DLL.
++ * Caller zero-initializes, destroys before reuse; failed parse leaves an empty set. */
++struct ember_blocklist { unsigned int count; char **hosts; char *storage; };
++static int ember_host_normalize(const char *s, size_t len, char *out)
++{
++    size_t i;
++    if (len && s[len - 1] == '.') --len;
++    if (!len || len > EMBER_HOST_MAX) return 0;
++    for (i = 0; i < len; ++i)
++    {
++        unsigned char c = s[i];
++        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
++        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.')) return 0;
++        if ((c == '.' && (!i || s[i-1] == '.')) || (c == '-' && (!i || s[i-1] == '.'))) return 0;
++        if (c == '.' && i && s[i-1] == '-') return 0;
++        out[i] = c;
++    }
++    if (out[len-1] == '.' || out[len-1] == '-') return 0;
++    out[len] = 0;
++    return 1;
++}
++
++static void ember_blocklist_destroy(struct ember_blocklist *list)
++{
++    free(list->hosts); free(list->storage);
++    memset(list, 0, sizeof(*list));
++}
++static int ember_block_compare(const void *a, const void *b)
++{
++    return strcmp(*(const char * const *)a, *(const char * const *)b);
++}
++/* ASCII only, bounded input and row count; no ports/wildcards/embedded NULs. */
++static int ember_blocklist_parse(struct ember_blocklist *list, const char *data, size_t len)
++{
++    size_t i=0, start, n, rows=0, used=0;
++    unsigned int j, unique;
++    char normalized[EMBER_HOST_MAX+1];
++    ember_blocklist_destroy(list);
++    if (!data || !len || len > EMBER_BLOCK_BYTES) return 0;
++    /* Validate before allocating. Input is read once by the wrapper. */
++    while (i < len)
++    {
++        start=i; while (i<len && data[i]!='\n') ++i;
++        n=i-start; if (i<len) ++i;
++        if (n && data[start+n-1]=='\r') --n;
++        if (!n) continue;
++        if (++rows > EMBER_BLOCK_MAX || !ember_host_normalize(data+start,n,normalized)) return 0;
++    }
++    if (!rows) return 0;
++    list->hosts=malloc(rows*sizeof(*list->hosts));
++    list->storage=malloc(len+1);
++    if (!list->hosts || !list->storage) { ember_blocklist_destroy(list); return 0; }
++    i=0;
++    while (i<len)
++    {
++        start=i; while (i<len && data[i]!='\n') ++i;
++        n=i-start; if(i<len) ++i;
++        if(n && data[start+n-1]=='\r') --n;
++        if(!n) continue;
++        ember_host_normalize(data+start,n,normalized);
++        n=strlen(normalized)+1;
++        list->hosts[list->count++]=list->storage+used;
++        memcpy(list->storage+used,normalized,n); used+=n;
++    }
++    qsort(list->hosts,list->count,sizeof(*list->hosts),ember_block_compare);
++    unique=0;
++    for(j=0;j<list->count;++j)
++        if (!unique || strcmp(list->hosts[j],list->hosts[unique-1])) list->hosts[unique++]=list->hosts[j];
++    list->count=unique;
++    return 1;
++}
++static int ember_blocklist_contains(const struct ember_blocklist *list, const char *name)
++{
++    char host[EMBER_HOST_MAX+1];
++    const char *suffix;
++    size_t n;
++    if (!name) return 0;
++    for(n=0;n<=EMBER_HOST_MAX+1 && name[n];++n) {} /* bounded API input */
++    if (!ember_host_normalize(name,n,host)) return 0;
++    suffix=host;
++    for (;;)
++    {
++        const char *key=suffix;
++        /* Numeric address entries match exactly, never a domain suffix. */
++        if ((suffix==host || strspn(suffix,"0123456789.")!=strlen(suffix)) &&
++            list->count && bsearch(&key,list->hosts,list->count,sizeof(*list->hosts),ember_block_compare)) return 1;
++        suffix=strchr(suffix,'.');
++        if (!suffix) return 0;
++        ++suffix;
++    }
++}
++#endif
+diff --git a/include/wine/inproc_sync_macos.h b/include/wine/inproc_sync_macos.h
+new file mode 100644
+index 0000000..244c733
+--- /dev/null
++++ b/include/wine/inproc_sync_macos.h
+@@ -0,0 +1,44 @@
++/*
++ * macOS 용 in-process 동기화 객체의 공유 상태.
++ *
++ * 리눅스는 /dev/ntsync 커널 드라이버가 같은 일을 한다. macOS 에는 그런 게 없어서
++ * 객체마다 공유 메모리 한 장을 두고, 대기는 __ulock_wait 으로 한다.
++ * wineserver 가 만들어 fd 로 넘기고, 각 프로세스가 그 fd 를 mmap 해서 같은 장을 본다.
++ *
++ * 서버와 클라이언트가 같은 배치를 봐야 하므로 여기 한 곳에만 적는다.
++ */
++#ifndef __WINE_INPROC_SYNC_MACOS_H
++#define __WINE_INPROC_SYNC_MACOS_H
++
++struct macos_sync_state
++{
++    int          type;       /* enum inproc_sync_type */
++    int          manual;     /* 이벤트: 수동 리셋인가 */
++    unsigned int max;        /* 세마포어: 최대값 */
++    int          owner;      /* 뮤텍스: 가진 스레드, 0 이면 비어 있음 */
++    unsigned int count;      /* 이벤트: 0/1, 세마포어: 남은 수, 뮤텍스: 재진입 횟수 */
++    int          abandoned;  /* 뮤텍스: 주인이 죽은 채 남았는가 */
++    unsigned int seq;        /* 깨우기 신호. 값이 바뀌면 대기자가 다시 확인한다 */
++    unsigned int waiters;    /* 이 객체 하나만 보고 자는 수. 0 이면 깨우기 syscall 을 건너뛴다 */
++    unsigned int multi;      /* 이 객체를 다중 대기 목록에 넣고 자는 수 */
++    unsigned int pad;
++    /* 대기 타이머(로컬 처리). 서버는 타이머를 켤 때 만료 시각(1601 기준 100ns, 0 이면 없음)과
++     * 주기(ms)만 여기 적고 자기 타임아웃을 걸지 않는다. 만료 판정·소모는 대기자가 한다.
++     * 실측(2026-09-24, 로아 FEX): wineserver 시간의 절반이 타이머 만료→신호→깨우기 왕복이었다. */
++    long long    due;
++    unsigned int period_ms;
++    unsigned int pad2;
++};
++
++/* 객체 여러 개를 한꺼번에 기다릴 때 쓴다. __ulock_wait 은 주소 하나만 볼 수 있어서,
++ * 어떤 객체가 신호를 받든 이 값이 함께 올라가게 해 두고 대기자가 여기서 깨어나
++ * 다시 확인한다. wineserver 가 만들어 모든 프로세스에 fd 로 넘긴다. */
++struct macos_sync_global
++{
++    unsigned int seq;
++    unsigned int waiters;
++};
++
++#define MACOS_SYNC_MAP_SIZE 4096
++
++#endif
+diff --git a/include/wine/server_protocol.h b/include/wine/server_protocol.h
+index dc1ceeb..7241555 100644
+--- a/include/wine/server_protocol.h
++++ b/include/wine/server_protocol.h
+@@ -2049,6 +2049,7 @@ struct send_socket_request
+     struct request_header __header;
+     unsigned int flags;
+     struct async_data async;
++    /* VARARG(destination,bytes); */
+ };
+ struct send_socket_reply
+ {
+@@ -7093,6 +7094,6 @@ union generic_reply
+     struct d3dkmt_mutex_release_reply d3dkmt_mutex_release_reply;
+ };
+ 
+-#define SERVER_PROTOCOL_VERSION 930
++#define SERVER_PROTOCOL_VERSION 931
+ 
+ #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

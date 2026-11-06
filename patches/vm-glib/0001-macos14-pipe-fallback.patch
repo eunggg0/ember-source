@@ -1,0 +1,16 @@
+--- a/meson.build
++++ b/meson.build
+@@ -832,6 +832,13 @@
+ endif
+ 
+ foreach f : functions
++  # Ember distribution targets macOS 14. SDK 27 exports pipe2, but probing
++  # without its availability-annotated declaration reports a false positive.
++  # Keep GLib's existing pipe()/fcntl() fallback on Darwin for this build.
++  if f == 'pipe2' and host_system == 'darwin'
++    set_variable('have_func_' + f, false)
++    continue
++  endif
+   if cc.has_function(f)
+     define = 'HAVE_' + f.underscorify().to_upper()
+     glib_conf.set(define, 1)

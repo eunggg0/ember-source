@@ -1,0 +1,121 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 78/95] dlls-wintrust: Ember changes
+
+Base: CrossOver 26.3.0 FOSS sources/wine
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/wintrust/crypt.c b/dlls/wintrust/crypt.c
+index ad6f264..97a0bb1 100644
+--- a/dlls/wintrust/crypt.c
++++ b/dlls/wintrust/crypt.c
+@@ -24,6 +24,7 @@
+ 
+ #include <stdarg.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include "windef.h"
+ #include "winbase.h"
+ #include "wintrust.h"
+@@ -69,6 +70,31 @@ struct catinfo
+     WCHAR file[MAX_PATH];
+ };
+ 
++static BOOL needs_cryptstub(void)
++{
++    static int cache = -1;
++
++    const WCHAR *name, *p;
++    WCHAR env[2];
++
++    if (cache != -1) return cache;
++
++    if (GetEnvironmentVariableW( L"EMBER_WINE_CRYPTSTUB", env, ARRAY_SIZE(env) ) != 1 ||
++        env[0] != '1' ||
++        (GetEnvironmentVariableW( L"WINE_DISABLE_CRYPTSTUB", env, ARRAY_SIZE(env) ) == 1 && env[0] == '1'))
++    {
++        cache = 0;
++        return cache;
++    }
++
++    name = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;
++    if (!name) return FALSE;
++    if ((p = wcsrchr(name, '/'))) name = p + 1;
++    if ((p = wcsrchr(name, '\\'))) name = p + 1;
++    cache = !lstrcmpiW(name, L"StarRail.exe");
++    return cache;
++}
++
+ static HCATINFO create_catinfo(const WCHAR *filename)
+ {
+     struct catinfo *ci;
+@@ -470,6 +496,8 @@ HCATINFO WINAPI CryptCATAdminEnumCatalogFromHash(HCATADMIN hCatAdmin, BYTE* pbHa
+     static const WCHAR slashW[] = {'\\',0};
+     static const WCHAR globW[]  = {'\\','*','.','c','a','t',0};
+ 
++    static LONG once;
++
+     struct catadmin *ca = hCatAdmin;
+     WIN32_FIND_DATAW data;
+     HCATINFO prev = NULL;
+@@ -479,6 +507,11 @@ HCATINFO WINAPI CryptCATAdminEnumCatalogFromHash(HCATADMIN hCatAdmin, BYTE* pbHa
+ 
+     TRACE("%p %p %ld %lx %p\n", hCatAdmin, pbHash, cbHash, dwFlags, phPrevCatInfo);
+ 
++    if (!once && needs_cryptstub() && !InterlockedExchange(&once, 1))
++    {
++        return (HCATINFO)1;
++    }
++
+     if (!ca || ca->magic != CATADMIN_MAGIC || !pbHash || cbHash != 20 || dwFlags)
+     {
+         SetLastError(ERROR_INVALID_PARAMETER);
+@@ -599,11 +632,18 @@ BOOL WINAPI CryptCATAdminReleaseCatalogContext(HCATADMIN hCatAdmin,
+                                                HCATINFO hCatInfo,
+                                                DWORD dwFlags)
+ {
++    static LONG once;
++
+     struct catinfo *ci = hCatInfo;
+     struct catadmin *ca = hCatAdmin;
+ 
+     TRACE("%p %p %lx\n", hCatAdmin, hCatInfo, dwFlags);
+ 
++    if (!once && needs_cryptstub() && !InterlockedExchange(&once, 1))
++    {
++        return 1;
++    }
++
+     if (!ca || ca->magic != CATADMIN_MAGIC || !ci || ci->magic != CATINFO_MAGIC)
+     {
+         SetLastError(ERROR_INVALID_PARAMETER);
+@@ -1022,10 +1062,17 @@ out:
+  */
+ BOOL WINAPI CryptCATCatalogInfoFromContext(HCATINFO hcatinfo, CATALOG_INFO *info, DWORD flags)
+ {
++    static LONG once;
++
+     struct catinfo *ci = hcatinfo;
+ 
+     TRACE("%p, %p, %lx\n", hcatinfo, info, flags);
+ 
++    if (!once && needs_cryptstub() && !InterlockedExchange(&once, 1))
++    {
++        return 1;
++    }
++
+     if (!hcatinfo || hcatinfo == INVALID_HANDLE_VALUE || ci->magic != CATINFO_MAGIC ||
+         flags || !info || info->cbStruct != sizeof(*info))
+     {
+diff --git a/dlls/wintrust/wintrust_main.c b/dlls/wintrust/wintrust_main.c
+index 2292100..9129e59 100644
+--- a/dlls/wintrust/wintrust_main.c
++++ b/dlls/wintrust/wintrust_main.c
+@@ -759,7 +759,7 @@ CRYPT_PROVIDER_CERT * WINAPI WTHelperGetProvCertFromChain(
+ 
+     TRACE("(%p %ld)\n", pSgnr, idxCert);
+ 
+-    if (idxCert >= pSgnr->csCertChain || !pSgnr->pasCertChain)
++    if (!pSgnr || idxCert >= pSgnr->csCertChain || !pSgnr->pasCertChain)  /* Ember: 11.18 */
+         return NULL;
+     cert = &pSgnr->pasCertChain[idxCert];
+     TRACE("returning %p\n", cert);

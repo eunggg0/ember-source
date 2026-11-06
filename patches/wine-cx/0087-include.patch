@@ -1,0 +1,1260 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 87/95] include: Ember changes
+
+Base: CrossOver 26.3.0 FOSS sources/wine
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/include/Makefile.in b/include/Makefile.in
+index 516c03f..642282e 100644
+--- a/include/Makefile.in
++++ b/include/Makefile.in
+@@ -1,4 +1,7 @@
+ SOURCES = \
++	wine/ember_blockcount.h \
++	wine/ember_blocklist.h \
++	wine/ember_blocklist_core.h \
+ 	accctrl.h \
+ 	access.idl \
+ 	aclapi.h \
+diff --git a/include/d3dx10math.h b/include/d3dx10math.h
+index 5790fbd..837a28e 100644
+--- a/include/d3dx10math.h
++++ b/include/d3dx10math.h
+@@ -256,6 +256,18 @@ D3DXCOLOR *D3DXColorModulate(D3DXCOLOR *out, D3DXCOLOR c1, D3DXCOLOR c2);
+ D3DXCOLOR *D3DXColorScale(D3DXCOLOR *out, D3DXCOLOR c, float s);
+ D3DXCOLOR *D3DXColorSubtract(D3DXCOLOR *out, D3DXCOLOR c1, D3DXCOLOR c2);
+ D3DX_CPU_OPTIMIZATION WINAPI D3DXCpuOptimizations(BOOL enable);
++D3DXMATRIX *WINAPI D3DXMatrixMultiply(D3DXMATRIX *out, const D3DXMATRIX *m1, const D3DXMATRIX *m2);
++D3DXMATRIX *WINAPI D3DXMatrixPerspectiveFovLH(D3DXMATRIX *m, float fovy, float aspect, float zn, float zf);
++D3DXMATRIX *WINAPI D3DXMatrixPerspectiveLH(D3DXMATRIX *m, float w, float h, float zn, float zf);
++D3DXMATRIX *WINAPI D3DXMatrixRotationX(D3DXMATRIX *m, float angle);
++D3DXMATRIX *WINAPI D3DXMatrixRotationY(D3DXMATRIX *m, float angle);
++D3DXMATRIX *WINAPI D3DXMatrixRotationZ(D3DXMATRIX *m, float angle);
++D3DXMATRIX *WINAPI D3DXMatrixTranslation(D3DXMATRIX *m, float x, float y, float z);
++D3DXVECTOR4 *WINAPI D3DXVec2TransformArray(D3DXVECTOR4 *out, UINT outstride, const D3DXVECTOR2 *v,
++        UINT vstride, const D3DXMATRIX *m, UINT n);
++
++D3DXVECTOR4 *WINAPI D3DXVec4Transform(D3DXVECTOR4 *out, const D3DXVECTOR4 *v, const D3DXMATRIX *m);
++D3DXVECTOR4 *WINAPI D3DXVec4TransformArray(D3DXVECTOR4 *out, UINT outstride, const D3DXVECTOR4 *v, UINT vstride, const D3DXMATRIX *m, UINT n);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/include/d3dx11async.h b/include/d3dx11async.h
+index 2d85e4a..8193bb6 100644
+--- a/include/d3dx11async.h
++++ b/include/d3dx11async.h
+@@ -25,6 +25,8 @@
+ extern "C" {
+ #endif
+ 
++HRESULT WINAPI D3DX11CreateThreadPump(UINT io_threads, UINT proc_threads, ID3DX11ThreadPump **pump);
++
+ HRESULT WINAPI D3DX11CreateAsyncFileLoaderA(const char *file_name, ID3DX11DataLoader **loader);
+ HRESULT WINAPI D3DX11CreateAsyncFileLoaderW(const WCHAR *file_name, ID3DX11DataLoader **loader);
+ HRESULT WINAPI D3DX11CreateAsyncResourceLoaderA(HMODULE module, const char *resource, ID3DX11DataLoader **loader);
+diff --git a/include/d3dx9core.h b/include/d3dx9core.h
+index e66afc4..9be7cdc 100644
+--- a/include/d3dx9core.h
++++ b/include/d3dx9core.h
+@@ -334,7 +334,7 @@ DECLARE_INTERFACE_(ID3DXRenderToEnvMap, IUnknown)
+ #define ID3DXRenderToEnvMap_Face(p,a,b)            (p)->lpVtbl->Face(p,a,b)
+ #define ID3DXRenderToEnvMap_End(p,a)               (p)->lpVtbl->End(p,a)
+ #define ID3DXRenderToEnvMap_OnLostDevice(p)        (p)->lpVtbl->OnLostDevice(p)
+-#define ID3DXRenderToEnvMap_OnLostDevice(p)        (p)->lpVtbl->OnLostDevice(p)
++#define ID3DXRenderToEnvMap_OnResetDevice(p)       (p)->lpVtbl->OnResetDevice(p)
+ #else
+ /*** IUnknown methods ***/
+ #define ID3DXRenderToEnvMap_QueryInterface(p,a,b)  (p)->QueryInterface(a,b)
+@@ -350,7 +350,7 @@ DECLARE_INTERFACE_(ID3DXRenderToEnvMap, IUnknown)
+ #define ID3DXRenderToEnvMap_Face(p,a,b)            (p)->Face(a,b)
+ #define ID3DXRenderToEnvMap_End(p,a)               (p)->End(a)
+ #define ID3DXRenderToEnvMap_OnLostDevice(p)        (p)->OnLostDevice()
+-#define ID3DXRenderToEnvMap_OnLostDevice(p)        (p)->OnLostDevice()
++#define ID3DXRenderToEnvMap_OnResetDevice(p)       (p)->OnResetDevice()
+ #endif
+ 
+ typedef struct _D3DXRTS_DESC
+diff --git a/include/d3dx9effect.h b/include/d3dx9effect.h
+index 5dd1e75..9de16c7 100644
+--- a/include/d3dx9effect.h
++++ b/include/d3dx9effect.h
+@@ -117,8 +117,8 @@ DECLARE_INTERFACE_(ID3DXBaseEffect, IUnknown)
+     STDMETHOD_(D3DXHANDLE, GetTechniqueByName)(THIS_ const char *name) PURE;
+     STDMETHOD_(D3DXHANDLE, GetPass)(THIS_ D3DXHANDLE technique, UINT index) PURE;
+     STDMETHOD_(D3DXHANDLE, GetPassByName)(THIS_ D3DXHANDLE technique, const char *name) PURE;
+-    STDMETHOD_(D3DXHANDLE, GetFunction)(THIS_ UINT index);
+-    STDMETHOD_(D3DXHANDLE, GetFunctionByName)(THIS_ const char *name);
++    STDMETHOD_(D3DXHANDLE, GetFunction)(THIS_ UINT index) PURE;
++    STDMETHOD_(D3DXHANDLE, GetFunctionByName)(THIS_ const char *name) PURE;
+     STDMETHOD_(D3DXHANDLE, GetAnnotation)(THIS_ D3DXHANDLE object, UINT index) PURE;
+     STDMETHOD_(D3DXHANDLE, GetAnnotationByName)(THIS_ D3DXHANDLE object, const char *name) PURE;
+     STDMETHOD(SetValue)(THIS_ D3DXHANDLE parameter, const void *data, UINT bytes) PURE;
+@@ -227,8 +227,8 @@ DECLARE_INTERFACE_(ID3DXEffect, ID3DXBaseEffect)
+     STDMETHOD_(D3DXHANDLE, GetTechniqueByName)(THIS_ const char *name) PURE;
+     STDMETHOD_(D3DXHANDLE, GetPass)(THIS_ D3DXHANDLE technique, UINT index) PURE;
+     STDMETHOD_(D3DXHANDLE, GetPassByName)(THIS_ D3DXHANDLE technique, const char *name) PURE;
+-    STDMETHOD_(D3DXHANDLE, GetFunction)(THIS_ UINT index);
+-    STDMETHOD_(D3DXHANDLE, GetFunctionByName)(THIS_ const char *name);
++    STDMETHOD_(D3DXHANDLE, GetFunction)(THIS_ UINT index) PURE;
++    STDMETHOD_(D3DXHANDLE, GetFunctionByName)(THIS_ const char *name) PURE;
+     STDMETHOD_(D3DXHANDLE, GetAnnotation)(THIS_ D3DXHANDLE object, UINT index) PURE;
+     STDMETHOD_(D3DXHANDLE, GetAnnotationByName)(THIS_ D3DXHANDLE object, const char *name) PURE;
+     STDMETHOD(SetValue)(THIS_ D3DXHANDLE parameter, const void *data, UINT bytes) PURE;
+@@ -325,8 +325,8 @@ DECLARE_INTERFACE_(ID3DXEffectCompiler, ID3DXBaseEffect)
+     STDMETHOD_(D3DXHANDLE, GetTechniqueByName)(THIS_ const char *name) PURE;
+     STDMETHOD_(D3DXHANDLE, GetPass)(THIS_ D3DXHANDLE technique, UINT index) PURE;
+     STDMETHOD_(D3DXHANDLE, GetPassByName)(THIS_ D3DXHANDLE technique, const char *name) PURE;
+-    STDMETHOD_(D3DXHANDLE, GetFunction)(THIS_ UINT index);
+-    STDMETHOD_(D3DXHANDLE, GetFunctionByName)(THIS_ const char *name);
++    STDMETHOD_(D3DXHANDLE, GetFunction)(THIS_ UINT index) PURE;
++    STDMETHOD_(D3DXHANDLE, GetFunctionByName)(THIS_ const char *name) PURE;
+     STDMETHOD_(D3DXHANDLE, GetAnnotation)(THIS_ D3DXHANDLE object, UINT index) PURE;
+     STDMETHOD_(D3DXHANDLE, GetAnnotationByName)(THIS_ D3DXHANDLE object, const char *name) PURE;
+     STDMETHOD(SetValue)(THIS_ D3DXHANDLE parameter, const void *data, UINT bytes) PURE;
+diff --git a/include/mfmediaengine.idl b/include/mfmediaengine.idl
+index 27b6bbc..2a45162 100644
+--- a/include/mfmediaengine.idl
++++ b/include/mfmediaengine.idl
+@@ -343,6 +343,103 @@ interface IMFMediaEngineClassFactory : IUnknown
+     HRESULT CreateError([out] IMFMediaError **error);
+ }
+ 
++[
++    object,
++    uuid(a7901327-05dd-4469-a7b7-0e01979e361d),
++    local,
++    pointer_default(unique)
++]
++interface IMFMediaSourceExtensionNotify : IUnknown
++{
++    void OnSourceOpen();
++    void OnSourceEnded();
++    void OnSourceClose();
++};
++
++[
++    object,
++    uuid(87e47623-2ceb-45d6-9b88-d8520c4dcbbc),
++    local,
++    pointer_default(unique)
++]
++interface IMFSourceBufferNotify : IUnknown
++{
++    void OnUpdateStart();
++    void OnAbort();
++    void OnError([in] HRESULT hr);
++    void OnUpdate();
++    void OnUpdateEnd();
++};
++
++[
++    object,
++    uuid(e2cd3a4b-af25-4d3d-9110-da0e6f8ee877),
++    local,
++    pointer_default(unique)
++]
++interface IMFSourceBuffer : IUnknown
++{
++    BOOL GetUpdating();
++    HRESULT GetBuffered([out] IMFMediaTimeRange **buffered);
++    double GetTimeStampOffset();
++    HRESULT SetTimeStampOffset([in] double offset);
++    double GetAppendWindowStart();
++    HRESULT SetAppendWindowStart([in] double time);
++    double GetAppendWindowEnd();
++    HRESULT SetAppendWindowEnd([in] double time);
++    HRESULT Append([in] const BYTE *data,[in] DWORD len);
++    HRESULT AppendByteStream([in] IMFByteStream *stream, [in] DWORDLONG *max_len);
++    HRESULT Abort();
++    HRESULT Remove([in] double start, [in] double end);
++};
++
++[
++    object,
++    uuid(249981f8-8325-41f3-b80c-3b9e3aad0cbe),
++    local,
++    pointer_default(unique)
++]
++interface IMFSourceBufferList : IUnknown
++{
++    DWORD GetLength();
++    IMFSourceBuffer *GetSourceBuffer([in] DWORD index);
++};
++
++typedef enum MF_MSE_READY
++{
++    MF_MSE_READY_CLOSED = 1,
++    MF_MSE_READY_OPEN,
++    MF_MSE_READY_ENDED,
++} MF_MSE_READY;
++
++typedef enum MF_MSE_ERROR
++{
++    MF_MSE_ERROR_NOERROR,
++    MF_MSE_ERROR_NETWORK,
++    MF_MSE_ERROR_DECODE,
++    MF_MSE_ERROR_UNKNOWN_ERROR
++} MF_MSE_ERROR;
++
++[
++    object,
++    uuid(e467b94e-a713-4562-a802-816a42e9008a),
++    local,
++    pointer_default(unique)
++]
++interface IMFMediaSourceExtension : IUnknown
++{
++    IMFSourceBufferList *GetSourceBuffers();
++    IMFSourceBufferList *GetActiveSourceBuffers();
++    MF_MSE_READY GetReadyState();
++    double GetDuration();
++    HRESULT SetDuration([in] double duration);
++    HRESULT AddSourceBuffer([in] BSTR type, [in] IMFSourceBufferNotify *notify, [out] IMFSourceBuffer **source_buffer);
++    HRESULT RemoveSourceBuffer([in] IMFSourceBuffer *source_buffer);
++    HRESULT SetEndOfStream([in] MF_MSE_ERROR error);
++    BOOL IsTypeSupported([in] BSTR type);
++    IMFSourceBuffer *GetSourceBuffer([in] DWORD stream_index);
++};
++
+ [
+     object,
+     uuid(fee7c112-e776-42b5-9bbf-0048524e2bd5),
+@@ -380,3 +477,598 @@ interface IMFMediaEngineExtension : IUnknown
+     HRESULT CancelObjectCreation([in] IUnknown *cancel_cookie);
+     HRESULT EndCreateObject([in] IMFAsyncResult *result, [out] IUnknown **object);
+ }
++
++[
++    object,
++    uuid(6a0083f9-8947-4c1d-9ce0-cdee22b23135),
++    local,
++    pointer_default(unique)
++]
++interface IMFMediaKeySessionNotify : IUnknown
++{
++    void KeyMessage([in] BSTR destination_url, [in] const BYTE *message, [in] DWORD message_len);
++    void KeyAdded();
++    void KeyError([in] USHORT code, [in] DWORD system_code);
++}
++
++[
++    object,
++    uuid(24fa67d5-d1d0-4dc5-995c-c0efdc191fb5),
++    local,
++    pointer_default(unique)
++]
++interface IMFMediaKeySession : IUnknown
++{
++    HRESULT GetError([out] USHORT *code, [out] DWORD *system_code);
++    HRESULT get_KeySystem([out] BSTR *key_system);
++    HRESULT get_SessionId([out] BSTR *session_id);
++    HRESULT Update([in] const BYTE *key, [in] DWORD key_len);
++    HRESULT Close();
++}
++
++[
++    object,
++    uuid(7a5645d2-43bd-47fd-87b7-dcd24cc7d692),
++    pointer_default(unique)
++]
++interface IMFCdmSuspendNotify : IUnknown
++{
++    HRESULT Begin();
++    HRESULT End();
++}
++
++[
++    object,
++    uuid(5cb31c05-61ff-418f-afda-caaf41421a38),
++    local,
++    pointer_default(unique)
++]
++interface IMFMediaKeys : IUnknown
++{
++    HRESULT CreateSession([in] BSTR mime_type, [in] const BYTE *init_data, [in] DWORD init_data_len,
++            [in] const BYTE *custom_data, [in] DWORD custom_data_len,
++            [in] IMFMediaKeySessionNotify *notify, [out] IMFMediaKeySession **session);
++    HRESULT get_KeySystem([out] BSTR *key_system);
++    HRESULT Shutdown();
++    HRESULT GetSuspendNotify([out] IMFCdmSuspendNotify **notify);
++}
++
++[
++    object,
++    uuid(c56156c6-ea5b-48a5-9df8-fbe035d0929e),
++    local,
++    pointer_default(unique)
++]
++interface IMFMediaEngineClassFactoryEx : IMFMediaEngineClassFactory
++{
++    HRESULT CreateMediaSourceExtension([in] DWORD flags, [in] IMFAttributes *attr, [out] IMFMediaSourceExtension **mse);
++    HRESULT CreateMediaKeys([in] BSTR key_system, [in] BSTR cdm_store_path, [out] IMFMediaKeys **keys);
++    HRESULT IsTypeSupported([in] BSTR type, [in] BSTR key_system, [out] BOOL *is_supported);
++}
++
++[
++    object,
++    uuid(09083cef-867f-4bf6-8776-dee3a7b42fca),
++    local,
++    pointer_default(unique)
++]
++interface IMFMediaEngineClassFactory2 : IUnknown
++{
++    HRESULT CreateMediaKeys2([in] BSTR key_system, [in] BSTR default_cdm_store_path,
++            [in] BSTR inprivate_cdm_store_path, [out] IMFMediaKeys **keys);
++}
++
++typedef enum MF_TIMED_TEXT_ERROR_CODE
++{
++    MF_TIMED_TEXT_ERROR_CODE_NOERROR,
++    MF_TIMED_TEXT_ERROR_CODE_FATAL,
++    MF_TIMED_TEXT_ERROR_CODE_DATA_FORMAT,
++    MF_TIMED_TEXT_ERROR_CODE_NETWORK,
++    MF_TIMED_TEXT_ERROR_CODE_INTERNAL,
++} MF_TIMED_TEXT_ERROR_CODE;
++
++typedef enum MF_TIMED_TEXT_CUE_EVENT
++{
++    MF_TIMED_TEXT_CUE_EVENT_ACTIVE,
++    MF_TIMED_TEXT_CUE_EVENT_INACTIVE,
++    MF_TIMED_TEXT_CUE_EVENT_CLEAR,
++} MF_TIMED_TEXT_CUE_EVENT;
++
++typedef enum MF_TIMED_TEXT_TRACK_KIND
++{
++    MF_TIMED_TEXT_TRACK_KIND_UNKNOWN,
++    MF_TIMED_TEXT_TRACK_KIND_SUBTITLES,
++    MF_TIMED_TEXT_TRACK_KIND_CAPTIONS,
++    MF_TIMED_TEXT_TRACK_KIND_METADATA,
++} MF_TIMED_TEXT_TRACK_KIND;
++
++typedef enum MF_TIMED_TEXT_UNIT_TYPE
++{
++    MF_TIMED_TEXT_UNIT_TYPE_PIXELS,
++    MF_TIMED_TEXT_UNIT_TYPE_PERCENTAGE,
++} MF_TIMED_TEXT_UNIT_TYPE;
++
++typedef enum MF_TIMED_TEXT_WRITING_MODE
++{
++    MF_TIMED_TEXT_WRITING_MODE_LRTB,
++    MF_TIMED_TEXT_WRITING_MODE_RLTB,
++    MF_TIMED_TEXT_WRITING_MODE_TBRL,
++    MF_TIMED_TEXT_WRITING_MODE_TBLR,
++    MF_TIMED_TEXT_WRITING_MODE_LR,
++    MF_TIMED_TEXT_WRITING_MODE_RL,
++    MF_TIMED_TEXT_WRITING_MODE_TB,
++} MF_TIMED_TEXT_WRITING_MODE;
++
++typedef enum MF_TIMED_TEXT_DISPLAY_ALIGNMENT
++{
++    MF_TIMED_TEXT_DISPLAY_ALIGNMENT_BEFORE,
++    MF_TIMED_TEXT_DISPLAY_ALIGNMENT_AFTER,
++    MF_TIMED_TEXT_DISPLAY_ALIGNMENT_CENTER,
++} MF_TIMED_TEXT_DISPLAY_ALIGNMENT;
++
++typedef enum MF_TIMED_TEXT_SCROLL_MODE
++{
++    MF_TIMED_TEXT_SCROLL_MODE_POP_ON,
++    MF_TIMED_TEXT_SCROLL_MODE_ROLL_UP,
++} MF_TIMED_TEXT_SCROLL_MODE;
++
++typedef enum MF_TIMED_TEXT_FONT_STYLE
++{
++    MF_TIMED_TEXT_FONT_STYLE_NORMAL,
++    MF_TIMED_TEXT_FONT_STYLE_OBLIQUE,
++    MF_TIMED_TEXT_FONT_STYLE_ITALIC,
++} MF_TIMED_TEXT_FONT_STYLE;
++
++typedef enum MF_TIMED_TEXT_ALIGNMENT
++{
++    MF_TIMED_TEXT_ALIGNMENT_START,
++    MF_TIMED_TEXT_ALIGNMENT_END,
++    MF_TIMED_TEXT_ALIGNMENT_CENTER,
++} MF_TIMED_TEXT_ALIGNMENT;
++
++typedef enum MF_TIMED_TEXT_TRACK_READY_STATE
++{
++    MF_TIMED_TEXT_TRACK_READY_STATE_NONE,
++    MF_TIMED_TEXT_TRACK_READY_STATE_LOADING,
++    MF_TIMED_TEXT_TRACK_READY_STATE_LOADED,
++    MF_TIMED_TEXT_TRACK_READY_STATE_ERROR,
++} MF_TIMED_TEXT_TRACK_READY_STATE;
++
++interface IMFTimedTextStyle;
++
++[
++    object,
++    uuid(e13af3c1-4d47-4354-b1f5-e83ae0ecae60),
++    local,
++    pointer_default(unique),
++]
++interface IMFTimedTextFormattedText : IUnknown
++{
++    HRESULT GetText(
++        [out] LPWSTR *text
++    );
++
++    DWORD GetSubformattingCount();
++
++    HRESULT GetSubformatting(
++        [in] DWORD index,
++        [out] DWORD *first_char,
++        [out] DWORD *length,
++        [out] IMFTimedTextStyle **style
++    );
++}
++
++[
++    object,
++    uuid(09b2455d-b834-4f01-a347-9052e21c450e),
++    local,
++    pointer_default(unique),
++]
++interface IMFTimedTextStyle : IUnknown
++{
++    HRESULT GetName(
++        [out] LPWSTR *name
++    );
++
++    BOOL IsExternal();
++
++    HRESULT GetFontFamily(
++        [out] LPWSTR *family
++    );
++
++    HRESULT GetFontSize(
++        [out] double *size,
++        [out] MF_TIMED_TEXT_UNIT_TYPE *unit_type
++    );
++
++    HRESULT GetColor(
++        [out] MFARGB *color
++    );
++
++    HRESULT GetBackgroundColor(
++        [out] MFARGB *color
++    );
++
++    HRESULT GetShowBackgroundAlways(
++        [out] BOOL *value
++    );
++
++    HRESULT GetFontStyle(
++        [out] MF_TIMED_TEXT_FONT_STYLE *style
++    );
++
++    HRESULT GetBold(
++        [out] BOOL *bold
++    );
++
++    HRESULT GetRightToLeft(
++        [out] BOOL *rtl
++    );
++
++    HRESULT GetTextAlignment(
++        [out] MF_TIMED_TEXT_ALIGNMENT *alignment
++    );
++
++    HRESULT GetTextDecoration(
++        [out] DWORD *value
++    );
++
++    HRESULT GetTextOutline(
++        [out] MFARGB *color,
++        [out] double *thickness,
++        [out] double *blur_radius,
++        [out] MF_TIMED_TEXT_UNIT_TYPE *unit_type
++    );
++}
++
++[
++    object,
++    uuid(c8d22afc-bc47-4bdf-9b04-787e49ce3f58),
++    local,
++    pointer_default(unique),
++]
++interface IMFTimedTextRegion : IUnknown
++{
++    HRESULT GetName(
++        [out] LPWSTR *name
++    );
++
++    HRESULT GetPosition(
++        [out] double *x,
++        [out] double *y,
++        [out] MF_TIMED_TEXT_UNIT_TYPE *unit_type
++    );
++
++    HRESULT GetExtent(
++        [out] double *width,
++        [out] double *height,
++        [out] MF_TIMED_TEXT_UNIT_TYPE *unit_type
++    );
++
++    HRESULT GetBackgroundColor(
++        [out] MFARGB *color
++    );
++
++    HRESULT GetWritingMode(
++        [out] MF_TIMED_TEXT_WRITING_MODE *mode
++    );
++
++    HRESULT GetDisplayAlignment(
++        [out] MF_TIMED_TEXT_DISPLAY_ALIGNMENT *alignment
++    );
++
++    HRESULT GetLineHeight(
++        [out] double *height,
++        [out] MF_TIMED_TEXT_UNIT_TYPE *unit_type
++    );
++
++    HRESULT GetClipOverflow(
++        [out] BOOL *clip
++    );
++
++    HRESULT GetPadding(
++        [out] double *before,
++        [out] double *start,
++        [out] double *after,
++        [out] double *end,
++        [out] MF_TIMED_TEXT_UNIT_TYPE *unit_type
++    );
++
++    HRESULT GetWrap(
++        [out] BOOL *wrap
++    );
++
++    HRESULT GetZIndex(
++        [out] INT32 *index
++    );
++
++    HRESULT GetScrollMode(
++        [out] MF_TIMED_TEXT_SCROLL_MODE *mode
++    );
++}
++
++[
++    object,
++    uuid(4ae3a412-0545-43c4-bf6f-6b97a5c6c432),
++    local,
++    pointer_default(unique),
++]
++interface IMFTimedTextBinary : IUnknown
++{
++    HRESULT GetData(
++        [out] const BYTE **data,
++        [out] DWORD *length
++    );
++}
++
++[
++    object,
++    uuid(1e560447-9a2b-43e1-a94c-b0aaabfbfbc9),
++    local,
++    pointer_default(unique),
++]
++interface IMFTimedTextCue : IUnknown
++{
++    DWORD GetId();
++
++    HRESULT GetOriginalId(
++        [out] LPWSTR *id
++    );
++
++    MF_TIMED_TEXT_TRACK_KIND GetCueKind();
++
++    double GetStartTime();
++
++    double GetDuration();
++
++    DWORD GetTrackId();
++
++    HRESULT GetData(
++        [out] IMFTimedTextBinary **data
++    );
++
++    HRESULT GetRegion(
++        [out] IMFTimedTextRegion **region
++    );
++
++    HRESULT GetStyle(
++        [out] IMFTimedTextStyle **style
++    );
++
++    DWORD GetLineCount();
++
++    HRESULT GetLine(
++        [in] DWORD index,
++        [out] IMFTimedTextFormattedText **line
++    );
++}
++
++[
++    object,
++    uuid(df6b87b6-ce12-45db-aba7-432fe054e57d),
++    local,
++    pointer_default(unique),
++]
++interface IMFTimedTextNotify : IUnknown
++{
++    void TrackAdded(
++        [in] DWORD id
++    );
++
++    void TrackRemoved(
++        [in] DWORD id
++    );
++
++    void TrackSelected(
++        [in] DWORD id,
++        [in] BOOL selected
++    );
++
++    void TrackReadyStateChanged(
++        [in] DWORD id
++    );
++
++    void Error(
++        [in] MF_TIMED_TEXT_ERROR_CODE code,
++        [in] HRESULT extended_code,
++        [in] DWORD id
++    );
++
++    void Cue(
++        [in] MF_TIMED_TEXT_CUE_EVENT event,
++        [in] double time,
++        [in] IMFTimedTextCue *cue
++    );
++
++    void Reset();
++}
++
++[
++    object,
++    uuid(ad128745-211b-40a0-9981-fe65f166d0fd),
++    local,
++    pointer_default(unique),
++]
++interface IMFTimedTextCueList : IUnknown
++{
++    DWORD GetLength();
++
++    HRESULT GetCueByIndex(
++        [in] DWORD index,
++        [out] IMFTimedTextCue **cue
++    );
++
++    HRESULT GetCueById(
++        [in] DWORD id,
++        [out] IMFTimedTextCue **cue
++    );
++
++    HRESULT GetCueByOriginalId(
++        [in] LPCWSTR id,
++        [out] IMFTimedTextCue **cue
++    );
++
++    HRESULT AddTextCue(
++        [in] double start,
++        [in] double duration,
++        [in] LPCWSTR text,
++        [out] IMFTimedTextCue **cue
++    );
++
++    HRESULT AddDataCue(
++        [in] double start,
++        [in] double duration,
++        [in] const BYTE *data,
++        [in] DWORD data_size,
++        [out] IMFTimedTextCue **cue
++    );
++
++    HRESULT RemoveCue(
++        [in] IMFTimedTextCue *cue
++    );
++}
++
++[
++     object,
++     uuid(8822c32d-654e-4233-bf21-d7f2e67d30d4),
++     local,
++     pointer_default(unique),
++]
++interface IMFTimedTextTrack : IUnknown
++{
++    DWORD GetId();
++
++    HRESULT GetLabel(
++        [out] LPWSTR *label
++    );
++
++    HRESULT SetLabel(
++        [in] LPCWSTR label
++    );
++
++    HRESULT GetLanguage(
++        [out] LPWSTR *language
++    );
++
++    MF_TIMED_TEXT_TRACK_KIND GetTrackKind();
++
++    BOOL IsInBand();
++
++    HRESULT GetInBandMetadataTrackDispatchType(
++        [out] LPWSTR *dispatch_type
++    );
++
++    BOOL IsActive();
++
++    MF_TIMED_TEXT_ERROR_CODE GetErrorCode();
++
++    HRESULT GetExtendedErrorCode();
++
++    HRESULT GetDataFormat(
++        [out] GUID *format
++    );
++
++    MF_TIMED_TEXT_TRACK_READY_STATE GetReadyState();
++
++    HRESULT GetCueList(
++        [out] IMFTimedTextCueList **cues
++    );
++}
++
++[
++    object,
++    uuid(23ff334c-442c-445f-bccc-edc438aa11e2),
++    local,
++    pointer_default(unique),
++]
++interface IMFTimedTextTrackList : IUnknown
++{
++    DWORD GetLength();
++
++    HRESULT GetTrack(
++        [in] DWORD index,
++        [out] IMFTimedTextTrack **track
++    );
++
++    HRESULT GetTrackById(
++        [in] DWORD id,
++        [out] IMFTimedTextTrack **track
++    );
++}
++
++[
++    object,
++    uuid(1f2a94c9-a3df-430d-9d0f-acd85ddc29af),
++    local,
++    pointer_default(unique)
++]
++interface IMFTimedText : IUnknown
++{
++    HRESULT RegisterNotifications(
++        [in] IMFTimedTextNotify *notify
++    );
++
++    HRESULT SelectTrack(
++        [in] DWORD id,
++        [in] BOOL selected
++    );
++
++    HRESULT AddDataSource(
++        [in] IMFByteStream *stream,
++        [in] LPCWSTR label,
++        [in] LPCWSTR language,
++        [in] MF_TIMED_TEXT_TRACK_KIND kind,
++        [in] BOOL is_default,
++        [in] DWORD *id
++    );
++
++    HRESULT AddDataSourceFromUrl(
++        [in] LPCWSTR url,
++        [in] LPCWSTR label,
++        [in] LPCWSTR language,
++        [in] MF_TIMED_TEXT_TRACK_KIND kind,
++        [in] BOOL is_default,
++        [in] DWORD *id
++    );
++
++    HRESULT AddTrack(
++        [in] LPCWSTR label,
++        [in] LPCWSTR language,
++        [in] MF_TIMED_TEXT_TRACK_KIND kind,
++        [out] IMFTimedTextTrack **track
++    );
++
++    HRESULT RemoveTrack(
++        [in] IMFTimedTextTrack *track
++    );
++
++    HRESULT GetCueTimeOffset(
++        [out] double *offset
++    );
++
++    HRESULT SetCueTimeOffset(
++        [in] double offset
++    );
++
++    HRESULT GetTracks(
++        [out] IMFTimedTextTrackList **tracks
++    );
++
++    HRESULT GetActiveTracks(
++        [out] IMFTimedTextTrackList **tracks
++    );
++
++    HRESULT GetTextTracks(
++        [out] IMFTimedTextTrackList **tracks
++    );
++
++    HRESULT GetMetadataTracks(
++        [out] IMFTimedTextTrackList **tracks
++    );
++
++    HRESULT SetInBandEnabled(
++        [in] BOOL enabled
++    );
++
++    BOOL IsInBandEnabled();
++}
+diff --git a/include/wine/ember_blockcount.h b/include/wine/ember_blockcount.h
+new file mode 100644
+index 0000000..77595b2
+--- /dev/null
++++ b/include/wine/ember_blockcount.h
+@@ -0,0 +1,77 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later
++ * Each DLL/process owns one lifetime-unique snapshot. No shared read/modify/write
++ * file. Filesystem I/O happens only on a denied lookup, at most once per second:
++ * short-lived processes exit before a pool thread runs, so the first denial (and one
++ * snapshot per second after it) is published synchronously; the timer batches the rest.
++ * Abrupt process termination can lose the pending batch. Not a security audit log.
++ */
++#ifndef EMBER_BLOCKCOUNT_H
++#define EMBER_BLOCKCOUNT_H
++#include <stdio.h>
++static DECLSPEC_ALIGN(8) LONG64 ember_block_count;
++static LONG64 ember_block_written;
++static LONG ember_count_writing;
++static LONG64 ember_count_sync_tick;
++static INIT_ONCE ember_count_once = INIT_ONCE_STATIC_INIT;
++static char ember_count_path[256], ember_count_tmp[256];
++static PTP_TIMER ember_count_timer;
++static void CALLBACK ember_count_flush(PTP_CALLBACK_INSTANCE instance, void *context, PTP_TIMER timer)
++{
++    LONG64 value;
++    char text[32];
++    DWORD size, written;
++    HANDLE file;
++    (void)instance; (void)context; (void)timer;
++    if (InterlockedCompareExchange(&ember_count_writing, 1, 0)) return;
++    value = InterlockedCompareExchange64(&ember_block_count, 0, 0);
++    if (value == ember_block_written) goto done;
++    CreateDirectoryA("C:\\EmberShield", NULL);
++    CreateDirectoryA("C:\\EmberShield\\blocked-counts", NULL);
++    size = snprintf(text, sizeof(text), "%llu\n", (unsigned long long)value);
++    file = CreateFileA(ember_count_tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
++                       FILE_ATTRIBUTE_NORMAL, NULL);
++    if (file == INVALID_HANDLE_VALUE) goto done;
++    if (!WriteFile(file, text, size, &written, NULL) || written != size)
++    { CloseHandle(file); DeleteFileA(ember_count_tmp); goto done; }
++    CloseHandle(file);
++    if (MoveFileExA(ember_count_tmp, ember_count_path, MOVEFILE_REPLACE_EXISTING))
++        ember_block_written = value;
++done:
++    InterlockedExchange(&ember_count_writing, 0);
++}
++static BOOL CALLBACK ember_count_init(INIT_ONCE *once, void *parameter, void **context)
++{
++    FILETIME created, exited, kernel, user, due;
++    HMODULE module;
++    (void)once; (void)parameter; (void)context;
++    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return TRUE;
++    /* Pin only after the first denial: callback code must survive DLL unloading. */
++    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
++                           (const WCHAR *)ember_count_flush, &module)) return TRUE;
++    snprintf(ember_count_path, sizeof(ember_count_path),
++             "C:\\EmberShield\\blocked-counts\\%lu-%08lx%08lx-" EMBER_BLOCK_MODULE ".count",
++             (unsigned long)GetCurrentProcessId(), (unsigned long)created.dwHighDateTime,
++             (unsigned long)created.dwLowDateTime);
++    snprintf(ember_count_tmp, sizeof(ember_count_tmp), "%s.tmp", ember_count_path);
++    /* A periodic timer can overlap callbacks; use a dedicated serialized window
++     * below rather than blocking lookups. */
++    /* Relative 1 s: the first denial is already written synchronously. */
++    due.dwLowDateTime = (DWORD)-10000000; due.dwHighDateTime = (DWORD)-1;
++    ember_count_timer = CreateThreadpoolTimer(ember_count_flush, NULL, NULL);
++    if (ember_count_timer) SetThreadpoolTimer(ember_count_timer, &due, 1000, 0);
++    return TRUE;
++}
++static inline void ember_count_denial(void)
++{
++    ULONGLONG now;
++    LONG64 last;
++    InterlockedIncrement64(&ember_block_count);
++    InitOnceExecuteOnce(&ember_count_once, ember_count_init, NULL, NULL);
++    if (!ember_count_path[0]) return;
++    now = GetTickCount64() | 1;
++    last = InterlockedCompareExchange64(&ember_count_sync_tick, 0, 0);
++    if (last && now - (ULONGLONG)last < 1000) return;
++    if (InterlockedCompareExchange64(&ember_count_sync_tick, (LONG64)now, last) != last) return;
++    ember_count_flush(NULL, NULL, NULL);
++}
++#endif
+diff --git a/include/wine/ember_blocklist.h b/include/wine/ember_blocklist.h
+new file mode 100644
+index 0000000..b5aa3d2
+--- /dev/null
++++ b/include/wine/ember_blocklist.h
+@@ -0,0 +1,60 @@
++/* Original Ember candidate. SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef EMBER_BLOCKLIST_H
++#define EMBER_BLOCKLIST_H
++#include "wine/ember_blocklist_core.h"
++#include "wine/ember_blockcount.h"
++/* One immutable snapshot per DLL/process. A configured invalid file denies all
++ * lookups at these entry points; unset means disabled. Restart after updates.
++ * EMBER_BLOCKLIST_FILE is an absolute Wine (e.g. Z:\\...) path to an ASCII list. */
++static INIT_ONCE ember_block_once = INIT_ONCE_STATIC_INIT;
++static struct ember_blocklist ember_blocks;
++static int ember_block_state;
++static BOOL CALLBACK ember_block_init(INIT_ONCE *once, void *parameter, void **context)
++{
++    WCHAR path[32768];
++    DWORD n, got, size;
++    HANDLE file;
++    LARGE_INTEGER length;
++    char *data;
++    (void)once; (void)parameter; (void)context;
++    n = GetEnvironmentVariableW(L"EMBER_BLOCKLIST_FILE", path, ARRAY_SIZE(path));
++    if (!n) return TRUE;
++    ember_block_state = -1;
++    if (n >= ARRAY_SIZE(path) || !(path[0] && path[1] == ':' && (path[2] == '\\' || path[2] == '/'))) return TRUE;
++    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
++    if (file == INVALID_HANDLE_VALUE) return TRUE;
++    if (!GetFileSizeEx(file, &length) || length.QuadPart <= 0 ||
++        length.QuadPart > EMBER_BLOCK_BYTES) { CloseHandle(file); return TRUE; }
++    size = length.QuadPart;
++    data = HeapAlloc(GetProcessHeap(), 0, size);
++    if (data)
++    {
++        if (ReadFile(file, data, size, &got, NULL) && got == size && ember_blocklist_parse(&ember_blocks, data, size)) ember_block_state = 1;
++        HeapFree(GetProcessHeap(), 0, data);
++    }
++    CloseHandle(file);
++    return TRUE;
++}
++static inline int ember_host_deniedA(const char *name)
++{
++    int denied;
++    InitOnceExecuteOnce(&ember_block_once, ember_block_init, NULL, NULL);
++    denied = ember_block_state < 0 || (ember_block_state > 0 && ember_blocklist_contains(&ember_blocks, name));
++    if (denied) ember_count_denial();
++    return denied;
++}
++static inline int ember_host_deniedW(const WCHAR *name)
++{
++    char host[EMBER_HOST_MAX + 2];
++    size_t i;
++    if (!name) return ember_host_deniedA(NULL);
++    for (i = 0; i < ARRAY_SIZE(host)-1 && name[i]; ++i)
++    {
++        if (name[i] > 127) return ember_host_deniedA(NULL);
++        host[i] = name[i];
++    }
++    if (name[i]) return ember_host_deniedA(NULL);
++    host[i] = 0;
++    return ember_host_deniedA(host);
++}
++#endif
+diff --git a/include/wine/ember_blocklist_core.h b/include/wine/ember_blocklist_core.h
+new file mode 100644
+index 0000000..74648b8
+--- /dev/null
++++ b/include/wine/ember_blocklist_core.h
+@@ -0,0 +1,101 @@
++/* Original Ember candidate. SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef EMBER_BLOCKLIST_CORE_H
++#define EMBER_BLOCKLIST_CORE_H
++#include <stddef.h>
++#include <stdlib.h>
++#include <string.h>
++#define EMBER_BLOCK_MAX 150000
++#define EMBER_BLOCK_BYTES (40u * 1024u * 1024u)
++#define EMBER_HOST_MAX 253
++/* Immutable after initialization. One compact arena + sorted pointer index per DLL.
++ * Caller zero-initializes, destroys before reuse; failed parse leaves an empty set. */
++struct ember_blocklist { unsigned int count; char **hosts; char *storage; };
++static int ember_host_normalize(const char *s, size_t len, char *out)
++{
++    size_t i;
++    if (len && s[len - 1] == '.') --len;
++    if (!len || len > EMBER_HOST_MAX) return 0;
++    for (i = 0; i < len; ++i)
++    {
++        unsigned char c = s[i];
++        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
++        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.')) return 0;
++        if ((c == '.' && (!i || s[i-1] == '.')) || (c == '-' && (!i || s[i-1] == '.'))) return 0;
++        if (c == '.' && i && s[i-1] == '-') return 0;
++        out[i] = c;
++    }
++    if (out[len-1] == '.' || out[len-1] == '-') return 0;
++    out[len] = 0;
++    return 1;
++}
++
++static void ember_blocklist_destroy(struct ember_blocklist *list)
++{
++    free(list->hosts); free(list->storage);
++    memset(list, 0, sizeof(*list));
++}
++static int ember_block_compare(const void *a, const void *b)
++{
++    return strcmp(*(const char * const *)a, *(const char * const *)b);
++}
++/* ASCII only, bounded input and row count; no ports/wildcards/embedded NULs. */
++static int ember_blocklist_parse(struct ember_blocklist *list, const char *data, size_t len)
++{
++    size_t i=0, start, n, rows=0, used=0;
++    unsigned int j, unique;
++    char normalized[EMBER_HOST_MAX+1];
++    ember_blocklist_destroy(list);
++    if (!data || !len || len > EMBER_BLOCK_BYTES) return 0;
++    /* Validate before allocating. Input is read once by the wrapper. */
++    while (i < len)
++    {
++        start=i; while (i<len && data[i]!='\n') ++i;
++        n=i-start; if (i<len) ++i;
++        if (n && data[start+n-1]=='\r') --n;
++        if (!n) continue;
++        if (++rows > EMBER_BLOCK_MAX || !ember_host_normalize(data+start,n,normalized)) return 0;
++    }
++    if (!rows) return 0;
++    list->hosts=malloc(rows*sizeof(*list->hosts));
++    list->storage=malloc(len+1);
++    if (!list->hosts || !list->storage) { ember_blocklist_destroy(list); return 0; }
++    i=0;
++    while (i<len)
++    {
++        start=i; while (i<len && data[i]!='\n') ++i;
++        n=i-start; if(i<len) ++i;
++        if(n && data[start+n-1]=='\r') --n;
++        if(!n) continue;
++        ember_host_normalize(data+start,n,normalized);
++        n=strlen(normalized)+1;
++        list->hosts[list->count++]=list->storage+used;
++        memcpy(list->storage+used,normalized,n); used+=n;
++    }
++    qsort(list->hosts,list->count,sizeof(*list->hosts),ember_block_compare);
++    unique=0;
++    for(j=0;j<list->count;++j)
++        if (!unique || strcmp(list->hosts[j],list->hosts[unique-1])) list->hosts[unique++]=list->hosts[j];
++    list->count=unique;
++    return 1;
++}
++static int ember_blocklist_contains(const struct ember_blocklist *list, const char *name)
++{
++    char host[EMBER_HOST_MAX+1];
++    const char *suffix;
++    size_t n;
++    if (!name) return 0;
++    for(n=0;n<=EMBER_HOST_MAX+1 && name[n];++n) {} /* bounded API input */
++    if (!ember_host_normalize(name,n,host)) return 0;
++    suffix=host;
++    for (;;)
++    {
++        const char *key=suffix;
++        /* Numeric address entries match exactly, never a domain suffix. */
++        if ((suffix==host || strspn(suffix,"0123456789.")!=strlen(suffix)) &&
++            list->count && bsearch(&key,list->hosts,list->count,sizeof(*list->hosts),ember_block_compare)) return 1;
++        suffix=strchr(suffix,'.');
++        if (!suffix) return 0;
++        ++suffix;
++    }
++}
++#endif
+diff --git a/include/wine/server_protocol.h b/include/wine/server_protocol.h
+index 6168668..a969971 100644
+--- a/include/wine/server_protocol.h
++++ b/include/wine/server_protocol.h
+@@ -373,6 +373,14 @@ struct luid_attr
+     unsigned int attrs;
+ };
+ 
++struct kernel_module_info
++{
++    client_ptr_t base;
++    mem_size_t   size;
++    data_size_t  name_len;
++
++};
++
+ struct acl
+ {
+     unsigned char  revision;
+@@ -2049,6 +2057,7 @@ struct send_socket_request
+     struct request_header __header;
+     unsigned int flags;
+     struct async_data async;
++    /* VARARG(destination,bytes); */
+ };
+ struct send_socket_reply
+ {
+@@ -5355,6 +5364,45 @@ struct set_kernel_object_ptr_reply
+ };
+ 
+ 
++struct register_kernel_module_request
++{
++    struct request_header __header;
++    char __pad_12[4];
++    client_ptr_t base;
++    mem_size_t   size;
++    /* VARARG(name,unicode_str); */
++};
++struct register_kernel_module_reply
++{
++    struct reply_header __header;
++};
++
++
++struct unregister_kernel_module_request
++{
++    struct request_header __header;
++    char __pad_12[4];
++    client_ptr_t base;
++};
++struct unregister_kernel_module_reply
++{
++    struct reply_header __header;
++};
++
++
++struct list_kernel_modules_request
++{
++    struct request_header __header;
++    char __pad_12[4];
++};
++struct list_kernel_modules_reply
++{
++    struct reply_header __header;
++    unsigned int module_count;
++    data_size_t  info_size;
++    /* VARARG(info,kernel_module_info); */
++};
++
+ 
+ struct grab_kernel_object_request
+ {
+@@ -5425,6 +5473,20 @@ struct grant_process_admin_token_reply
+ 
+ 
+ 
++struct set_process_session_request
++{
++    struct request_header __header;
++    obj_handle_t handle;
++    unsigned int session_id;
++    char __pad_20[4];
++};
++struct set_process_session_reply
++{
++    struct reply_header __header;
++};
++
++
++
+ struct get_token_info_request
+ {
+     struct request_header __header;
+@@ -6419,11 +6481,15 @@ enum request
+     REQ_get_next_device_request,
+     REQ_get_kernel_object_ptr,
+     REQ_set_kernel_object_ptr,
++    REQ_register_kernel_module,
++    REQ_unregister_kernel_module,
++    REQ_list_kernel_modules,
+     REQ_grab_kernel_object,
+     REQ_release_kernel_object,
+     REQ_get_kernel_object_handle,
+     REQ_make_process_system,
+     REQ_grant_process_admin_token,
++    REQ_set_process_session,
+     REQ_get_token_info,
+     REQ_create_linked_token,
+     REQ_create_completion,
+@@ -6732,11 +6798,15 @@ union generic_request
+     struct get_next_device_request_request get_next_device_request_request;
+     struct get_kernel_object_ptr_request get_kernel_object_ptr_request;
+     struct set_kernel_object_ptr_request set_kernel_object_ptr_request;
++    struct register_kernel_module_request register_kernel_module_request;
++    struct unregister_kernel_module_request unregister_kernel_module_request;
++    struct list_kernel_modules_request list_kernel_modules_request;
+     struct grab_kernel_object_request grab_kernel_object_request;
+     struct release_kernel_object_request release_kernel_object_request;
+     struct get_kernel_object_handle_request get_kernel_object_handle_request;
+     struct make_process_system_request make_process_system_request;
+     struct grant_process_admin_token_request grant_process_admin_token_request;
++    struct set_process_session_request set_process_session_request;
+     struct get_token_info_request get_token_info_request;
+     struct create_linked_token_request create_linked_token_request;
+     struct create_completion_request create_completion_request;
+@@ -7043,11 +7113,15 @@ union generic_reply
+     struct get_next_device_request_reply get_next_device_request_reply;
+     struct get_kernel_object_ptr_reply get_kernel_object_ptr_reply;
+     struct set_kernel_object_ptr_reply set_kernel_object_ptr_reply;
++    struct register_kernel_module_reply register_kernel_module_reply;
++    struct unregister_kernel_module_reply unregister_kernel_module_reply;
++    struct list_kernel_modules_reply list_kernel_modules_reply;
+     struct grab_kernel_object_reply grab_kernel_object_reply;
+     struct release_kernel_object_reply release_kernel_object_reply;
+     struct get_kernel_object_handle_reply get_kernel_object_handle_reply;
+     struct make_process_system_reply make_process_system_reply;
+     struct grant_process_admin_token_reply grant_process_admin_token_reply;
++    struct set_process_session_reply set_process_session_reply;
+     struct get_token_info_reply get_token_info_reply;
+     struct create_linked_token_reply create_linked_token_reply;
+     struct create_completion_reply create_completion_reply;
+@@ -7095,6 +7169,6 @@ union generic_reply
+     struct d3dkmt_mutex_release_reply d3dkmt_mutex_release_reply;
+ };
+ 
+-#define SERVER_PROTOCOL_VERSION 1809
++#define SERVER_PROTOCOL_VERSION 1811
+ 
+ #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
+diff --git a/include/wine/svcctl.idl b/include/wine/svcctl.idl
+index 74b939d..a661648 100644
+--- a/include/wine/svcctl.idl
++++ b/include/wine/svcctl.idl
+@@ -35,7 +35,7 @@ cpp_quote("#define SVCCTL_ENDPOINT {'\\\\','p','i','p','e','\\\\','s','v','c','c
+ cpp_quote("#define SVCCTL_ENDPOINTA \"\\\\pipe\\\\svcctl\"")
+ 
+ /* Not the Windows event name - if needed the true one can be found in Inside Windows */
+-cpp_quote("#define SVCCTL_STARTED_EVENT {'_','_','w','i','n','e','_','S','v','c','c','t','l','S','t','a','r','t','e','d',0}")
++cpp_quote("#define SVCCTL_STARTED_EVENT {'G','l','o','b','a','l','\\\\','_','_','w','i','n','e','_','S','v','c','c','t','l','S','t','a','r','t','e','d',0}")
+ 
+ /* Service startup protocol over control pipe - not compatible with Windows */
+ cpp_quote("#define SERVICE_PROTOCOL_MAGIC 0x57494e45")
+diff --git a/include/winternl.h b/include/winternl.h
+index 80c295f..368a809 100644
+--- a/include/winternl.h
++++ b/include/winternl.h
+@@ -2015,6 +2015,7 @@ typedef enum _PROCESSINFOCLASS {
+ #ifdef __WINESRC__
+     ProcessWineMakeProcessSystem = 1000,
+     ProcessWineGrantAdminToken = 1002,
++    ProcessWineSessionId = 1003,
+ #endif
+ } PROCESSINFOCLASS;
+ 
+@@ -4540,7 +4541,7 @@ NTSYSAPI NTSTATUS  WINAPI LdrGetDllHandle(LPCWSTR, ULONG, const UNICODE_STRING*,
+ NTSYSAPI NTSTATUS  WINAPI LdrGetDllHandleEx(ULONG, LPCWSTR, ULONG *, const UNICODE_STRING*, HMODULE*);
+ NTSYSAPI NTSTATUS  WINAPI LdrGetDllPath(PCWSTR,ULONG,PWSTR*,PWSTR*);
+ NTSYSAPI NTSTATUS  WINAPI LdrGetProcedureAddress(HMODULE, const ANSI_STRING*, ULONG, void**);
+-NTSYSAPI NTSTATUS  WINAPI LdrLoadDll(LPCWSTR, DWORD, const UNICODE_STRING*, HMODULE*);
++NTSYSAPI NTSTATUS  WINAPI LdrLoadDll(LPCWSTR, DWORD *, const UNICODE_STRING*, HMODULE*);
+ NTSYSAPI NTSTATUS  WINAPI LdrLockLoaderLock(ULONG,ULONG*,ULONG_PTR*);
+ IMAGE_BASE_RELOCATION * WINAPI LdrProcessRelocationBlock(void*,UINT,USHORT*,INT_PTR);
+ NTSYSAPI NTSTATUS  WINAPI LdrQueryImageFileExecutionOptions(const UNICODE_STRING*,LPCWSTR,ULONG,void*,ULONG,ULONG*);

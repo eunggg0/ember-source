@@ -1,0 +1,89 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 42/95] dlls-mfplat: Ember changes
+
+Base: CrossOver 26.3.0 FOSS sources/wine
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/mfplat/main.c b/dlls/mfplat/main.c
+index 01d9d2d..87ffdc6 100644
+--- a/dlls/mfplat/main.c
++++ b/dlls/mfplat/main.c
+@@ -6241,7 +6241,7 @@ static HRESULT resolver_get_bytestream_url_hint(IMFByteStream *stream, WCHAR con
+     DWORD length = 0, caps = 0;
+     unsigned int i, j;
+     QWORD position;
+-    HRESULT hr;
++    HRESULT hr, restore_hr;
+ 
+     *url = NULL;
+ 
+@@ -6263,10 +6263,14 @@ static HRESULT resolver_get_bytestream_url_hint(IMFByteStream *stream, WCHAR con
+ 
+     if (FAILED(hr = IMFByteStream_GetCurrentPosition(stream, &position)))
+         return hr;
+-    if (position && FAILED(hr = IMFByteStream_SetCurrentPosition(stream, 0)))
+-        return hr;
+-    if (FAILED(hr = IMFByteStream_Read(stream, buffer, sizeof(buffer), &length)))
++    /* An embedded media stream starts at the caller's current position. Probe
++     * without consuming bytes, so the selected handler sees the same origin. */
++    hr = IMFByteStream_Read(stream, buffer, sizeof(buffer), &length);
++    restore_hr = IMFByteStream_SetCurrentPosition(stream, position);
++    if (FAILED(hr))
+         return hr;
++    if (FAILED(restore_hr))
++        return restore_hr;
+ 
+     if (length < sizeof(buffer))
+         return S_OK;
+@@ -6351,7 +6355,7 @@ static HRESULT resolver_get_bytestream_handler(IMFByteStream *stream, const WCHA
+     if (SUCCEEDED(hr))
+         return hr;
+ 
+-    if (!(flags & MF_RESOLUTION_CONTENT_DOES_NOT_HAVE_TO_MATCH_EXTENSION_OR_MIME_TYPE))
++    if (url_ext && !(flags & MF_RESOLUTION_CONTENT_DOES_NOT_HAVE_TO_MATCH_EXTENSION_OR_MIME_TYPE))
+         return MF_E_UNSUPPORTED_BYTESTREAM_TYPE;
+ 
+     if (FAILED(hr = resolver_get_bytestream_url_hint(stream, &url_ext)))
+diff --git a/dlls/mfplat/sample.c b/dlls/mfplat/sample.c
+index 4d75924..0232a67 100644
+--- a/dlls/mfplat/sample.c
++++ b/dlls/mfplat/sample.c
+@@ -1310,6 +1310,38 @@ static HRESULT sample_allocator_get_surface_service(struct sample_allocator *all
+         }
+     }
+ 
++    if (service->d3d11_device)
++    {
++        UINT format_support = 0;
++        HRESULT format_hr;
++
++        format_hr = allocator->frame_desc.dxgi_format == DXGI_FORMAT_UNKNOWN ? E_INVALIDARG :
++                ID3D11Device_CheckFormatSupport(service->d3d11_device,
++                        allocator->frame_desc.dxgi_format, &format_support);
++        /* CheckFormatSupport also documents E_FAIL for a nonexistent format. */
++        if (FAILED(format_hr) && format_hr != E_INVALIDARG &&
++                format_hr != E_FAIL && format_hr != DXGI_ERROR_UNSUPPORTED)
++        {
++            /* A lost device or resource failure is not evidence that the
++             * negotiated video format is unsupported. Preserve the original
++             * failure instead of silently changing the allocator's buffers. */
++            WARN("Failed to query DXGI video format %#x, hr %#lx.\n",
++                    allocator->frame_desc.dxgi_format, format_hr);
++            ID3D11Device_Release(service->d3d11_device);
++            IMFDXGIDeviceManager_CloseDeviceHandle(allocator->dxgi_device_manager,
++                    service->hdevice);
++            hr = format_hr;
++        }
++        else if (FAILED(format_hr) ||
++                !(format_support & D3D11_FORMAT_SUPPORT_TEXTURE2D))
++        {
++            WARN("DXGI format %#x is unavailable, using a system-memory video buffer.\n",
++                    allocator->frame_desc.dxgi_format);
++            ID3D11Device_Release(service->d3d11_device);
++            service->d3d11_device = NULL;
++        }
++    }
++
+     if (FAILED(hr))
+         memset(service, 0, sizeof(*service));
+ 

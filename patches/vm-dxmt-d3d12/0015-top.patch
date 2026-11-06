@@ -1,0 +1,24 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 15/15] top: Ember changes
+
+Base: DXMT 7c8dee1 with submodules
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/meson.build b/meson.build
+index e10c901..b484612 100644
+--- a/meson.build
++++ b/meson.build
+@@ -202,6 +202,13 @@ if dxmt_crossbuild
+   add_project_link_arguments(['-arch', native_compiler_arch], language: 'cpp',  native: true)
+ endif
+ 
++if not dxmt_crossbuild
++  # Ember vmd3d12-1027: 네이티브(VM 호스트) 빌드 — directx-native 이벤트(Neptune 과 같은 규약)
++  directx_native_dep = dependency('directx-native',
++    fallback        : [ 'directx-native', 'directx_native_dep' ],
++    default_options : [ 'install_headers=false', 'tests=false' ])
++  add_project_arguments('-I' + meson.project_source_root() / 'subprojects/directx-native/include', '-DEMBER_NATIVE=1', '-DWIDL_EXPLICIT_AGGREGATE_RETURNS', language: ['c', 'cpp', 'objc'])
++endif
+ subdir('libs')
+ subdir('src')
+ 

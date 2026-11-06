@@ -1,0 +1,27 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 2/15] src-airconv: Ember changes
+
+Base: DXMT 7c8dee1 with submodules
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/src/airconv/dxbc_converter_ts.cpp b/src/airconv/dxbc_converter_ts.cpp
+index fd32c70..23682e1 100644
+--- a/src/airconv/dxbc_converter_ts.cpp
++++ b/src/airconv/dxbc_converter_ts.cpp
+@@ -248,7 +248,8 @@ convert_dxbc_vertex_hull_shader(
+ 
+   auto binding_map = rootsig_vs ? setup_binding_rootsig(
+                                    &vertex_shader_info, func_signature, module, D3D10_SB_VERTEX_SHADER,
+-                                   rootsig_vs->bytecode, rootsig_vs->bytecode_length
++                                   rootsig_vs->bytecode, rootsig_vs->bytecode_length,
++                                   SM50_BINDING_INDEX_CONSTANT_BUFFER2, SM50_BINDING_INDEX_ARGUMENT_TABLE2
+                                )
+                              : setup_binding_table2(
+                                    &vertex_shader_info, func_signature, module, SM50_BINDING_INDEX_CONSTANT_BUFFER2,
+@@ -1054,4 +1055,4 @@ convert_dxbc_tesselator_domain_shader(
+   return llvm::Error::success();
+ }
+ 
+-} // namespace dxmt::dxbc
+\ No newline at end of file
++} // namespace dxmt::dxbc

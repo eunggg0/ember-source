@@ -1,0 +1,58 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 32/46] dlls-winhttp: Ember changes
+
+Base: Wine 11.18
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/winhttp/session.c b/dlls/winhttp/session.c
+index 68f8ee9..587bb5a 100644
+--- a/dlls/winhttp/session.c
++++ b/dlls/winhttp/session.c
+@@ -37,6 +37,9 @@
+ #include "wine/debug.h"
+ #include "winhttp_private.h"
+ 
++#define EMBER_BLOCK_MODULE "winhttp"
++#include "wine/ember_blocklist.h"
++
+ WINE_DEFAULT_DEBUG_CHANNEL(winhttp);
+ 
+ #define DEFAULT_RESOLVE_TIMEOUT             0
+@@ -688,6 +691,8 @@ HINTERNET WINAPI WinHttpConnect( HINTERNET hsession, const WCHAR *server, INTERN
+         SetLastError( ERROR_INVALID_PARAMETER );
+         return NULL;
+     }
++    if (ember_host_deniedW(server)) { SetLastError(ERROR_WINHTTP_NAME_NOT_RESOLVED); return NULL; }
++
+     if (!(session = (struct session *)grab_object( hsession )))
+     {
+         SetLastError( ERROR_INVALID_HANDLE );
+@@ -1847,6 +1852,17 @@ static WCHAR *detect_autoproxyconfig_url_dns(void)
+         free( fqdn );
+         return NULL;
+     }
++    /* Ember: ".local" is the multicast DNS domain (RFC 6762) - macOS host names are "<name>.local", so this used to ask
++     * unicast DNS for "wpad.local". Some home routers / ISP resolvers answer that with a bogus address whose port 80
++     * never answers, and every Steam start then waited the full 60 s WPAD connect timeout (2026-09-30 CX, 2026-10-02 FEX:
++     * Steam "System startup time" 69.6 s, connectivity test 60 s). Windows never devolves into the mDNS domain; skip it. */
++    if (!wcsicmp( domain, L"local" ) || is_domain_suffix( domain, L".local" ))
++    {
++        TRACE( "skipping mDNS domain %s\n", debugstr_w(domain) );
++        free( domain );
++        free( fqdn );
++        return NULL;
++    }
+     p = fqdn;
+     while ((p = wcschr( p, '.' )) && is_domain_suffix( p + 1, domain ))
+     {
+@@ -2295,7 +2311,9 @@ static char *download_script( const WCHAR *url, DWORD *out_size )
+     hostname[uc.dwHostNameLength] = 0;
+ 
+     if (!(ses = WinHttpOpen( NULL, WINHTTP_ACCESS_TYPE_NO_PROXY, NULL, NULL, 0 ))) goto done;
+-    WinHttpSetTimeouts( ses, 5000, 60000, 30000, 30000 );
++    /* Ember: 10 s connect (was 60 s). A WPAD/PAC host is expected on the local network; a dead one must not stall the
++     * caller's first request for a minute. */
++    WinHttpSetTimeouts( ses, 5000, 10000, 30000, 30000 );
+     if (!(con = WinHttpConnect( ses, hostname, uc.nPort, 0 ))) goto done;
+     if (uc.nScheme == INTERNET_SCHEME_HTTPS) flags |= WINHTTP_FLAG_SECURE;
+     if (!(req = WinHttpOpenRequest( con, NULL, uc.lpszUrlPath, NULL, NULL, acceptW, flags ))) goto done;

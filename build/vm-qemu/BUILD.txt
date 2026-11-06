@@ -1,0 +1,20 @@
+QEMU for the Ember Windows virtual machine (qemu-system-aarch64)
+
+Source: utmapp/qemu v10.0.12-utm release tarball + patches/vm-qemu (sh scripts/apply-series.sh patches/vm-qemu <source dir>).
+The dtc subproject is fetched by meson from https://gitlab.com/qemu-project/dtc.git at b6910bec (archive in upstream/SOURCES.tsv);
+with --disable-download, extract it to subprojects/dtc before configuring.
+
+Configure (prefix and tool paths are local choices):
+  ./configure --target-list=aarch64-softmmu --without-default-features \
+    --enable-hvf --enable-tpm --enable-slirp --enable-pixman --enable-fdt=internal --enable-cocoa \
+    --enable-opengl --enable-virglrenderer --disable-spice --disable-download --disable-guest-agent \
+    --disable-docs --disable-tools --disable-modules --disable-gnutls --disable-nettle --disable-gcrypt \
+    --disable-vnc --disable-gtk --disable-sdl --enable-vmnet --enable-vhost-user
+  After configure, the CoreAudio backend is enabled in config-host.h:
+    #define CONFIG_AUDIO_COREAUDIO 1
+    #define CONFIG_AUDIO_DRIVERS "coreaudio",
+  and the binary is linked with -framework CoreAudio.
+Build: ninja qemu-system-aarch64
+Libraries linked: GLib 2.90.0 (patches/vm-glib), gettext libintl 1.0, pixman 0.46.4, libslirp 26be815b, libepoxy, virglrenderer.
+
+qemu-img: QEMU 11.1.2 + patches/vm-qemu-img (2 patches), built with the upstream configure/meson system (tools enabled), linked with GLib 2.90.0 (patches/vm-glib).

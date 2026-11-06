@@ -1,0 +1,329 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 66/95] dlls-win32u: Ember changes
+
+Base: CrossOver 26.3.0 FOSS sources/wine
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/dlls/win32u/font.c b/dlls/win32u/font.c
+index 449a23c..fb8e3e4 100644
+--- a/dlls/win32u/font.c
++++ b/dlls/win32u/font.c
+@@ -906,7 +906,9 @@ static struct gdi_font_face *find_face_from_filename( const WCHAR *file_name, co
+         return NULL;
+     }
+ 
+-    if (!(family = find_family_from_name( family_name ))) return NULL;
++    /* Ember: a localized primary name (the Korean Mac name of Apple SD Gothic Neo in a Korean prefix) hides the
++     * English name SystemLink/FontSubstitutes use, so accept the second (English) name as well. */
++    if (!(family = find_family_from_any_name( family_name ))) return NULL;
+     return family_find_face_from_filename( family, file_name );
+ }
+ 
+@@ -2084,7 +2086,7 @@ static void populate_system_links( const WCHAR *name, const WCHAR * const *value
+     {
+         if  (!facename_compare( name, *values, -1 )) continue;
+         if (!(value = get_gdi_font_subst( *values, -1, NULL ))) value = *values;
+-        if (!(family = find_family_from_name( value ))) continue;
++        if (!(family = find_family_from_any_name( value ))) continue;
+         /* use first extant filename for this Family */
+         LIST_FOR_EACH_ENTRY( face, get_family_face_list(family), struct gdi_font_face, entry )
+         {
+@@ -2145,7 +2147,20 @@ static void load_system_links(void)
+                         while (*p == ' ' || *p == '\t') p++;
+                         if (!(family_name = get_gdi_font_subst( p, -1, NULL ))) family_name = p;
+                     }
+-                    if ((face = find_face_from_filename( entry, family_name )))
++                    face = find_face_from_filename( entry, family_name );
++                    /* Ember: Windows link files (GULIM.TTC, MALGUN.TTF...) do not exist on macOS, but their
++                     * substituted family (Apple SD Gothic Neo...) does. Link that family instead of nothing. */
++                    if (!face && family_name)
++                    {
++                        struct gdi_font_family *family = find_family_from_any_name( family_name );
++                        if (family && !list_empty( get_family_face_list( family ) ))
++                        {
++                            face = LIST_ENTRY( list_head( get_family_face_list( family ) ),
++                                               struct gdi_font_face, entry );
++                            face->refcount++;
++                        }
++                    }
++                    if (face)
+                     {
+                         add_gdi_font_link_entry( font_link, face->family->family_name, face->fs );
+                         TRACE("Adding file %s index %u\n", debugstr_w(face->file), face->face_index);
+diff --git a/dlls/win32u/sysparams.c b/dlls/win32u/sysparams.c
+index 8798fbf..d076e58 100644
+--- a/dlls/win32u/sysparams.c
++++ b/dlls/win32u/sysparams.c
+@@ -167,6 +167,47 @@ static UINT64 monitor_update_serial;
+ static pthread_mutex_t display_lock = PTHREAD_MUTEX_INITIALIZER;
+ 
+ static BOOL emulate_modeset;
++static BOOL ember_phys_modes;
++
++/* Pure policy: do not grow one axis using an unrelated mode's other axis. */
++static DEVMODEW ember_pixel_maximum( const DEVMODEW *initial, const DEVMODEW *modes, UINT count )
++{
++    DEVMODEW maximum = *initial;
++    const DEVMODEW *mode;
++    BOOL found = FALSE;
++    for (mode = modes; count; --count, mode = NEXT_DEVMODEW(mode))
++    {
++        if (mode->dmDisplayFlags & (WINE_DM_UNSUPPORTED | DM_INTERLACED)) continue;
++        if (mode->dmBitsPerPel != initial->dmBitsPerPel) continue;
++        if (!mode->dmPelsWidth || !mode->dmPelsHeight) continue;
++        if (found && (mode->dmPelsWidth < maximum.dmPelsWidth || mode->dmPelsHeight < maximum.dmPelsHeight)) continue;
++        maximum = *mode;
++        found = TRUE;
++    }
++    return maximum;
++}
++
++static BOOL ember_raw_seed_changed( const DEVMODEW *previous, const DEVMODEW *current )
++{
++    return previous->dmPelsWidth != current->dmPelsWidth ||
++           previous->dmPelsHeight != current->dmPelsHeight ||
++           previous->dmPosition.x != current->dmPosition.x ||
++           previous->dmPosition.y != current->dmPosition.y ||
++           previous->dmDisplayFrequency != current->dmDisplayFrequency ||
++           previous->dmDisplayOrientation != current->dmDisplayOrientation ||
++           previous->dmBitsPerPel != current->dmBitsPerPel;
++}
++
++static DEVMODEW ember_virtual_initial( const DEVMODEW *raw, const DEVMODEW *maximum )
++{
++    DEVMODEW initial = *raw;
++    if (initial.dmPelsWidth > maximum->dmPelsWidth || initial.dmPelsHeight > maximum->dmPelsHeight)
++    {
++        initial.dmPelsWidth = maximum->dmPelsWidth;
++        initial.dmPelsHeight = maximum->dmPelsHeight;
++    }
++    return initial;
++}
+ BOOL decorated_mode = TRUE;
+ UINT64 thunk_lock_callback = 0;
+ 
+@@ -2104,7 +2145,7 @@ static DEVMODEW *get_virtual_modes( const DEVMODEW *initial, const DEVMODEW *max
+     vertical = initial->dmPelsHeight > initial->dmPelsWidth;
+ 
+     freqs[1] = devmode_get( initial, DM_DISPLAYFREQUENCY );
+-    if (freqs[1] <= 60) freqs[1] = 0;
++    if (freqs[1] == 60 || (!ember_phys_modes && freqs[1] < 60)) freqs[1] = 0;
+ 
+     if (!(screen_sizes = get_screen_sizes( maximum, host_modes, host_modes_count, &sizes_count ))) return NULL;
+     modes = malloc( ARRAY_SIZE(freqs) * ARRAY_SIZE(depths) * (sizes_count + 2) * sizeof(*modes) );
+@@ -2133,14 +2174,14 @@ static DEVMODEW *get_virtual_modes( const DEVMODEW *initial, const DEVMODEW *max
+             count += add_virtual_mode( modes, count, &mode );
+         }
+ 
+-        mode.dmPelsWidth = vertical ? initial->dmPelsHeight : initial->dmPelsWidth;
+-        mode.dmPelsHeight = vertical ? initial->dmPelsWidth : initial->dmPelsHeight;
++        mode.dmPelsWidth = vertical && !ember_phys_modes ? initial->dmPelsHeight : initial->dmPelsWidth;
++        mode.dmPelsHeight = vertical && !ember_phys_modes ? initial->dmPelsWidth : initial->dmPelsHeight;
+         count += add_virtual_mode( modes, count, &mode );
+ 
+         if (maximum->dmPelsWidth != initial->dmPelsWidth || maximum->dmPelsHeight != initial->dmPelsHeight)
+         {
+-            mode.dmPelsWidth = vertical ? maximum->dmPelsHeight : maximum->dmPelsWidth;
+-            mode.dmPelsHeight = vertical ? maximum->dmPelsWidth : maximum->dmPelsHeight;
++            mode.dmPelsWidth = vertical && !ember_phys_modes ? maximum->dmPelsHeight : maximum->dmPelsWidth;
++            mode.dmPelsHeight = vertical && !ember_phys_modes ? maximum->dmPelsWidth : maximum->dmPelsHeight;
+             count += add_virtual_mode( modes, count, &mode );
+         }
+     }
+@@ -2153,7 +2194,7 @@ static DEVMODEW *get_virtual_modes( const DEVMODEW *initial, const DEVMODEW *max
+ static void add_modes( const DEVMODEW *current, UINT host_modes_count, const DEVMODEW *host_modes, void *param )
+ {
+     struct device_manager_ctx *ctx = param;
+-    DEVMODEW dummy, physical, detached = *current, virtual, *virtual_modes = NULL;
++    DEVMODEW dummy, physical, maximum, initial, previous_physical, detached = *current, virtual, *virtual_modes = NULL;
+     UINT virtual_count, modes_count = host_modes_count;
+     const DEVMODEW *modes = host_modes;
+     struct source *source;
+@@ -2171,6 +2212,8 @@ static void add_modes( const DEVMODEW *current, UINT host_modes_count, const DEV
+     }
+ 
+     physical = modes_count == 1 ? *modes : *current;
++    maximum = ember_phys_modes ? ember_pixel_maximum( current, host_modes, host_modes_count ) : physical;
++    initial = ember_phys_modes ? ember_virtual_initial( current, &maximum ) : *current;
+     if (ctx->is_primary) ctx->primary = *current;
+ 
+     detached.dmPelsWidth = 0;
+@@ -2187,10 +2230,34 @@ static void add_modes( const DEVMODEW *current, UINT host_modes_count, const DEV
+         if (!read_source_mode( source->key, ENUM_CURRENT_SETTINGS, &virtual ) || is_detached_mode( &virtual ))
+             virtual = physical;
+ 
+-        if ((virtual_modes = get_virtual_modes( current, &physical, host_modes, host_modes_count, &virtual_count )))
++        /* A different Ember launch resolution must invalidate a stale virtual
++         * current, but a refresh during a game must preserve its selected mode. */
++        if (ember_phys_modes &&
++            (!read_source_mode( source->key, WINE_ENUM_PHYSICAL_SETTINGS, &previous_physical ) ||
++             ember_raw_seed_changed( &previous_physical, &physical )))
++        {
++            virtual = initial;
++            write_source_mode( source->key, ENUM_REGISTRY_SETTINGS, &virtual );
++        }
++
++        if ((virtual_modes = get_virtual_modes( &initial, &maximum, host_modes, host_modes_count, &virtual_count )))
+         {
+             modes_count = virtual_count;
+             modes = virtual_modes;
++            if (ember_phys_modes)
++            {
++                UINT i;
++                for (i = 0; i < virtual_count; ++i)
++                    if (virtual_modes[i].dmPelsWidth == virtual.dmPelsWidth &&
++                        virtual_modes[i].dmPelsHeight == virtual.dmPelsHeight &&
++                        virtual_modes[i].dmBitsPerPel == virtual.dmBitsPerPel &&
++                        virtual_modes[i].dmDisplayFrequency == virtual.dmDisplayFrequency) break;
++                if (i == virtual_count)
++                {
++                    virtual = initial;
++                    write_source_mode( source->key, ENUM_REGISTRY_SETTINGS, &virtual );
++                }
++            }
+             current = &virtual;
+ 
+             write_source_mode( source->key, WINE_ENUM_PHYSICAL_SETTINGS, &physical );
+@@ -5350,7 +5417,12 @@ static void get_text_metr_size( HDC hdc, LOGFONTW *lf, TEXTMETRICW *metric, UINT
+         if (hfont) NtGdiDeleteObjectApp( hfont );
+         return;
+     }
++    /* Ember: get_char_dimensions leaves metric untouched when GetTextMetrics fails; the stack garbage then
++     * became CaptionHeight/MenuHeight in the registry (seen on the ARM64 build: 32769). */
++    metric->tmHeight = -1;
++    metric->tmExternalLeading = 0;
+     ret = get_char_dimensions( hdc, metric, NULL );
++    if (metric->tmHeight > 0x1000) metric->tmHeight = -1;
+     if (psz) *psz = ret ? ret : 10;
+     NtGdiSelectFont( hdc, hfontsav );
+     NtGdiDeleteObjectApp( hfont );
+@@ -5943,6 +6015,13 @@ void sysparams_init(void)
+     if (!get_config_key( hkey, appkey, "EmulateModeset", buffer, sizeof(buffer) ))
+         emulate_modeset = IS_OPTION_TRUE( buffer[0] );
+ 
++    {
++        const char *value = getenv( "EMBER_PHYS_MODES" );
++        ember_phys_modes = value && !strcmp( value, "1" );
++        /* Reuse source physical/current mapping, never call host modesetting. */
++        if (ember_phys_modes) emulate_modeset = TRUE;
++    }
++
+ #undef IS_OPTION_TRUE
+ 
+     if (app_compat_flags)
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+index 49eac27..3da7f71 100644
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -121,6 +121,7 @@ struct device_memory
+     struct vulkan_device_memory obj;
+     VkDeviceSize size;
+     void *vm_map;
++    void *host_import_mapping; /* Wine-owned backing, separate from the driver's map/unmap state. */
+ 
+     D3DKMT_HANDLE local;
+     D3DKMT_HANDLE global;
+@@ -193,7 +194,7 @@ static struct fence *fence_from_handle( VkFence handle )
+ }
+ 
+ static VkResult allocate_external_host_memory( struct vulkan_device *device, VkMemoryAllocateInfo *alloc_info, uint32_t mem_flags,
+-                                               VkImportMemoryHostPointerInfoEXT *import_info )
++                                               VkImportMemoryHostPointerInfoEXT *import_info, void **ret_mapping )
+ {
+     struct vulkan_physical_device *physical_device = device->physical_device;
+     VkMemoryHostPointerPropertiesEXT props =
+@@ -206,6 +207,8 @@ static VkResult allocate_external_host_memory( struct vulkan_device *device, VkM
+     void *mapping = NULL;
+     VkResult res;
+ 
++    *ret_mapping = NULL;
++
+     if (!once++) FIXME( "Using VK_EXT_external_memory_host\n" );
+ 
+     if (NtAllocateVirtualMemory( GetCurrentProcess(), &mapping, zero_bits, &alloc_size, MEM_COMMIT, PAGE_READWRITE ))
+@@ -218,6 +221,8 @@ static VkResult allocate_external_host_memory( struct vulkan_device *device, VkM
+                                                               mapping, &props )))
+     {
+         ERR( "vkGetMemoryHostPointerPropertiesEXT failed: %d\n", res );
++        alloc_size = 0;
++        NtFreeVirtualMemory( GetCurrentProcess(), &mapping, &alloc_size, MEM_RELEASE );
+         return res;
+     }
+ 
+@@ -250,6 +255,7 @@ static VkResult allocate_external_host_memory( struct vulkan_device *device, VkM
+         import_info->pNext = alloc_info->pNext;
+         alloc_info->pNext = import_info;
+         alloc_info->allocationSize = (alloc_info->allocationSize + align) & ~align;
++        *ret_mapping = mapping;
+     }
+ 
+     return VK_SUCCESS;
+@@ -918,13 +924,17 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
+         }
+     }
+ 
+-    /* For host visible memory, we try to use VK_EXT_external_memory_host on wow64 to ensure that mapped pointer is 32-bit. */
++    if (!(memory = calloc( 1, sizeof(*memory) ))) return VK_ERROR_OUT_OF_HOST_MEMORY;
++
++    /* For host visible memory, we try to use VK_EXT_external_memory_host on wow64 to ensure that mapped pointer is 32-bit.
++     * Only mappings allocated here belong to Wine; caller-imported host pointers remain caller-owned. */
+     mem_flags = physical_device->memory_properties.memoryTypes[alloc_info->memoryTypeIndex].propertyFlags;
+     if (physical_device->external_memory_align && (mem_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && !pointer_info &&
+-        (res = allocate_external_host_memory( device, alloc_info, mem_flags, &host_pointer_info )))
++        (res = allocate_external_host_memory( device, alloc_info, mem_flags, &host_pointer_info, &mapping )))
++    {
++        free( memory );
+         return res;
+-
+-    if (!(memory = calloc( 1, sizeof(*memory) ))) return VK_ERROR_OUT_OF_HOST_MEMORY;
++    }
+ 
+     if (import_win32)
+     {
+@@ -1012,7 +1022,7 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
+ 
+     vulkan_object_init( &memory->obj.obj, host_device_memory );
+     memory->size = alloc_info->allocationSize;
+-    memory->vm_map = mapping;
++    memory->host_import_mapping = mapping;
+     instance->p_insert_object( instance, &memory->obj.obj );
+ 
+     *ret = memory->obj.client.device_memory;
+@@ -1021,6 +1031,11 @@ static VkResult win32u_vkAllocateMemory( VkDevice client_device, const VkMemoryA
+ failed:
+     WARN( "Failed to allocate memory, res %d\n", res );
+     if (host_device_memory) device->p_vkFreeMemory( device->host.device, host_device_memory, NULL );
++    if (mapping)
++    {
++        SIZE_T alloc_size = 0;
++        NtFreeVirtualMemory( GetCurrentProcess(), &mapping, &alloc_size, MEM_RELEASE );
++    }
+     if (memory->semaphore) device->p_vkDestroySemaphore( device->host.device, memory->semaphore, NULL );
+     d3dkmt_destroy_resource( memory->local );
+     d3dkmt_destroy_mutex( memory->mutex );
+@@ -1059,6 +1074,12 @@ static void win32u_vkFreeMemory( VkDevice client_device, VkDeviceMemory client_m
+         NtFreeVirtualMemory( GetCurrentProcess(), &memory->vm_map, &alloc_size, MEM_RELEASE );
+     }
+ 
++    if (memory->host_import_mapping)
++    {
++        SIZE_T alloc_size = 0;
++        NtFreeVirtualMemory( GetCurrentProcess(), &memory->host_import_mapping, &alloc_size, MEM_RELEASE );
++    }
++
+     if (memory->semaphore) device->p_vkDestroySemaphore( device->host.device, memory->semaphore, NULL );
+     if (memory->shared) NtClose( memory->shared );
+     d3dkmt_destroy_resource( memory->local );
+diff --git a/dlls/win32u/winstation.c b/dlls/win32u/winstation.c
+index eaa5f40..d679717 100644
+--- a/dlls/win32u/winstation.c
++++ b/dlls/win32u/winstation.c
+@@ -874,7 +874,7 @@ HWND get_desktop_window(void)
+         {
+             NtResumeThread( thread, NULL );
+             TRACE_(win)( "started explorer\n" );
+-            NtUserWaitForInputIdle( process, 10000, FALSE );
++            NtUserWaitForInputIdle( process, 60000, FALSE );
+             NtClose( thread );
+             NtClose( process );
+         }

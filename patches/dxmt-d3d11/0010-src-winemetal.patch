@@ -423,10 +423,10 @@ index 0000000..458f2e0
 +}
 diff --git a/src/winemetal/ember_fg_thunks.h b/src/winemetal/ember_fg_thunks.h
 new file mode 100644
-index 0000000..ca250a4
+index 0000000..c8005ed
 --- /dev/null
 +++ b/src/winemetal/ember_fg_thunks.h
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,111 @@
 +/*
 + * Ember FG hook: winemetal PE ↔ unix bridge to the optional libEmberFG.dylib (EmberCore, separate library).
 + * This file only forwards calls; the frame generation engine itself is not part of this tree.
@@ -505,6 +505,13 @@ index 0000000..ca250a4
 +  EMBER_FG_OP_RING_RETAIN = 43,     /* arg0 = slot → ret 1, 기호 없음 0 */
 +  EMBER_FG_OP_RING_RELEASE_ON_COMPLETE = 44, /* arg0 = slot, arg1 = frame_done, arg_i64 = command buffer → ret 1, 기호 없음 0 */
 +  EMBER_FG_OP_PIPELINES_READY = 45, /* ret 1 준비됨, 0 아직, -1 기호 없음 */
++  /* Ember Lift(작업명, lift-1027): optional libEmberLift.dylib next to winemetal.so (EmberCore). Independent of frame generation.
++   * ctx = Lift context. in/out structs: EmberCore lift ember_lift.h (mirrored in src/dxmt/ember_lift.hpp).
++   * 60번대: 다른 계보가 쓰는 46~51(LEAP_*), 40 겹침(DQ_DRAIN/DXIL_TESS)을 피한다. 합칠 때 표 하나로 정리할 것(DESIGN.md §7). */
++  EMBER_FG_OP_LIFT_CREATE = 60,   /* device, in = env block → ctx, ret = 1 */
++  EMBER_FG_OP_LIFT_ENCODE = 61,   /* in = ember_lift_encode_in, out = ember_lift_encode_out, ret = ok */
++  EMBER_FG_OP_LIFT_STATS = 62,    /* out = ember_lift_stats, ret = 1 */
++  EMBER_FG_OP_LIFT_DESTROY = 63,
 +};
 +
 +#pragma pack(push, 8)
@@ -1963,10 +1970,10 @@ index 0000000..bf39938
 +}
 diff --git a/src/winemetal/unix/ember_fg_unix.c b/src/winemetal/unix/ember_fg_unix.c
 new file mode 100644
-index 0000000..8d3bff5
+index 0000000..88172aa
 --- /dev/null
 +++ b/src/winemetal/unix/ember_fg_unix.c
-@@ -0,0 +1,712 @@
+@@ -0,0 +1,776 @@
 +/*
 + * Ember FG hook: unix side. Loads the optional libEmberFG.dylib (EmberCore, separate proprietary library, not part of
 + * this tree) from the directory of winemetal.so and forwards EmberFG_call operations to it. When the library is missing
@@ -2330,6 +2337,69 @@ index 0000000..8d3bff5
 +  return STATUS_SUCCESS;
 +}
 +
++/* Ember Lift(작업명, lift-1027): libEmberLift.dylib (EmberCore, separate proprietary library) from the same directory
++ * (override EMBER_LIFT_LIB). Optional — when it is missing the Lift ops report 0 and DXMT keeps MetalFX spatial upscaling. */
++static struct {
++  uint32_t (*abi_version)(void);
++  void *(*create)(uint64_t device, const char *env, size_t len, uint32_t host);
++  void (*destroy)(void *ctx);
++  int (*encode)(void *ctx, const void *in, void *out);
++  void (*get_stats)(void *ctx, void *out);
++  size_t (*drain_log)(void *ctx, char *buf, size_t cap);
++} lift;
++static pthread_once_t lift_once = PTHREAD_ONCE_INIT;
++
++static void
++lift_load(void) {
++  char path[4096];
++  const char *override = getenv("EMBER_LIFT_LIB");
++  void *lib = NULL;
++  Dl_info info;
++  path[0] = 0;
++  if (override && *override) snprintf(path, sizeof(path), "%s", override);
++  else if (dladdr((const void *)&lift_load, &info) && info.dli_fname) {
++    const char *slash = strrchr(info.dli_fname, '/');
++    if (slash) snprintf(path, sizeof(path), "%.*s/libEmberLift.dylib", (int)(slash - info.dli_fname), info.dli_fname);
++  }
++  if (path[0]) lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
++  if (!lib) return;
++  *(void **)&lift.abi_version = dlsym(lib, "ember_lift_abi_version");
++  *(void **)&lift.create = dlsym(lib, "ember_lift_create");
++  *(void **)&lift.destroy = dlsym(lib, "ember_lift_destroy");
++  *(void **)&lift.encode = dlsym(lib, "ember_lift_encode");
++  *(void **)&lift.get_stats = dlsym(lib, "ember_lift_get_stats");
++  *(void **)&lift.drain_log = dlsym(lib, "ember_lift_drain_log");
++  if (!lift.abi_version || (lift.abi_version() >> 16) != 1 || !lift.create || !lift.destroy || !lift.encode ||
++      !lift.get_stats || !lift.drain_log) {
++    memset(&lift, 0, sizeof(lift));
++    dlclose(lib);
++  }
++}
++
++static NTSTATUS
++lift_call(struct unixcall_ember_fg *p) {
++  void *ctx = (void *)(uintptr_t)p->ctx;
++  pthread_once(&lift_once, lift_load);
++  if (!lift.abi_version) return STATUS_SUCCESS;
++  switch (p->op) {
++  case EMBER_FG_OP_LIFT_CREATE:
++    ctx = lift.create(p->device, (const char *)p->in.ptr, (size_t)p->in_size, 0 /* EMBER_LIFT_HOST_DXMT */);
++    p->ctx = (obj_handle_t)(uintptr_t)ctx;
++    p->ret = ctx != NULL;
++    break;
++  default:
++    if (!ctx) return STATUS_SUCCESS;
++    switch (p->op) {
++    case EMBER_FG_OP_LIFT_ENCODE: p->ret = lift.encode(ctx, p->in.ptr, p->out.ptr); break;
++    case EMBER_FG_OP_LIFT_STATS: if (p->out.ptr) lift.get_stats(ctx, p->out.ptr); p->ret = 1; break;
++    case EMBER_FG_OP_LIFT_DESTROY: lift.destroy(ctx); p->ret = 1; return STATUS_SUCCESS;
++    default: break;
++    }
++  }
++  if (ctx && p->log.ptr && p->log_cap) p->log_len = lift.drain_log(ctx, (char *)p->log.ptr, (size_t)p->log_cap);
++  return STATUS_SUCCESS;
++}
++
 +static NTSTATUS spark_call(struct unixcall_ember_fg *p); /* Ember Spark, below */
 +
 +NTSTATUS
@@ -2344,6 +2414,7 @@ index 0000000..8d3bff5
 +  if (p->op >= EMBER_FG_OP_HUD_CREATE && p->op <= EMBER_FG_OP_HUD_DESTROY) return hud_call(p);
 +  if (p->op >= EMBER_FG_OP_TONE_NEURAL_CREATE && p->op <= EMBER_FG_OP_TONE_AHDR_DESTROY) return tone_call(p);
 +  if (p->op >= EMBER_FG_OP_SPARK_STATE && p->op <= EMBER_FG_OP_SPARK_SLOT) return spark_call(p);
++  if (p->op >= EMBER_FG_OP_LIFT_CREATE && p->op <= EMBER_FG_OP_LIFT_DESTROY) return lift_call(p);
 +  if (!fg_version) return STATUS_SUCCESS;
 +  switch (p->op) {
 +  case EMBER_FG_OP_VERSION:

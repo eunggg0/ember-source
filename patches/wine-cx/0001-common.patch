@@ -1,0 +1,98 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 1/95] common: Ember changes
+
+Base: CrossOver 26.3.0 FOSS sources/wine
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/common/fg_live_cfg.h b/common/fg_live_cfg.h
+new file mode 100644
+index 0000000..083e754
+--- /dev/null
++++ b/common/fg_live_cfg.h
+@@ -0,0 +1,86 @@
++/* Worker-only cfg reader. No file I/O belongs on a render thread. */
++#ifndef EMBER_FG_LIVE_CFG_H
++#define EMBER_FG_LIVE_CFG_H
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <stdint.h>
++#include <math.h>
++#include <ctype.h>
++#include <sys/stat.h>
++#include <limits.h>
++typedef struct fg_live_cfg_values { int detail, sdr, prism, pair; double gain, sigma; } fg_live_cfg_values;
++typedef struct fg_live_cfg_reader {
++    char path[4096]; fg_live_cfg_values env, current;
++    struct stat stamp; int known, exists; uint64_t next_ns, stat_count, read_count;
++} fg_live_cfg_reader;
++static inline double fg_live_cfg_number(const char *s,double def,double lo,double hi) {
++    char *end; if(!s || !*s) return def; double v=(double)strtof(s,&end);
++    return end==s || *end || !isfinite(v) || v<lo || v>hi ? def : v;
++}
++static inline int fg_live_cfg_bit(const char *s) { return s && !strcmp(s,"1"); }
++static inline fg_live_cfg_values fg_live_cfg_env_defaults(void) {
++    fg_live_cfg_values v={0};
++    v.detail=fg_live_cfg_bit(getenv("EMBER_FG_LLFI_DETAIL"));
++    v.sdr=fg_live_cfg_bit(getenv("EMBER_FG_LLFI_DETAIL_SDR"));
++    v.prism=fg_live_cfg_bit(getenv("EMBER_FG_PRISM"));
++    v.pair=fg_live_cfg_bit(getenv("EMBER_FG_D3DM_LLFI_PAIR"));
++    v.gain=fg_live_cfg_number(getenv("EMBER_FG_LLFI_DETAIL_GAIN"),.5f,0,1);
++    v.sigma=fg_live_cfg_number(getenv("EMBER_FG_LLFI_DETAIL_SIGMA"),.03f,.001f,1);
++    return v;
++}
++static inline int fg_live_cfg_equal(fg_live_cfg_values a,fg_live_cfg_values b) {
++    return a.detail==b.detail && a.sdr==b.sdr && a.prism==b.prism && a.pair==b.pair && a.gain==b.gain && a.sigma==b.sigma;
++}
++static inline void fg_live_cfg_reader_init(fg_live_cfg_reader *r,const char *path,fg_live_cfg_values env) {
++    memset(r,0,sizeof(*r)); r->env=r->current=env;
++    if(path && snprintf(r->path,sizeof(r->path),"%s",path)>=(int)sizeof(r->path)) r->path[0]=0;
++}
++static inline int fg_live_cfg_same_stamp(const struct stat *a,const struct stat *b) {
++#ifdef __APPLE__
++    return a->st_mtimespec.tv_sec==b->st_mtimespec.tv_sec && a->st_mtimespec.tv_nsec==b->st_mtimespec.tv_nsec &&
++#else
++    return a->st_mtim.tv_sec==b->st_mtim.tv_sec && a->st_mtim.tv_nsec==b->st_mtim.tv_nsec &&
++#endif
++           a->st_size==b->st_size && a->st_ino==b->st_ino && a->st_dev==b->st_dev;
++}
++/* Invalid cfg values use safe defaults (invalid bits are off), deleted keys
++ * return to the captured environment. Only a changed file is opened. */
++static inline int fg_live_cfg_poll(fg_live_cfg_reader *r,uint64_t now_ns,fg_live_cfg_values *out) {
++    if(r->stat_count && now_ns<r->next_ns) { if(out)*out=r->current; return 0; }
++    r->next_ns=now_ns>UINT64_MAX-1000000000ULL?UINT64_MAX:now_ns+1000000000ULL;
++    struct stat st; ++r->stat_count; int exists=r->path[0] && !stat(r->path,&st);
++    if(r->known && exists==r->exists && (!exists || fg_live_cfg_same_stamp(&st,&r->stamp))) {
++        if(out)*out=r->current; return 0;
++    }
++    fg_live_cfg_values v=r->env;
++    if(exists) {
++        FILE *f=fopen(r->path,"r");
++        if(!f) { if(out)*out=r->current; return 0; }
++        ++r->read_count; char text[65538];
++        size_t n=fread(text,1,65537,f); int valid=!ferror(f) && n<=65536 && !memchr(text,0,n);
++        fclose(f); text[n]=0;
++        char *next=valid?text:NULL;
++        while(next && *next) {
++            char *line=next, *nl=strchr(line,'\n');
++            if(nl) { *nl=0; next=nl+1; } else next=NULL;
++            if(strlen(line)>4096)continue;
++            char *k=line; while(isspace((unsigned char)*k))++k;
++            if(!*k || *k=='#' || *k==';')continue;
++            char *eq=strchr(k,'='); if(!eq)continue; *eq++=0;
++            char *end=k+strlen(k); while(end>k && isspace((unsigned char)end[-1]))*--end=0;
++            while(isspace((unsigned char)*eq))++eq;
++            end=eq+strlen(eq); while(end>eq && isspace((unsigned char)end[-1]))*--end=0;
++            if(!strcmp(k,"EMBER_FG_LLFI_DETAIL"))v.detail=fg_live_cfg_bit(eq);
++            else if(!strcmp(k,"EMBER_FG_LLFI_DETAIL_SDR"))v.sdr=fg_live_cfg_bit(eq);
++            else if(!strcmp(k,"EMBER_FG_PRISM"))v.prism=fg_live_cfg_bit(eq);
++            else if(!strcmp(k,"EMBER_FG_D3DM_LLFI_PAIR"))v.pair=fg_live_cfg_bit(eq);
++            else if(!strcmp(k,"EMBER_FG_LLFI_DETAIL_GAIN"))v.gain=fg_live_cfg_number(eq,.5f,0,1);
++            else if(!strcmp(k,"EMBER_FG_LLFI_DETAIL_SIGMA"))v.sigma=fg_live_cfg_number(eq,.03f,.001f,1);
++        }
++        r->stamp=st;
++    }
++    r->known=1; r->exists=exists;
++    int changed=!fg_live_cfg_equal(v,r->current); r->current=v; if(out)*out=v; return changed;
++}
++#endif

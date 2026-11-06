@@ -1,0 +1,22 @@
+From: Ember <ember@users.noreply.github.com>
+Subject: [PATCH 6/7] src-winemetal: Ember changes
+
+Base: utmapp/dxmt 66e27f37 (GitHub archive)
+License: same as the upstream file (LGPL-2.1-or-later for Wine/DXMT; see LICENSES/)
+---
+diff --git a/src/winemetal/Metal.hpp b/src/winemetal/Metal.hpp
+index 36630dd..df33ea2 100644
+--- a/src/winemetal/Metal.hpp
++++ b/src/winemetal/Metal.hpp
+@@ -658,6 +658,11 @@ public:
+     return MTLCommandBuffer_property(handle, WMTCommandBufferPropertyGPUEndTime);
+   }
+ 
++  uint64_t
++  gpuStartTime() { /* Ember vmzero-1031 */
++    return MTLCommandBuffer_property(handle, WMTCommandBufferPropertyGPUStartTime);
++  }
++
+   void
+   encodeSignalEvent(Event event, uint64_t value) {
+     return MTLCommandBuffer_encodeSignalEvent(handle, event.handle, value);
