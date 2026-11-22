@@ -1,0 +1,307 @@
+--- a/dlls/winemac.drv/cocoa_window.m
++++ b/dlls/winemac.drv/cocoa_window.m
+@@ -430,6 +430,13 @@
+     NSMutableAttributedString* markedText;
+     NSRange markedTextSelection;
+ 
++    /* Hangul the input method inserted as document text and may still replace.
++     * It is shown to Windows as composition and is not marked text for AppKit. */
++    NSMutableString* imeDocText;
++    NSUInteger imeDocStart;
++    /* Text committed just before imeDocStart, kept as read-only context. */
++    NSMutableString* imeDocTail;
++
+     int backingSize[2];
+ 
+     WineMetalView *_metalView;
+@@ -533,6 +540,25 @@
+     }
+ 
+ @end
++
++
++/* Hangul Jamo, Compatibility Jamo, Jamo Extended-A/B and syllables. */
++static BOOL ime_text_is_hangul(NSString* text)
++{
++    NSUInteger i, length = [text length];
++
++    if (!length)
++        return NO;
++    for (i = 0; i < length; i++)
++    {
++        unichar c = [text characterAtIndex:i];
++        if (!((c >= 0x1100 && c <= 0x11ff) || (c >= 0x3131 && c <= 0x318e) ||
++              (c >= 0xa960 && c <= 0xa97f) || (c >= 0xac00 && c <= 0xd7a3) ||
++              (c >= 0xd7b0 && c <= 0xd7ff)))
++            return NO;
++    }
++    return YES;
++}
+ 
+ 
+ @implementation WineContentView
+@@ -555,6 +581,8 @@
+     - (void) dealloc
+     {
+         [markedText release];
++        [imeDocText release];
++        [imeDocTail release];
+         [glContexts release];
+         [pendingGlContexts release];
+         CGImageRelease(colorImage);
+@@ -837,9 +865,50 @@
+     {
+         [markedText deleteCharactersInRange:NSMakeRange(0, [markedText length])];
+         markedTextSelection = NSMakeRange(0, 0);
++        /* Forget the emulated document; the input method resyncs or falls back to marked text. */
++        imeDocStart = 0;
++        [imeDocText setString:@""];
++        [imeDocTail setString:@""];
+         [[self inputContext] discardMarkedText];
+     }
+ 
++    - (void) postImeText:(NSString*)text complete:(BOOL)complete
++    {
++        macdrv_event* event;
++        WineWindow* window = (WineWindow*)[self window];
++
++        event = macdrv_create_event(IM_SET_TEXT, window);
++        event->im_set_text.himc = [window himc];
++        event->im_set_text.text = (CFStringRef)[text copy];
++        event->im_set_text.complete = complete;
++        if (!complete)
++        {
++            event->im_set_text.cursor_begin = MIN([text length], UINT16_MAX);
++            event->im_set_text.cursor_end = MIN([text length], UINT16_MAX);
++        }
++
++        [[window queue] postEvent:event];
++
++        macdrv_release_event(event);
++    }
++
++    /* Commit the pending document Hangul.  AppKit keeps its own state: the
++     * input method already treats this text as part of the document. */
++    - (void) commitImeDocText
++    {
++        NSUInteger length = [imeDocText length];
++
++        if (!length)
++            return;
++
++        [self postImeText:imeDocText complete:YES];
++        imeDocStart += length;
++        [imeDocTail appendString:imeDocText];
++        if ([imeDocTail length] > 32)
++            [imeDocTail deleteCharactersInRange:NSMakeRange(0, [imeDocTail length] - 32)];
++        [imeDocText setString:@""];
++    }
++
+     - (void) completeText:(NSString*)text
+     {
+         macdrv_event* event;
+@@ -894,6 +963,10 @@
+     {
+         if (!markedText)
+             markedText = [[NSMutableAttributedString alloc] init];
++        if (!imeDocText)
++            imeDocText = [[NSMutableString alloc] init];
++        if (!imeDocTail)
++            imeDocTail = [[NSMutableString alloc] init];
+         return [super inputContext];
+     }
+ 
+@@ -902,8 +975,40 @@
+         if ([string isKindOfClass:[NSAttributedString class]])
+             string = [string string];
+ 
+-        if ([string isKindOfClass:[NSString class]])
+-            [self completeText:string];
++        if (![string isKindOfClass:[NSString class]])
++            return;
++
++        if (![markedText length])
++        {
++            NSUInteger docLength = [imeDocText length];
++
++            if (replacementRange.location != NSNotFound && docLength &&
++                replacementRange.location >= imeDocStart && replacementRange.length <= docLength &&
++                replacementRange.location - imeDocStart <= docLength - replacementRange.length &&
++                (replacementRange.length || replacementRange.location < imeDocStart + docLength))
++            {
++                /* The input method edits the syllable it inserted earlier. */
++                [imeDocText replaceCharactersInRange:NSMakeRange(replacementRange.location - imeDocStart,
++                                                                 replacementRange.length)
++                                          withString:string];
++                if (![imeDocText length] || ime_text_is_hangul(imeDocText))
++                    [self postImeText:imeDocText complete:NO];
++                else
++                    [self commitImeDocText];
++                return;
++            }
++
++            /* Inserting at the caret finishes the previous syllable. */
++            [self commitImeDocText];
++            if (replacementRange.location == NSNotFound && ime_text_is_hangul(string))
++            {
++                [imeDocText setString:string];
++                [self postImeText:imeDocText complete:NO];
++                return;
++            }
++        }
++
++        [self completeText:string];
+     }
+ 
+     - (void) doCommandBySelector:(SEL)aSelector
+@@ -920,8 +1025,30 @@
+         {
+             macdrv_event* event;
+             WineWindow* window = (WineWindow*)[self window];
++            NSUInteger docLength = [imeDocText length];
+ 
+-            if (replacementRange.location == NSNotFound)
++            if (docLength && ![markedText length])
++            {
++                if (replacementRange.location != NSNotFound && replacementRange.location >= imeDocStart &&
++                    replacementRange.length <= docLength &&
++                    replacementRange.location - imeDocStart <= docLength - replacementRange.length)
++                {
++                    /* The input method now marks (part of) the pending text. */
++                    [markedText replaceCharactersInRange:NSMakeRange(0, 0) withString:imeDocText];
++                    replacementRange.location -= imeDocStart;
++                    imeDocStart += docLength;
++                    [imeDocText setString:@""];
++                }
++                else
++                {
++                    [self commitImeDocText];
++                    replacementRange = NSMakeRange(NSNotFound, 0);
++                }
++            }
++
++            /* Only the marked buffer is addressable here. */
++            if (replacementRange.location == NSNotFound || replacementRange.location > [markedText length] ||
++                replacementRange.length > [markedText length] - replacementRange.location)
+                 replacementRange = NSMakeRange(0, [markedText length]);
+ 
+             [markedText replaceCharactersInRange:replacementRange withString:string];
+@@ -945,11 +1072,14 @@
+ 
+     - (void) unmarkText
+     {
++        [self commitImeDocText];
+         [self completeText:nil];
+     }
+ 
+     - (NSRange) selectedRange
+     {
++        if (![markedText length] && (imeDocStart || [imeDocText length]))
++            return NSMakeRange(imeDocStart + [imeDocText length], 0);
+         return markedTextSelection;
+     }
+ 
+@@ -968,6 +1098,22 @@
+ 
+     - (NSAttributedString*) attributedSubstringForProposedRange:(NSRange)aRange actualRange:(NSRangePointer)actualRange
+     {
++        if (![markedText length] && [imeDocTail length] + [imeDocText length])
++        {
++            NSUInteger tailLength = MIN([imeDocTail length], imeDocStart);
++            NSUInteger docBegin = imeDocStart - tailLength;
++            NSString* doc = [[imeDocTail substringFromIndex:[imeDocTail length] - tailLength]
++                                stringByAppendingString:imeDocText];
++            NSRange docRange = NSIntersectionRange(aRange, NSMakeRange(docBegin, [doc length]));
++
++            if (!docRange.length)
++                return nil;
++            if (actualRange)
++                *actualRange = docRange;
++            return [[[NSAttributedString alloc] initWithString:
++                        [doc substringWithRange:NSMakeRange(docRange.location - docBegin, docRange.length)]] autorelease];
++        }
++
+         if (aRange.location >= [markedText length])
+             return nil;
+ 
+@@ -4393,6 +4539,9 @@
+ 
+             window.commandDone = FALSE;
+             ret = [[[window contentView] inputContext] handleEvent:event] && !window.commandDone;
++            /* A key the input method passes on ends the syllable it inserted as document text. */
++            if (!ret && [[window contentView] isKindOfClass:[WineContentView class]])
++                [(WineContentView*)[window contentView] commitImeDocText];
+         }
+         else
+             ret = false;
+--- a/dlls/imm32/ime.c
++++ b/dlls/imm32/ime.c
+@@ -491,7 +491,8 @@
+     if (!himc || !select) return TRUE;
+     if (!(ctx = ImmLockIMC( himc ))) return FALSE;
+ 
+-    ImmSetOpenStatus( himc, FALSE );
++    if (!is_mac_korean_ime_layout( GetKeyboardLayout( 0 ) ))
++        ImmSetOpenStatus( himc, FALSE );
+ 
+     if ((priv = ImmLockIMCC( ctx->hPrivate )))
+     {
+@@ -507,6 +508,11 @@
+ {
+     TRACE( "himc %p, flag %#x stub!\n", himc, flag );
+     return TRUE;
++}
++
++static BOOL is_korean_ime_layout( HKL hkl )
++{
++    return HIWORD(hkl) == MAKELANGID(LANG_KOREAN, SUBLANG_DEFAULT) || is_mac_korean_ime_layout( hkl );
+ }
+ 
+ BOOL WINAPI ImeProcessKey( HIMC himc, UINT vkey, LPARAM lparam, BYTE *state )
+@@ -521,7 +527,7 @@
+     /* Preserve the driver result, but closed contexts must leave game keys alone.
+      * Match the Korean key-up policy of the verified ARM64 runtime. */
+     ret = FALSE;
+-    if (ctx->fOpen && !(HIWORD(GetKeyboardLayout(0)) == MAKELANGID(LANG_KOREAN, SUBLANG_DEFAULT) &&
++    if (ctx->fOpen && !(is_korean_ime_layout( GetKeyboardLayout( 0 ) ) &&
+                        (HIWORD(lparam) & KF_UP)))
+         ret = NtUserMessageCall( ctx->hWnd, WINE_IME_PROCESS_KEY, vkey, lparam, &params,
+                                  NtUserImeDriverCall, FALSE );
+@@ -586,7 +592,7 @@
+             if (compstr->dwCompClauseOffset) msg.lParam |= GCS_COMPCLAUSE;
+             else msg.lParam |= CS_INSERTCHAR|CS_NOMOVECARET;
+             /* Keep the verified MS Korean single-unit preedit message flags. */
+-            if (HIWORD(GetKeyboardLayout(0)) == MAKELANGID(LANG_KOREAN, SUBLANG_DEFAULT) &&
++            if (is_korean_ime_layout( GetKeyboardLayout( 0 ) ) &&
+                 compstr->dwCompStrLen == 1)
+                 msg.lParam = GCS_COMPSTR | GCS_COMPATTR | CS_INSERTCHAR | CS_NOMOVECARET;
+             msgs->TransMsg[count++] = msg;
+--- a/dlls/imm32/imm.c
++++ b/dlls/imm32/imm.c
+@@ -598,6 +598,9 @@
+     struct imc_entry *entry;
+ 
+     *ctx = default_input_context;
++    /* The macOS input source is active when winemac creates this HKL. Default
++     * only a new builtin context to open, leaving cached app choices intact. */
++    ctx->fOpen = ime->pImeSelect == ImeSelect && is_mac_korean_ime_layout( ime->hkl );
+     ctx->hWnd = old.hWnd;
+     ctx->hMsgBuf = old.hMsgBuf;
+     ctx->hCompStr = old.hCompStr;
+--- a/dlls/imm32/imm_private.h
++++ b/dlls/imm32/imm_private.h
+@@ -47,6 +47,14 @@
+ extern UINT WM_MSIME_QUERYPOSITION;
+ extern UINT WM_MSIME_DOCUMENTFEED;
+ 
++/* winemac encodes host input methods with 0xe000 in the high word.
++ * Additional layouts for the same language can use the low bits of that word. */
++static inline BOOL is_mac_korean_ime_layout( HKL hkl )
++{
++    return (HIWORD(hkl) & 0xf000) == 0xe000 &&
++           LOWORD(hkl) == MAKELANGID(LANG_KOREAN, SUBLANG_DEFAULT);
++}
++
+ static const char *debugstr_wm_ime( UINT msg )
+ {
+     switch (msg)

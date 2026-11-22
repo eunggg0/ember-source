@@ -1,0 +1,37 @@
+--- a/dlls/windows.ui/uisettings.c	2026-11-21 01:25:31
++++ b/dlls/windows.ui/uisettings.c	2026-11-21 01:25:31
+@@ -232,23 +232,30 @@
+ 
+ DEFINE_IINSPECTABLE( uisettings2, IUISettings2, struct uisettings, IUISettings_iface );
+ 
++/* Ember 1.0.1.2: text scale is always 100% (no Windows accessibility text scaling on macOS).
++ * Same as upstream Wine 11.18 for get/add; remove also succeeds. .NET/CsWinRT apps (LaTale launcher)
++ * turned E_NOTIMPL into NotImplementedException and quit. */
+ static HRESULT WINAPI uisettings2_get_TextScaleFactor( IUISettings2 *iface, DOUBLE *value )
+ {
+-    FIXME( "iface %p, value %p stub!\n", iface, value );
+-    return E_NOTIMPL;
++    TRACE( "iface %p, value %p.\n", iface, value );
++    if (!value) return E_POINTER;
++    *value = 1.0;
++    return S_OK;
+ }
+ 
+ static HRESULT WINAPI uisettings2_add_TextScaleFactorChanged( IUISettings2 *iface, ITypedEventHandler_UISettings_IInspectable *handler,
+         EventRegistrationToken *cookie )
+ {
+     FIXME( "iface %p, handler %p, cookie %p stub!\n", iface, handler, cookie );
+-    return E_NOTIMPL;
++    if (!cookie) return E_POINTER;
++    *cookie = dummy_cookie;
++    return S_OK;
+ }
+ 
+ static HRESULT WINAPI uisettings2_remove_TextScaleFactorChanged( IUISettings2 *iface, EventRegistrationToken cookie )
+ {
+     FIXME( "iface %p, cookie %#I64x stub!\n", iface, cookie.value );
+-    return E_NOTIMPL;
++    return S_OK;
+ }
+ 
+ static const struct IUISettings2Vtbl uisettings2_vtbl =

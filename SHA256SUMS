@@ -1,4 +1,4 @@
-8169ed1eabf6e0212b42c4622dfcfe117d8f10c9dfcbbdc9c409281c793d7a4e  ./BINARIES.tsv
+4202fb47e38ca2bbf1939c65e615264d1b1d5519974e7f087379c4d38eb3b6d4  ./BINARIES.tsv
 383e50e4f91fbf294532099f1e8d0a18802177b7797e4ec93f71a316f7fe3aeb  ./LICENSES/CURRENT.md
 cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30  ./LICENSES/apache-2.0.txt
 ae025f125a5d639f0f7abe5146efa1e3d7453cc10b744b2910806fa3f46626ef  ./LICENSES/crossover-wine-license.txt
@@ -222,8 +222,9 @@ fea62c9727bf7ef962423075245add1bccb145473ef21edf6dfb03d0005cf2ff  ./patches/wine
 26d813d2656613d0cc91b4643d8436b0eb0f7c8bc126d264150f197b2d1abf53  ./patches/wine-arm64/0044-programs-winedbg.patch
 b728546c5f4996be14a53c25c4faf5e55075ec935074624b3bc8488cbe2b5653  ./patches/wine-arm64/0045-server.patch
 0c4d54f1af1fb447f15d10c80c9e34454a951f5944107aa6e1f1063f9a6a860d  ./patches/wine-arm64/0046-top.patch
+a01bf99438b71e4a2154969348c14d34e532ab7bc4a506a393f29824b4cecb97  ./patches/wine-arm64/0047-ime-korean-composition.patch
 c23783062019adea176c24ad0fc9dbcddb07318496538059092488c0aeb26ac9  ./patches/wine-arm64/FILES.txt
-c832cff6cabd3769f4e77cfc8944b81c7d02a10cf0594a232bba895f093b9e69  ./patches/wine-arm64/series
+2f599a2c52460d529d270227c9f8b98d4efd308de1675e0d1cb028bb2c4c912a  ./patches/wine-arm64/series
 2772471fce92359130badbf13561bf90d8cad57bde850ce1d8ee73dc785318b3  ./patches/wine-cx/0001-common.patch
 ada2c1c2f5d16c74de9be11081f5b5e8bb3ae540288fa38e30a00ec040cf2d6e  ./patches/wine-cx/0002-dlls-advapi32.patch
 28b74736311ad086a1dba9b8cede4b9b23995394e41e34835675ddc3752086b4  ./patches/wine-cx/0003-dlls-avifil32.patch
@@ -319,8 +320,11 @@ f210aadff83865a1a8df67f8d0f739e1bba9b1ba4f70cf4208123cad7fafa558  ./patches/wine
 0640964ff9c52af8146fe603479677c80e8dce84b9b1f70ed98f1ca0b2ff1918  ./patches/wine-cx/0093-programs-wineboot.patch
 39df300234ad34640a290012ed678600877e14b075b3e1da47ea5d9091c22291  ./patches/wine-cx/0094-server.patch
 99741170aa0e7186a6c074f8e254475efcd7931aa1503242ea5eee093643c4ef  ./patches/wine-cx/0095-top.patch
+d1c96d18c7d78e8e40d969b4f897905f33ad92bfb485de568113e6e671467f4c  ./patches/wine-cx/0096-ime-korean-composition.patch
+01048d7f537e0ae78612da9872146f9eb87e7c03c4ac2d687dd2576f2c1d2407  ./patches/wine-cx/0097-windows.ui-text-scale.patch
+384fe0579fb876353e0340b8f3ac0d54abf49ab1ce7081c7b74ef013e7cb57d5  ./patches/wine-cx/0098-win32u-ulw-foreign-child.patch
 a3816e644b3794fb7b2e3b815e8517f0375a32503642a216e5053ca8a2b78f58  ./patches/wine-cx/FILES.txt
-74f57bde46b1d055e597d76fa51ecaae70764f76e67fdca2b43ef23dd135b03f  ./patches/wine-cx/series
+2a73c61b77268f5e64fe2f215127ce7d1c163b4e536f50b682a6ed4b8e07c08c  ./patches/wine-cx/series
 af490585e5f9fdc11d843d5e38334891c6c76bfdd6e22680b4b3f2bb3cea8ecf  ./patches/wine-x64/0001-dlls-bcrypt.patch
 20640ab3f673afee021fc7ae55e57fb96ea5185b53faa1d4ebaba758a7156580  ./patches/wine-x64/0002-dlls-dnsapi.patch
 c44ad578fa593543e8c94f3b54593ea315fa80c23f9f3ffb42a515726b2ac83a  ./patches/wine-x64/0003-dlls-dwrite.patch

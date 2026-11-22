@@ -1,0 +1,568 @@
+diff -ru a/dlls/win32u/dce.c b/dlls/win32u/dce.c
+--- a/dlls/win32u/dce.c	2026-11-21 10:12:15
++++ b/dlls/win32u/dce.c	2026-11-21 10:12:15
+@@ -34,6 +34,7 @@
+ #include "wine/debug.h"
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(win);
++WINE_DECLARE_DEBUG_CHANNEL(ulwchild);
+ 
+ struct dce
+ {
+@@ -730,6 +731,8 @@
+ 
+ /* CX HACK 23950 - START */
+ 
++static BOOL ulw_foreign_child_enabled(void);  /* EMBER layered-1121 */
++
+ struct shm_window_surface
+ {
+     struct window_surface header;
+@@ -758,10 +761,16 @@
+ 
+     TRACE("%p\n", surface);
+ 
++    /* EMBER layered-1121: a flush can come from inside apply_window_pos with the USER lock held
++     * (set_window_long_internal -> update_window_state); sending a message there asserts and kills
++     * the process. Keep the bounds and let the next flush send them. */
++    if (user_lock_held()) return FALSE;
++
+     params.section = HandleToLong( surface->section );
+     params.hwnd = HandleToLong( surface->header.hwnd );
+     params.info = surface->info;
+     params.bounds = *dirty;
++    TRACE_(ulwchild)( "shm flush hwnd %p parent %p dirty %s\n", surface->header.hwnd, surface->parent, wine_dbgstr_rect( dirty ) );
+ 
+     return send_message_timeout( surface->parent, WM_WINE_FLUSHSHMSURFACE, 0, (LPARAM)&params,
+                                  SMTO_ABORTIFHUNG | SMTO_BLOCK, 500, FALSE );
+@@ -780,6 +789,22 @@
+     TRACE( "freeing %p\n", surface );
+     if (surface->section)
+     {
++        /* EMBER layered-1121: let a layered root drop the child pixels right away.
++         * info.bmiHeader.biSize 0 marks the end of the surface. */
++        HWND root = user_lock_held() ? 0 : NtUserGetAncestor( surface->parent, GA_ROOT );
++        /* not while holding the USER lock (window destruction): the root then finds out
++         * at its next UpdateLayeredWindow */
++        if (ulw_foreign_child_enabled() && !user_lock_held() && root &&
++            (get_window_long( root, GWL_EXSTYLE ) & WS_EX_LAYERED))
++        {
++            struct flush_shm_surface_params params = { .info = surface->info,
++                                                       .section = HandleToLong( surface->section ),
++                                                       .hwnd = HandleToLong( surface->header.hwnd ) };
++            params.info.bmiHeader.biSize = 0;
++            send_message_timeout( surface->parent, WM_WINE_FLUSHSHMSURFACE, 0, (LPARAM)&params,
++                                  SMTO_ABORTIFHUNG | SMTO_BLOCK, 100, FALSE );
++        }
++
+         get_window_thread( surface->parent, &pid );
+         cid.UniqueProcess = ULongToHandle(pid);
+         cid.UniqueThread  = 0;
+@@ -874,6 +899,7 @@
+            wine_dbgstr_rect(visible_rect), window );
+ 
+     surface->parent = parent;
++    TRACE_(ulwchild)( "shm create hwnd %p parent %p rect %s\n", window, parent, wine_dbgstr_rect( visible_rect ) );
+ 
+     get_window_thread( parent, &pid );
+     cid.UniqueProcess = ULongToHandle(pid);
+@@ -901,6 +927,450 @@
+     return &surface->header;
+ }
+ 
++/* EMBER layered-1121 (Ember wine-cx 0098): a child window owned by another process (CX HACK 23950
++ * shm surface) whose root is an UpdateLayeredWindow (per-pixel alpha) window, e.g. a WebView2
++ * HwndHost inside a WPF AllowsTransparency window.
++ *
++ * A DC on such a root is clipped to the 1x1 dummy surface rect (apply_window_pos sends
++ * dummy_surface.rect, the server returns it as top_rect = device_rect), and every
++ * UpdateLayeredWindow repaints its dirty rect, so the child pixels never reach the screen.
++ * Instead the root's process copies the child's shm pixels straight into the layered surface
++ * (opaque, clipped to the child's visible region) and copies them again after every
++ * UpdateLayeredWindow.  The last UpdateLayeredWindow content is kept per root, so the area
++ * can be restored when the child goes away.  Nothing changes for roots without such a child.
++ * EMBER_ULW_FOREIGN_CHILD=0 turns it off. */
++
++
++struct ulw_root
++{
++    struct list entry;
++    HWND        hwnd;
++    int         width, height;  /* surface bitmap size */
++    DWORD      *pixels;         /* last UpdateLayeredWindow content, top-down, width * height */
++};
++
++struct ulw_child
++{
++    struct list entry;
++    HWND        hwnd;
++    HWND        root;
++    HANDLE      parent_section; /* handle value sent by the child (owned by the child) */
++    HANDLE      section;        /* our own duplicate */
++    void       *bits;
++    SIZE_T      view_size;
++    BITMAPINFO  info;
++    RECT        drawn;          /* area last covered with child pixels, root coordinates */
++};
++
++static struct list ulw_roots = LIST_INIT( ulw_roots );
++static struct list ulw_children = LIST_INIT( ulw_children );
++static pthread_mutex_t ulw_mutex = PTHREAD_MUTEX_INITIALIZER;
++
++static BOOL ulw_foreign_child_enabled(void)
++{
++    static int enabled = -1;
++    if (enabled == -1)
++    {
++        const char *e = getenv( "EMBER_ULW_FOREIGN_CHILD" );
++        enabled = !(e && e[0] == '0' && !e[1]);
++    }
++    return enabled;
++}
++
++/* the root's per-pixel layered surface bits; FALSE if the root has none */
++static BOOL ulw_surface_bits( struct window_surface *surface, DIBSECTION *dib )
++{
++    if (NtGdiExtGetObjectW( surface->color_bitmap, sizeof(*dib), dib ) != sizeof(*dib)) return FALSE;
++    /* window surface bitmaps are always top-down (GetObject reports abs(biHeight)) */
++    return dib->dsBm.bmBitsPixel == 32 && dib->dsBm.bmBits && dib->dsBm.bmWidth > 0 && dib->dsBm.bmHeight > 0;
++}
++
++static struct window_surface *get_ulw_root_surface( HWND root )
++{
++    struct window_surface *surface = NULL;
++    WND *win = get_win_ptr( root );
++
++    if (!win || win == WND_DESKTOP || win == WND_OTHER_PROCESS) return NULL;
++    if (win->surface && win->surface != &dummy_surface && win->surface->alpha_mask &&
++        (win->dwExStyle & WS_EX_LAYERED))
++        window_surface_add_ref( (surface = win->surface) );
++    release_win_ptr( win );
++    return surface;
++}
++
++static struct ulw_root *find_ulw_root( HWND hwnd )
++{
++    struct ulw_root *r;
++    LIST_FOR_EACH_ENTRY( r, &ulw_roots, struct ulw_root, entry ) if (r->hwnd == hwnd) return r;
++    return NULL;
++}
++
++static BOOL root_has_children( HWND root )
++{
++    struct ulw_child *c;
++    LIST_FOR_EACH_ENTRY( c, &ulw_children, struct ulw_child, entry ) if (c->root == root) return TRUE;
++    return FALSE;
++}
++
++static void copy_rect( DWORD *dst, int dst_stride, const DWORD *src, int src_stride, const RECT *rc )
++{
++    int y;
++    for (y = rc->top; y < rc->bottom; y++)
++        memcpy( (char *)dst + (SIZE_T)y * dst_stride + rc->left * 4,
++                (const char *)src + (SIZE_T)y * src_stride + rc->left * 4, (rc->right - rc->left) * 4 );
++}
++
++/* save the given area (NULL = all) of the surface as the root's UpdateLayeredWindow content.
++ * surface must be locked. */
++static struct ulw_root *ulw_root_save( HWND hwnd, const DIBSECTION *dib, const RECT *area )
++{
++    struct ulw_root *r = find_ulw_root( hwnd );
++    RECT rc;
++
++    if (r && (r->width != dib->dsBm.bmWidth || r->height != dib->dsBm.bmHeight))
++    {
++        free( r->pixels );
++        r->pixels = NULL;
++        area = NULL;
++    }
++    if (!r)
++    {
++        if (!(r = calloc( 1, sizeof(*r) ))) return NULL;
++        r->hwnd = hwnd;
++        list_add_tail( &ulw_roots, &r->entry );
++        area = NULL;
++    }
++    if (!r->pixels)
++    {
++        r->width = dib->dsBm.bmWidth;
++        r->height = dib->dsBm.bmHeight;
++        if (!(r->pixels = malloc( (SIZE_T)r->width * r->height * 4 ))) return r;
++        area = NULL;
++    }
++    SetRect( &rc, 0, 0, r->width, r->height );
++    if (area) intersect_rect( &rc, &rc, area );
++    if (!IsRectEmpty( &rc )) copy_rect( r->pixels, r->width * 4, dib->dsBm.bmBits, dib->dsBm.bmWidthBytes, &rc );
++    return r;
++}
++
++/* put the saved UpdateLayeredWindow content back over area. surface must be locked. */
++static void ulw_root_restore( struct window_surface *surface, const struct ulw_root *r,
++                              const DIBSECTION *dib, const RECT *area )
++{
++    RECT rc;
++
++    if (!r || !r->pixels || r->width != dib->dsBm.bmWidth || r->height != dib->dsBm.bmHeight) return;
++    SetRect( &rc, 0, 0, r->width, r->height );
++    if (!intersect_rect( &rc, &rc, area )) return;
++    copy_rect( dib->dsBm.bmBits, dib->dsBm.bmWidthBytes, r->pixels, r->width * 4, &rc );
++    add_bounds_rect( &surface->bounds, &rc );
++}
++
++static void ulw_root_free( struct ulw_root *r )
++{
++    list_remove( &r->entry );
++    free( r->pixels );
++    free( r );
++}
++
++static void ulw_child_free( struct ulw_child *c )
++{
++    list_remove( &c->entry );
++    if (c->bits) NtUnmapViewOfSection( GetCurrentProcess(), c->bits );
++    if (c->section) NtClose( c->section );
++    free( c );
++}
++
++/* where the child is and what of it is visible, in root (= surface bitmap) coordinates.
++ * Must be called without the surface lock (server round trip). */
++static HRGN ulw_child_region( const struct ulw_child *c, RECT *child_rc )
++{
++    UINT dpi = get_thread_dpi();
++    RECT rc, root_rc;
++    HRGN rgn;
++    HDC hdc;
++
++    SetRectEmpty( child_rc );
++    if (!is_window_visible( c->hwnd )) return 0;
++    if (!get_window_rect( c->hwnd, &rc, dpi ) || !get_window_rect( c->root, &root_rc, dpi )) return 0;
++    if (!(rgn = NtGdiCreateRectRgn( 0, 0, 0, 0 ))) return 0;
++    /* the child's visible region is not clipped to the 1x1 layered rect for a remote process,
++     * see set_region_client_rect in server/window.c */
++    if ((hdc = NtUserGetDCEx( c->hwnd, 0, DCX_CLIPSIBLINGS | DCX_CACHE )))
++    {
++        if (NtGdiGetRandomRgn( hdc, rgn, SYSRGN ) != 1) NtGdiSetRectRgn( rgn, 0, 0, 0, 0 );
++        NtUserReleaseDC( c->hwnd, hdc );
++    }
++    NtGdiOffsetRgn( rgn, -root_rc.left, -root_rc.top );
++    OffsetRect( &rc, -root_rc.left, -root_rc.top );
++    rc.right = min( rc.right, rc.left + c->info.bmiHeader.biWidth );
++    rc.bottom = min( rc.bottom, rc.top + abs( c->info.bmiHeader.biHeight ) );
++    *child_rc = rc;
++    return rgn;
++}
++
++/* copy the child pixels inside clip (root coordinates, NULL = everything) into the surface.
++ * surface must be locked. */
++static void ulw_child_paint( struct ulw_child *c, struct window_surface *surface, const DIBSECTION *dib,
++                             HRGN rgn, const RECT *child_rc, const RECT *clip )
++{
++    UINT sw = c->info.bmiHeader.biWidth, sh = abs( c->info.bmiHeader.biHeight ), i;
++    RECT area, bmp_rc;
++    RGNDATA *data;
++    DWORD size;
++    int x, y;
++
++    if (!c->bits || !rgn) return;
++    SetRect( &bmp_rc, 0, 0, dib->dsBm.bmWidth, dib->dsBm.bmHeight );
++    if (!intersect_rect( &area, child_rc, &bmp_rc )) return;
++    if (clip && !intersect_rect( &area, &area, clip )) return;
++    if (!(size = NtGdiGetRegionData( rgn, 0, NULL )) || !(data = malloc( size ))) return;
++    if (NtGdiGetRegionData( rgn, size, data ))
++    {
++        const RECT *rects = (const RECT *)data->Buffer;
++        if (TRACE_ON(ulwchild))
++        {
++            RECT box;
++            NtGdiGetRgnBox( rgn, &box );
++            TRACE_(ulwchild)( "paint child %p child_rc %s rgn %s (%u rects) clip %s\n", c->hwnd, wine_dbgstr_rect( child_rc ),
++                              wine_dbgstr_rect( &box ), (UINT)data->rdh.nCount, clip ? wine_dbgstr_rect( clip ) : "all" );
++        }
++        for (i = 0; i < data->rdh.nCount; i++)
++        {
++            RECT r;
++            if (!intersect_rect( &r, &rects[i], &area )) continue;
++            for (y = r.top; y < r.bottom; y++)
++            {
++                int sy = y - child_rc->top;
++                DWORD *dst = (DWORD *)((char *)dib->dsBm.bmBits + (SIZE_T)y * dib->dsBm.bmWidthBytes) + r.left;
++                const DWORD *src;
++                if (c->info.bmiHeader.biHeight > 0) sy = sh - 1 - sy;  /* bottom-up shm source */
++                src = (const DWORD *)((const char *)c->bits + (SIZE_T)sy * sw * 4) + (r.left - child_rc->left);
++                for (x = r.left; x < r.right; x++) *dst++ = *src++ | 0xff000000;
++            }
++            add_bounds_rect( &surface->bounds, &r );
++        }
++    }
++    free( data );
++}
++
++/* the child (re)appears in the layered root: what it drew while it was hidden or before the
++ * root was shown was clipped away, and the layered root gets no WM_PAINT for its children,
++ * so ask the child for a full repaint. Called without the surface lock. */
++static void ulw_child_request_repaint( const struct ulw_child *c )
++{
++    TRACE_(ulwchild)( "child %p: repaint requested\n", c->hwnd );
++    NtUserRedrawWindow( c->hwnd, NULL, 0, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN );
++}
++
++/* called by NtUserUpdateLayeredWindow after it painted rect (root coordinates) of the surface */
++void ember_ulw_after_update( HWND root, struct window_surface *surface, const RECT *rect )
++{
++    struct ulw_child *c, *next;
++    struct ulw_root *r;
++    DIBSECTION dib;
++    BOOL appears;
++
++    if (!ulw_foreign_child_enabled() || !surface || !surface->alpha_mask) return;
++    pthread_mutex_lock( &ulw_mutex );
++    if (!root_has_children( root ))  /* the common case: nothing to do */
++    {
++        if ((r = find_ulw_root( root ))) ulw_root_free( r );
++        pthread_mutex_unlock( &ulw_mutex );
++        return;
++    }
++    if (ulw_surface_bits( surface, &dib ))
++    {
++        window_surface_lock( surface );
++        r = ulw_root_save( root, &dib, rect );
++        window_surface_unlock( surface );
++
++        LIST_FOR_EACH_ENTRY_SAFE( c, next, &ulw_children, struct ulw_child, entry )
++        {
++            RECT child_rc;
++            HRGN rgn = 0;
++
++            if (c->root != root) continue;
++            if (!is_window( c->hwnd ) || NtUserGetAncestor( c->hwnd, GA_ROOT ) != root)
++            {
++                window_surface_lock( surface );
++                ulw_root_restore( surface, r, &dib, &c->drawn );
++                window_surface_unlock( surface );
++                ulw_child_free( c );
++                continue;
++            }
++            rgn = ulw_child_region( c, &child_rc );
++            appears = IsRectEmpty( &c->drawn ) && !IsRectEmpty( &child_rc );
++            window_surface_lock( surface );
++            if (!EqualRect( &child_rc, &c->drawn ))
++            {
++                ulw_root_restore( surface, r, &dib, &c->drawn );
++                ulw_child_paint( c, surface, &dib, rgn, &child_rc, NULL );
++            }
++            else ulw_child_paint( c, surface, &dib, rgn, &child_rc, rect );
++            c->drawn = child_rc;
++            window_surface_unlock( surface );
++            if (rgn) NtGdiDeleteObjectApp( rgn );
++            if (appears) ulw_child_request_repaint( c );
++        }
++        if (!root_has_children( root ) && (r = find_ulw_root( root ))) ulw_root_free( r );
++    }
++    pthread_mutex_unlock( &ulw_mutex );
++}
++
++/* map the child's current shm section (a new one after a resize) */
++static void ulw_child_attach( struct ulw_child *c, const struct flush_shm_surface_params *params )
++{
++    HANDLE mapping = LongToHandle( params->section );
++    unsigned int status;
++
++    if (c->section && c->parent_section == mapping &&
++        !memcmp( &c->info.bmiHeader, &params->info.bmiHeader, sizeof(BITMAPINFOHEADER) ))
++        return;
++    if (c->bits) NtUnmapViewOfSection( GetCurrentProcess(), c->bits );
++    if (c->section) NtClose( c->section );
++    c->bits = NULL;
++    c->section = 0;
++    c->parent_section = mapping;
++    c->info = params->info;
++    c->view_size = 0;
++    status = NtDuplicateObject( GetCurrentProcess(), mapping, GetCurrentProcess(), &c->section,
++                                0, 0, DUPLICATE_SAME_ACCESS );
++    if (!status)
++        status = NtMapViewOfSection( c->section, GetCurrentProcess(), &c->bits, 0, 0, NULL,
++                                     &c->view_size, ViewShare, 0, PAGE_READONLY );
++    if (status)
++    {
++        ERR_(ulwchild)( "child %p: cannot map section, status %x\n", c->hwnd, status );
++        c->bits = NULL;
++    }
++    else TRACE_(ulwchild)( "child %p root %p %ux%d\n", c->hwnd, c->root, (UINT)params->info.bmiHeader.biWidth,
++                           (int)params->info.bmiHeader.biHeight );
++}
++
++/* a layered root that has not called UpdateLayeredWindow yet (and is not a
++ * SetLayeredWindowAttributes window): its children are remembered so that the first
++ * UpdateLayeredWindow can show them */
++static BOOL ulw_root_pending( HWND root )
++{
++    COLORREF key;
++    BYTE alpha;
++    DWORD flags;
++    WND *win = get_win_ptr( root );
++
++    if (!win || win == WND_DESKTOP || win == WND_OTHER_PROCESS) return FALSE;
++    release_win_ptr( win );
++    if (!(get_window_long( root, GWL_EXSTYLE ) & WS_EX_LAYERED)) return FALSE;
++    return !NtUserGetLayeredWindowAttributes( root, &key, &alpha, &flags );
++}
++
++/* a flush (or, with info.bmiHeader.biSize 0, the end) of a foreign child's shm surface;
++ * TRUE if handled here */
++static BOOL ulw_child_flush( struct flush_shm_surface_params *params )
++{
++    HANDLE mapping = LongToHandle( params->section );
++    HWND hwnd = LongToHandle( params->hwnd );
++    struct window_surface *surface;
++    struct ulw_child *c, *found = NULL;
++    struct ulw_root *r;
++    RECT child_rc, dirty;
++    DIBSECTION dib;
++    HRGN rgn;
++    HWND root;
++    BOOL appears, gone = !params->info.bmiHeader.biSize;
++
++    if (!ulw_foreign_child_enabled()) return FALSE;
++
++    pthread_mutex_lock( &ulw_mutex );
++    LIST_FOR_EACH_ENTRY( c, &ulw_children, struct ulw_child, entry )
++        if (c->hwnd == hwnd) { found = c; break; }
++
++    root = NtUserGetAncestor( hwnd, GA_ROOT );
++    if (found && found->root != root)  /* reparented */
++    {
++        ulw_child_free( found );
++        found = NULL;
++    }
++    if (!root || root == hwnd || !(surface = get_ulw_root_surface( root )))
++    {
++        if (!gone && root && root != hwnd && ulw_root_pending( root ))
++        {
++            /* remember the child; the first UpdateLayeredWindow paints it in full */
++            if (!found && (found = calloc( 1, sizeof(*found) )))
++            {
++                found->hwnd = hwnd;
++                found->root = root;
++                list_add_tail( &ulw_children, &found->entry );
++            }
++            if (found) ulw_child_attach( found, params );
++            pthread_mutex_unlock( &ulw_mutex );
++            return FALSE;  /* the usual path still runs */
++        }
++        if (found && (!gone || found->parent_section == mapping)) ulw_child_free( found );
++        pthread_mutex_unlock( &ulw_mutex );
++        return gone;
++    }
++    if (!ulw_surface_bits( surface, &dib )) goto done;
++
++    if (gone)  /* the child surface is gone: put the layered content back */
++    {
++        if (found && found->parent_section == mapping &&  /* ignore the end of an older surface */
++            found->info.bmiHeader.biWidth == params->info.bmiHeader.biWidth &&
++            found->info.bmiHeader.biHeight == params->info.bmiHeader.biHeight)
++        {
++            TRACE_(ulwchild)( "child %p gone, restoring %s\n", hwnd, wine_dbgstr_rect( &found->drawn ) );
++            window_surface_lock( surface );
++            ulw_root_restore( surface, find_ulw_root( found->root ), &dib, &found->drawn );
++            window_surface_unlock( surface );
++            ulw_child_free( found );
++            if (!root_has_children( root ) && (r = find_ulw_root( root ))) ulw_root_free( r );
++        }
++        goto done;
++    }
++
++    if (!found)
++    {
++        if (!(found = calloc( 1, sizeof(*found) ))) goto done;
++        found->hwnd = hwnd;
++        found->root = root;
++        list_add_tail( &ulw_children, &found->entry );
++        if (!find_ulw_root( root ))
++        {
++            /* first child of this root: the surface still holds only the layered content */
++            window_surface_lock( surface );
++            ulw_root_save( root, &dib, NULL );
++            window_surface_unlock( surface );
++        }
++    }
++    ulw_child_attach( found, params );  /* new shm surface after a resize: drawn area is kept for restore */
++
++    rgn = ulw_child_region( found, &child_rc );
++    appears = IsRectEmpty( &found->drawn ) && !IsRectEmpty( &child_rc );
++    window_surface_lock( surface );
++    r = find_ulw_root( root );
++    if (!EqualRect( &child_rc, &found->drawn ))  /* moved or resized: restore, then paint all */
++    {
++        ulw_root_restore( surface, r, &dib, &found->drawn );
++        ulw_child_paint( found, surface, &dib, rgn, &child_rc, NULL );
++    }
++    else
++    {
++        dirty = params->bounds;
++        OffsetRect( &dirty, child_rc.left, child_rc.top );
++        ulw_child_paint( found, surface, &dib, rgn, &child_rc, &dirty );
++    }
++    found->drawn = child_rc;
++    window_surface_unlock( surface );
++    if (rgn) NtGdiDeleteObjectApp( rgn );
++    if (appears) ulw_child_request_repaint( found );
++
++done:
++    pthread_mutex_unlock( &ulw_mutex );
++    window_surface_flush( surface );
++    window_surface_release( surface );
++    return TRUE;
++}
++
+ void process_surface_message( struct flush_shm_surface_params *params )
+ {
+     HANDLE mapping = LongToHandle( params->section );
+@@ -912,6 +1382,9 @@
+     HDC hdc;
+ 
+     TRACE( "Flushing %p window surface %s\n", hwnd, wine_dbgstr_rect( &params->bounds ));
++
++    if (ulw_child_flush( params )) return;  /* EMBER layered-1121 */
++    if (!params->info.bmiHeader.biSize) return;  /* end of a surface, see shm_surface_destroy */
+ 
+     status = NtMapViewOfSection( mapping, GetCurrentProcess(), (void**)&bits,
+                                  0, 0, NULL, &view_size, ViewShare, 0, PAGE_READONLY );
+diff -ru a/dlls/win32u/sysparams.c b/dlls/win32u/sysparams.c
+--- a/dlls/win32u/sysparams.c	2026-11-21 10:12:15
++++ b/dlls/win32u/sysparams.c	2026-11-21 10:12:15
+@@ -356,6 +356,12 @@
+     pthread_mutex_unlock( &user_mutex );
+ }
+ 
++/* EMBER layered-1121 */
++BOOL user_lock_held(void)
++{
++    return user_lock_thread == GetCurrentThreadId();
++}
++
+ void user_check_not_lock(void)
+ {
+     if (user_lock_thread == GetCurrentThreadId())
+diff -ru a/dlls/win32u/win32u_private.h b/dlls/win32u/win32u_private.h
+--- a/dlls/win32u/win32u_private.h	2026-11-21 10:12:15
++++ b/dlls/win32u/win32u_private.h	2026-11-21 10:12:15
+@@ -279,6 +279,8 @@
+ extern BOOL is_window_enabled( HWND hwnd );
+ extern BOOL is_window_unicode( HWND hwnd );
+ extern BOOL is_window_visible( HWND hwnd );
++extern void ember_ulw_after_update( HWND root, struct window_surface *surface, const RECT *rect );
++extern BOOL user_lock_held(void);
+ extern BOOL is_zoomed( HWND hwnd );
+ extern BOOL set_window_pixel_format( HWND hwnd, int format, BOOL internal );
+ extern int get_window_pixel_format( HWND hwnd );
+diff -ru a/dlls/win32u/window.c b/dlls/win32u/window.c
+--- a/dlls/win32u/window.c	2026-11-21 10:12:15
++++ b/dlls/win32u/window.c	2026-11-21 10:12:15
+@@ -2748,6 +2748,7 @@
+ 
+         if (!(flags & ULW_COLORKEY)) key = CLR_INVALID;
+         window_surface_set_layered( surface, key, -1, 0xff000000 );
++        ember_ulw_after_update( hwnd, surface, &rect );  /* EMBER layered-1121 */
+ 
+         user_driver->pUpdateLayeredWindow( hwnd, source_alpha, flags );
+         window_surface_flush( surface );

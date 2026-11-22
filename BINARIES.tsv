@@ -1661,7 +1661,7 @@ WineARM64/lib/wine/aarch64-unix/winecoreaudio.so	4ff314626ba9d24bc457b3eeedcb29d
 WineARM64/lib/wine/aarch64-unix/wined3d.so	386b2402170270eb6bea37685ad3302b	wine-arm64
 WineARM64/lib/wine/aarch64-unix/winedmo.so	139bd7909fd414d7cedac678b3b18fe6	wine-arm64
 WineARM64/lib/wine/aarch64-unix/winegstreamer.so	20aeeffe67abd44904b77902e9e7e2bf	wine-arm64
-WineARM64/lib/wine/aarch64-unix/winemac.so	9bd79f0069aacc937a546f4d4e194edb	wine-arm64
+WineARM64/lib/wine/aarch64-unix/winemac.so	de012a40ce18589dd1b8affe69705c08	wine-arm64
 WineARM64/lib/wine/aarch64-unix/winemetal.so	45903c130afdaa0d3f0753d692183c99	dxmt-d3d12
 WineARM64/lib/wine/aarch64-unix/wineps.so	f2ab1a23d26d3f6f826f371086572d48	wine-arm64
 WineARM64/lib/wine/aarch64-unix/wineusb.so	ddcf7aca61265ee97918cf10dccc0f97	wine-arm64
@@ -4096,14 +4096,14 @@ WineCX/lib/wine/x86_64-unix/opencl.so	dee308cd21e394386fb3dae9955c0e44	wine-cx
 WineCX/lib/wine/x86_64-unix/opengl32.so	8610c515f0106ff858eaeab946ed6e33	wine-cx
 WineCX/lib/wine/x86_64-unix/qcap.so	e7130607f3aa81de756c9370d4400e52	wine-cx
 WineCX/lib/wine/x86_64-unix/secur32.so	9c63d19c563be0224617789574e16711	wine-cx
-WineCX/lib/wine/x86_64-unix/win32u.so	bbc53385e3810792351ace7f98cc8c96	wine-cx
+WineCX/lib/wine/x86_64-unix/win32u.so	60f686eb76705d35f79638ec853d55ed	wine-cx
 WineCX/lib/wine/x86_64-unix/wine	cac8ed933f6e7ebf25d526d3fbb094c5	wine-cx
 WineCX/lib/wine/x86_64-unix/winebth.so	f59ab1dcb4fdcdb08c1323735619425c	wine-cx
 WineCX/lib/wine/x86_64-unix/winebus.so	a75697618e82400ddb34ff4d5d5027c1	wine-cx
 WineCX/lib/wine/x86_64-unix/winecoreaudio.so	97188c6e0e2ac4540440a9b187ce0ae5	wine-cx
 WineCX/lib/wine/x86_64-unix/winedmo.so	1f944653b944e0cdb71c194804be69b1	wine-cx
 WineCX/lib/wine/x86_64-unix/winegstreamer.so	e6f46ed46c0ddbf9862aa43070529487	wine-cx
-WineCX/lib/wine/x86_64-unix/winemac.so	3e1ca121ebc978b77bb35543ef66f24d	wine-cx
+WineCX/lib/wine/x86_64-unix/winemac.so	3bb6c18956e32d01d97e24a4bb5b5c99	wine-cx
 WineCX/lib/wine/x86_64-unix/winemetal.so	521421cec037cdf9f230120bd2034aec	dxmt-winemetal-cx
 WineCX/lib/wine/x86_64-unix/wineps.so	2ad823d64d97d8d3c2890158a105b746	wine-cx
 WineCX/lib/wine/x86_64-unix/winevulkan.so	d9b35709b1ef8189cb9d353f15115e68	wine-cx
@@ -4360,7 +4360,7 @@ WineCX/lib/wine/x86_64-windows/iertutil.dll	f6b9cd337b0b143049d1354c2b255707	win
 WineCX/lib/wine/x86_64-windows/iexplore.exe	6e387c2eb000887ba681580dda881d2c	wine-cx
 WineCX/lib/wine/x86_64-windows/imaadp32.acm	0d9d6cff64a073ec25651c84547a2de8	wine-cx
 WineCX/lib/wine/x86_64-windows/imagehlp.dll	817568f11b8f9fccb0b4f2edae5d76c8	wine-cx
-WineCX/lib/wine/x86_64-windows/imm32.dll	77deeb54d994314a34c6d40c992a444a	wine-cx
+WineCX/lib/wine/x86_64-windows/imm32.dll	96ceba8413f40d9861a42e4a03b06283	wine-cx
 WineCX/lib/wine/x86_64-windows/inetcomm.dll	1d36fe7c57c18cfa85681520c665332a	wine-cx
 WineCX/lib/wine/x86_64-windows/inetcpl.cpl	785e4bc42ca1283d1fa740d7045d6ea0	wine-cx
 WineCX/lib/wine/x86_64-windows/inetmib1.dll	a967b9778501ebee8af43bf444ea1220	wine-cx
@@ -4753,7 +4753,7 @@ WineCX/lib/wine/x86_64-windows/windows.storage.dll	00057813c1539b99434dfb3ba94ba
 WineCX/lib/wine/x86_64-windows/windows.system.profile.systemid.dll	2580d2f77af0b10fa8408772ca4c01cd	wine-cx
 WineCX/lib/wine/x86_64-windows/windows.system.profile.systemmanufacturers.dll	492d184a404a771b9eb7d9b6dd81da4b	wine-cx
 WineCX/lib/wine/x86_64-windows/windows.ui.core.textinput.dll	9211a69ad5376064332910965f646c00	wine-cx
-WineCX/lib/wine/x86_64-windows/windows.ui.dll	c5d7d31a13dbe01da973f49dfd0e4242	wine-cx
+WineCX/lib/wine/x86_64-windows/windows.ui.dll	e14d5ca387844cf032474a260bbaa9f9	wine-cx
 WineCX/lib/wine/x86_64-windows/windows.ui.xaml.dll	d22b09a9de910a13e0ed7b00d03e2ad9	wine-cx
 WineCX/lib/wine/x86_64-windows/windows.web.dll	73bbe33e623bdb10a8c2b8cffccfc449	wine-cx
 WineCX/lib/wine/x86_64-windows/windowscodecs.dll	10aad7de88f65665c3e5537841ad5e30	wine-cx

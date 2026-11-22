@@ -93,3 +93,6 @@
 0093-programs-wineboot.patch
 0094-server.patch
 0095-top.patch
+0096-ime-korean-composition.patch
+0097-windows.ui-text-scale.patch
+0098-win32u-ulw-foreign-child.patch
