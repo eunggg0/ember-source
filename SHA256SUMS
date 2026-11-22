@@ -1,4 +1,4 @@
-4202fb47e38ca2bbf1939c65e615264d1b1d5519974e7f087379c4d38eb3b6d4  ./BINARIES.tsv
+3ab87ec54e4d4bab144707e2106ad58db9322a2bfa25d1582a2363ad24b5a5a3  ./BINARIES.tsv
 383e50e4f91fbf294532099f1e8d0a18802177b7797e4ec93f71a316f7fe3aeb  ./LICENSES/CURRENT.md
 cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30  ./LICENSES/apache-2.0.txt
 ae025f125a5d639f0f7abe5146efa1e3d7453cc10b744b2910806fa3f46626ef  ./LICENSES/crossover-wine-license.txt
@@ -30,7 +30,7 @@ a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c  ./LICENSES/lib
 4f5dabb1b44bb6fc5cd53820b1f103147ad61b395a57903991325bd1b85d97bf  ./LICENSES/orc-copying.txt
 197d8a73ffee0d6b09adba2f9c677b5f5aede24edf89258a68e48248d010d811  ./LICENSES/pcre2-licence.txt
 ae025f125a5d639f0f7abe5146efa1e3d7453cc10b744b2910806fa3f46626ef  ./LICENSES/wine-license.txt
-3688415cbb50357bbc09714efb2bbd47b8cbab74daa7edf5387bac88dc14c067  ./README.md
+03af10afc08d2013b3359b6aa995f9e0cf02ee1f860b23ce33d9dce06918ee52  ./README.md
 b7a6907756e665e77fead5e0562a6145584d776dbecd0e304cccc70127eedc64  ./build/vm-qemu/BUILD.txt
 83b2188461fbc0ead4d1ef1c0f60f3205aa9d12e25cfcecaedb185fb75031298  ./macports/REFS.txt
 adfd998eb0aa9c4bdf9a379652ce4538ee1646cd31a33c84b4dd6f61278e8379  ./macports/ports/devel/gettext/Portfile
@@ -90,6 +90,10 @@ af6bcad85ea0020f3e05f3773af8bb839a175ce44d355bff99cf67b65b55ce7e  ./patches/dxmt
 98804dde276283f970de30bfa015579e4f3b5b8762c6d549f19256a698efc75d  ./patches/dxmt-d3d12/0012-top.patch
 ff829564560d954251ea455f3c370ca92e7df5e26bbb686cafe609ced9f16f68  ./patches/dxmt-d3d12/FILES.txt
 bd1c51baf500a36cd2fb8a804b3aa16a48d713704df989c9e44ec334c694a94e  ./patches/dxmt-d3d12/series
+8de3cbfeeffd1ebd877595f06321a4cce444fa6bfa9da9ad849f215c9ab67013  ./patches/dxmt-dxgi-release/0001-release-inputs.patch
+812ea3bd9ffbe6d97d90c28e8798743e54ba78b3ff1e2be4636fabbd438085aa  ./patches/dxmt-dxgi-release/FILES.txt
+58c4b0a77812371aeb4d80acc95bc27deb87707623976ffd69ff374c41dcc76c  ./patches/dxmt-dxgi-release/README.md
+f8e0094f2487655d7099f84313a6f22fb260cc73a7a0adfc8217a467611f1cc8  ./patches/dxmt-dxgi-release/series
 a08402acb2c0b1d1d363da989aefed7afeebffde7abd34f1f7d898b5a3156d93  ./patches/dxmt-dxgi/0001-src-d3d11.patch
 ca6a17ebe2073542e118415b8d96a8ee499b3768eca151b84bc7eb30d6ab6dae  ./patches/dxmt-dxgi/0002-src-d3d12.patch
 77db6f22ee77b9b3784ef71f2ba01c077404c1a9398cb9c9695513fac28500f6  ./patches/dxmt-dxgi/0003-src-dxgi.patch
@@ -176,6 +180,12 @@ f2cf22956a0cb762f077c2f83ce6e34831b0f691cbd8df2205cda85dfb9aae27  ./patches/vm-q
 a2b63805f7f863a252879461cd5ca20f4092414fbe3dbfa057b3dc729cfec106  ./patches/vm-qemu-img/series
 b5633b778579a7a6094c0d42e3378b1443f4cd4919ae72b5ee428b011a6749a6  ./patches/vm-qemu/0001-ember-vm.patch
 ac55d63090ed929e731670f459455b2c5ee2dbd25f1f4ab3946bb5559dc3adab  ./patches/vm-qemu/series
+f39a4663e78a61f0f7544d9e433d7a749916976aa6e710e385a531c52f8a1bcc  ./patches/wine-arm64-i386-release/0001-kernelbase-i386-release.patch
+dfdd5d96f79931fd37de14d8f47df5e126c66655730447756492524556cc92c0  ./patches/wine-arm64-i386-release/0002-ntdll-i386-release.patch
+83e56cdfc3592655db74a822c8b405978c807a106b7ea45f9d3e1746dd6eb9b4  ./patches/wine-arm64-i386-release/0003-wmp-i386-release.patch
+a5f586688fbb60e69fded0e13d8e86377c8831ae0b61964c5ef68656d8bfede9  ./patches/wine-arm64-i386-release/FILES.txt
+e5b38a2c917a8b43369fcef686ea4eb6e86b9be23d2e0fbd30d48082e67156af  ./patches/wine-arm64-i386-release/README.md
+2a8da7d963ea2918216dcf6c7ee77c3e028292c32ced44119d8d752fb86efb88  ./patches/wine-arm64-i386-release/series
 f849ab431fff5184485e42d71305232a4de1b85a85871d2d22bae9eaf173d9a8  ./patches/wine-arm64/0001-dlls-avifil32.patch
 eec3e2a7522a90f27830c244ed187f42d56cbeed7b838c9d6face50d2f869d9c  ./patches/wine-arm64/0002-dlls-colorcnv.patch
 fd000b7941d625c78767866796951ba8ecf1e2a072af4743a403270557af1e23  ./patches/wine-arm64/0003-dlls-crypt32.patch
@@ -347,3 +357,4 @@ af3b8dc2ff191ff19b76957e438e29c57141280cf9e2ce412372773068551fa2  ./patches/wine
 6f45d5b70888dbadab8b8156f712ddaf7862789cd4517767c3403716fe3ca7dc  ./scripts/apply-series.sh
 8d2dd9d8a98da70caa41b62ce4d533f86f89ef52026536988460ada586252d2f  ./scripts/fetch-upstream.sh
 67518a8959fdce3559f2eec33a89e5b53be0c97830d894150709a2411740a8c5  ./upstream/SOURCES.tsv
+9f20f1ebc40e4c48b98f1e57cf4302c34033d4e8e68286b929bfde035374eaa2  ./verify/rebuild-wine-i386.py

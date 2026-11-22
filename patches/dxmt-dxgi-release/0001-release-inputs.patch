@@ -1,0 +1,1410 @@
+From: Ember <realnoma@naver.com>
+Subject: [PATCH] Restore DXGI release archive inputs
+
+License: same as the upstream files (LGPL-2.1-or-later; see LICENSES/)
+---
+diff --git a/src/dxmt/ember_autohdr.cpp b/src/dxmt/ember_autohdr.cpp
+--- a/src/dxmt/ember_autohdr.cpp
++++ b/src/dxmt/ember_autohdr.cpp
+@@ -1,16 +1,15 @@
+ /*
+- * Ember Flare (Auto HDR) glue, DXMT side — see ember_autohdr.hpp. The engine is libEmberTone.dylib (EmberCore).
+- *
+- * This library is free software; you can redistribute it and/or modify it under the terms of the GNU Lesser
+- * General Public License as published by the Free Software Foundation; either version 2.1 of the License, or
+- * (at your option) any later version.
+- */
++
++                                                                                                                     */
+ #include "ember_autohdr.hpp"
+-#include "ember_neural.hpp"
++#include "ember_autohdr_shader.h"
++#include "ember_autohdr_weights.h"
+ #include "log/log.hpp"
+ #include "util_env.hpp"
+-#include "../winemetal/ember_fg_thunks.h"
+ #include <algorithm>
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
+ 
+ namespace dxmt {
+ 
+@@ -21,78 +20,166 @@
+   return on;
+ }
+ 
+-EmberAutoHDR::EmberAutoHDR(WMT::Device device) {
+-  auto env = embertone::envBlock();
+-  embertone::AhdrConfig cfg {};
+-  cfg.size = sizeof(cfg);
+-  cfg.failed = 1;
+-  uint64_t ctx = 0;
+-  if (embertone::call(EMBER_FG_OP_TONE_AHDR_CREATE, ctx, device.handle, env.data(), env.size(), &cfg, sizeof(cfg)) && ctx) {
+-    ctx_ = ctx;
+-    failed_ = cfg.failed != 0;
+-    strength_ = cfg.strength;
+-    peak_cap_ = cfg.peak_cap;
+-    gamma22_ = cfg.gamma22 > 0.5f;
+-    wexp_ = cfg.wexp;
+-    peak_ = cfg.peak;
+-  } else {
+-    Logger::warn("ember-autohdr: libEmberTone 없음(winemetal.so 옆) — 자동 HDR 끔");
+-  }
++EmberAutoHDR::EmberAutoHDR(WMT::Device device) : device_(device) {
++  auto pool = WMT::MakeAutoreleasePool();
++  auto s = env::getEnvVar("EMBER_AUTOHDR_STRENGTH");
++  if (!s.empty()) strength_ = std::clamp((float)std::atof(s.c_str()), 0.f, 200.f) / 100.f;
++  auto p = env::getEnvVar("EMBER_AUTOHDR_PEAK");
++  if (!p.empty()) peak_cap_ = std::max(0.f, (float)std::atof(p.c_str()));
++  gamma22_ = env::getEnvVar("EMBER_AUTOHDR_GAMMA") == "2.2";
++  log_ = env::getEnvVar("EMBER_AUTOHDR_LOG") == "1";
++  if (!ensurePipelines()) failed_ = true;
++  char line[200];
++  std::snprintf(line, sizeof(line), "ember-autohdr: %s strength=%.0f%% peak=%s gamma=%s", failed_ ? "FAILED" : "on",
++                strength_ * 100, peak_cap_ > 0 ? std::to_string(peak_cap_).c_str() : "display", gamma22_ ? "2.2" : "srgb");
++  Logger::info(line);
+ }
+ 
+-EmberAutoHDR::~EmberAutoHDR() {
+-  if (ctx_) embertone::call(EMBER_FG_OP_TONE_AHDR_DESTROY, ctx_, 0, nullptr, 0, nullptr, 0);
+-  ctx_ = 0;
++float
++EmberAutoHDR::wexp() const {
++  //
++  constexpr size_t n = sizeof(ember_autohdr_weights) / sizeof(float);
++  return ember_autohdr_weights[n - 4];
++}
++
++float
++EmberAutoHDR::peak(double edr_now) {
++  float target = (float)std::max(1.0, edr_now);
++  if (peak_cap_ > 0) target = std::min(target, std::max(1.f, peak_cap_));
++  //
++  peak_ = peak_ + (target - peak_) * 0.1f;
++  if (std::fabs(peak_ - target) < 0.005f) peak_ = target;
++  return peak_;
+ }
+ 
+ void
+-EmberAutoHDR::sync() {
+-  embertone::AhdrConfig cfg {};
+-  cfg.size = sizeof(cfg);
+-  cfg.failed = 1;
+-  uint64_t ctx = ctx_;
+-  if (embertone::call(EMBER_FG_OP_TONE_AHDR_CONFIG, ctx, 0, nullptr, 0, &cfg, sizeof(cfg))) failed_ = cfg.failed != 0;
++EmberAutoHDR::log(double edr_now, double edr_potential) {
++  if (!log_) return;
++  log_frames_++;
++  auto now = std::chrono::steady_clock::now();
++  if (!log_since_.time_since_epoch().count()) log_since_ = now;
++  double el = std::chrono::duration<double>(now - log_since_).count();
++  if (el < 5.0) return;
++  char line[200];
++  std::snprintf(line, sizeof(line), "ember-autohdr: frames=%.1f/s %ux%u peak=%.2f edr=%.2f potential=%.2f", log_frames_ / el, w_, h_,
++                peak_, edr_now, edr_potential);
++  Logger::info(line);
++  log_frames_ = 0;
++  log_since_ = now;
++}
++
++bool
++EmberAutoHDR::ensurePipelines() {
++  WMT::Reference<WMT::Error> error;
++  library_ = device_.newLibraryWithSource(std::string_view(ember_autohdr_shader_src), error);
++  if (!library_) {
++    Logger::err("ember-autohdr: shader compile failed");
++    return false;
++  }
++  return pso("fs_ember_ahdr_l1", WMTPixelFormatRGBA16Float, WMTPixelFormatR16Float) &&
++         pso("fs_ember_ahdr_reduce", WMTPixelFormatRGBA16Float) && pso("fs_ember_ahdr_glob", WMTPixelFormatRGBA16Float) &&
++         pso("fs_ember_ahdr_mlp", WMTPixelFormatRG16Float);   //
++}
++
++WMT::RenderPipelineState
++EmberAutoHDR::pso(const char *fs, WMTPixelFormat f0, WMTPixelFormat f1) {
++  for (auto &e : psos_)
++    if (e.fs == fs && e.f0 == f0 && e.f1 == f1) return e.pso;
++  auto pool = WMT::MakeAutoreleasePool();
++  WMT::Reference<WMT::Error> error;
++  auto vs = library_.newFunction("vs_ember_ahdr");
++  auto fn = library_.newFunction(fs);
++  WMT::Reference<WMT::RenderPipelineState> ps;
++  if (vs && fn) {
++    WMTRenderPipelineInfo info;
++    WMT::InitializeRenderPipelineInfo(info);
++    info.colors[0].pixel_format = f0;
++    if (f1 != WMTPixelFormatInvalid) info.colors[1].pixel_format = f1;
++    info.vertex_function = vs;
++    info.fragment_function = fn;
++    ps = device_.newRenderPipelineState(info, error);
++  }
++  if (!ps) Logger::err(std::string("ember-autohdr: pipeline ") + fs + " failed");
++  psos_.push_back({fs, f0, f1, ps});
++  return ps;
++}
++
++bool
++EmberAutoHDR::ensureTextures(uint32_t w, uint32_t h) {
++  if (w == w_ && h == h_ && gain_) return true;
++  auto make = [&](WMTPixelFormat f, uint32_t tw, uint32_t th) {
++    WMTTextureInfo info {};
++    info.pixel_format = f;
++    info.width = std::max(1u, tw);
++    info.height = std::max(1u, th);
++    info.depth = 1;
++    info.array_length = 1;
++    info.type = WMTTextureType2D;
++    info.mipmap_level_count = 1;
++    info.sample_count = 1;
++    info.usage = (WMTTextureUsage)(WMTTextureUsageShaderRead | WMTTextureUsageRenderTarget);
++    info.options = WMTResourceStorageModePrivate;   //
++    return device_.newTexture(info);
++  };
++  uint32_t w1 = (w + 3) / 4, h1 = (h + 3) / 4, w2 = (w1 + 3) / 4, h2 = (h1 + 3) / 4, w3 = (w2 + 3) / 4, h3 = (h2 + 3) / 4;
++  l1a_ = make(WMTPixelFormatRGBA16Float, w1, h1);
++  l1b_ = make(WMTPixelFormatR16Float, w1, h1);
++  l2_ = make(WMTPixelFormatRGBA16Float, w2, h2);
++  l3_ = make(WMTPixelFormatRGBA16Float, w3, h3);
++  l4_ = make(WMTPixelFormatRGBA16Float, (w3 + 3) / 4, (h3 + 3) / 4);
++  glob_ = make(WMTPixelFormatRGBA16Float, 1, 1);
++  gain_ = make(WMTPixelFormatRG16Float, w1, h1);
++  w_ = w;
++  h_ = h;
++  return l1a_ && l1b_ && l2_ && l3_ && l4_ && glob_ && gain_;
++}
++
++void
++EmberAutoHDR::pass(
++    WMT::CommandBuffer cmdbuf, const char *fs, WMT::Texture t0, WMT::Texture t1, std::vector<WMT::Texture> srcs,
++    const void *bytes, uint64_t len, std::function<void(WMT::RenderCommandEncoder)> *wait_fences
++) {
++  auto ps = pso(fs, t0.pixelFormat(), t1.handle ? t1.pixelFormat() : WMTPixelFormatInvalid);
++  if (!ps) return;
++  WMTRenderPassInfo info;
++  WMT::InitializeRenderPassInfo(info);
++  info.colors[0].load_action = WMTLoadActionDontCare;
++  info.colors[0].store_action = WMTStoreActionStore;
++  info.colors[0].texture = t0;
++  if (t1.handle) {
++    info.colors[1].load_action = WMTLoadActionDontCare;
++    info.colors[1].store_action = WMTStoreActionStore;
++    info.colors[1].texture = t1;
++  }
++  auto enc = cmdbuf.renderCommandEncoder(info);
++  if (wait_fences) (*wait_fences)(enc);   //
++  enc.setRenderPipelineState(ps);
++  for (uint8_t i = 0; i < srcs.size(); i++) enc.setFragmentTexture(srcs[i], i);
++  if (bytes) enc.setFragmentBytes(bytes, len, 0);
++  enc.setViewport({0, 0, (double)t0.width(), (double)t0.height(), 0, 1});
++  enc.drawPrimitives(WMTPrimitiveTypeTriangle, 0, 3);
++  enc.endEncoding();
+ }
+ 
+ WMT::Texture
+ EmberAutoHDR::encode(
+-    WMT::CommandBuffer cmdbuf, WMT::Texture backbuffer, bool source_is_srgb, const uint64_t *fences, uint32_t n_fences
++    WMT::CommandBuffer cmdbuf, WMT::Texture backbuffer, bool source_is_srgb,
++    std::function<void(WMT::RenderCommandEncoder)> &wait_fences
+ ) {
+-  if (!ctx_ || failed_ || !backbuffer.handle) return {};
+-  embertone::AhdrEncodeIn in;
+-  n_fences = std::min(n_fences, embertone::kMaxWaitFences);
+-  in.size = (uint32_t)(offsetof(embertone::AhdrEncodeIn, wait_fences) + 8 * n_fences);
+-  in.flags = source_is_srgb ? embertone::kAhdrSrcSRGB : 0;
+-  in.command_buffer = cmdbuf.handle;
+-  in.source = backbuffer.handle;
+-  in.n_wait_fences = n_fences;
+-  in.pad = 0;
+-  for (uint32_t i = 0; i < n_fences; i++) in.wait_fences[i] = fences[i];
+-  embertone::AhdrEncodeOut out {};
+-  out.size = sizeof(out);
+-  uint64_t ctx = ctx_;
+-  if (!embertone::call(EMBER_FG_OP_TONE_AHDR_ENCODE, ctx, 0, &in, in.size, &out, sizeof(out)) || !out.ok || !out.gain) {
+-    sync();   // texture allocation failure turns Flare off (as before)
++  if (failed_ || !backbuffer.handle) return {};
++  uint32_t w = (uint32_t)backbuffer.width(), h = (uint32_t)backbuffer.height();
++  if (!ensureTextures(w, h)) {
++    failed_ = true;
+     return {};
+   }
+-  WMT::Texture t;   // library-owned, borrowed
+-  t.handle = out.gain;
+-  return t;
+-}
+-
+-float
+-EmberAutoHDR::frame(double edr_now, double edr_potential) {
+-  if (!ctx_) return peak_;
+-  embertone::AhdrFrameIn in {};
+-  in.size = sizeof(in);
+-  in.log = 1;
+-  in.edr_now = edr_now;
+-  in.edr_potential = edr_potential;
+-  embertone::AhdrFrameOut out {};
+-  out.size = sizeof(out);
+-  uint64_t ctx = ctx_;
+-  if (embertone::call(EMBER_FG_OP_TONE_AHDR_FRAME, ctx, 0, &in, sizeof(in), &out, sizeof(out))) peak_ = out.peak;
+-  return peak_;
++  Params p {w, h, source_is_srgb ? 1u : 0u, 0};
++  pass(cmdbuf, "fs_ember_ahdr_l1", l1a_, l1b_, {backbuffer}, &p, sizeof(p), &wait_fences);
++  pass(cmdbuf, "fs_ember_ahdr_reduce", l2_, {}, {l1a_}, nullptr, 0, nullptr);
++  pass(cmdbuf, "fs_ember_ahdr_reduce", l3_, {}, {l2_}, nullptr, 0, nullptr);
++  pass(cmdbuf, "fs_ember_ahdr_reduce", l4_, {}, {l3_}, nullptr, 0, nullptr);
++  pass(cmdbuf, "fs_ember_ahdr_glob", glob_, {}, {l4_}, nullptr, 0, nullptr);
++  pass(cmdbuf, "fs_ember_ahdr_mlp", gain_, {}, {l1a_, l1b_, l2_, l3_, glob_}, nullptr, 0, nullptr);
++  return gain_;
+ }
+ 
+ } // namespace dxmt
+diff --git a/src/dxmt/ember_autohdr.hpp b/src/dxmt/ember_autohdr.hpp
+--- a/src/dxmt/ember_autohdr.hpp
++++ b/src/dxmt/ember_autohdr.hpp
+@@ -1,46 +1,70 @@
+ #pragma once
+ /*
+- * Ember Flare (Auto HDR, EMBER_AUTOHDR) glue, DXMT side.
+- *
+- * SDR swapchain + EDR-capable display (potential headroom > 1.25): the presenter switches the layer to RGBA16Float + extended
+- * linear sRGB and its present shader (fs_present_quad, present_autohdr branch) expands the highlights with a gain map. The gain
+- * map (1/4 size: stops G, knee k) comes from libEmberTone.dylib (EmberCore, separate proprietary library, not part of this tree)
+- * through winemetal's EmberFG_call (ember_neural.hpp). Without the library Flare reports failed() and the SDR path is used.
+- * Switches (Windows environment): EMBER_AUTOHDR=1, EMBER_AUTOHDR_STRENGTH, EMBER_AUTOHDR_PEAK, EMBER_AUTOHDR_GAMMA, EMBER_AUTOHDR_LOG.
+- *
+- * This library is free software; you can redistribute it and/or modify it under the terms of the GNU Lesser
+- * General Public License as published by the Free Software Foundation; either version 2.1 of the License, or
+- * (at your option) any later version.
++
++
++
++
++
++
++
++
++
++
++
++
++
+  */
+ #include "Metal.hpp"
++#include <chrono>
+ #include <cstdint>
++#include <functional>
++#include <string>
++#include <vector>
+ 
+ namespace dxmt {
+ 
+ class EmberAutoHDR {
+ public:
+   explicit EmberAutoHDR(WMT::Device device);
+-  ~EmberAutoHDR();
+ 
+-  /// EMBER_AUTOHDR=1 (read once)
++  //
+   static bool enabled();
+ 
+-  /// game frame → gain map (RG16Float, 1/4 size). Empty texture on failure. fences: this Present's game fences.
+-  WMT::Texture encode(WMT::CommandBuffer cmdbuf, WMT::Texture backbuffer, bool source_is_srgb, const uint64_t *fences, uint32_t n_fences);
++  //
++  WMT::Texture encode(
++      WMT::CommandBuffer cmdbuf, WMT::Texture backbuffer, bool source_is_srgb,
++      std::function<void(WMT::RenderCommandEncoder)> &wait_fences
++  );
+ 
+   bool failed() const { return failed_; }
+   float strength() const { return strength_; }
+   float peakCap() const { return peak_cap_; }
+   bool gamma22() const { return gamma22_; }
+-  float wexp() const { return wexp_; }
+-  /// once per presented frame while active: display peak (SDR-white multiple) following the headroom smoothly + periodic log
+-  float frame(double edr_now, double edr_potential);
++  float wexp() const;
++  //
++  float peak(double edr_now);
++  void log(double edr_now, double edr_potential);
+ 
+ private:
+-  void sync();
+-  uint64_t ctx_ = 0;
+-  float strength_ = 1.f, peak_cap_ = 0.f, wexp_ = 1.f, peak_ = 1.f;
+-  bool gamma22_ = false, failed_ = true;
++  struct Params { uint32_t src_w, src_h, flags, pad; };
++  bool ensurePipelines();
++  bool ensureTextures(uint32_t w, uint32_t h);
++  WMT::RenderPipelineState pso(const char *fs, WMTPixelFormat f0, WMTPixelFormat f1 = WMTPixelFormatInvalid);
++  void pass(
++      WMT::CommandBuffer cmdbuf, const char *fs, WMT::Texture t0, WMT::Texture t1, std::vector<WMT::Texture> srcs,
++      const void *bytes, uint64_t len, std::function<void(WMT::RenderCommandEncoder)> *wait_fences
++  );
++
++  WMT::Device device_;
++  WMT::Reference<WMT::Library> library_;
++  struct PsoEntry { std::string fs; WMTPixelFormat f0, f1; WMT::Reference<WMT::RenderPipelineState> pso; };
++  std::vector<PsoEntry> psos_;
++  WMT::Reference<WMT::Texture> l1a_, l1b_, l2_, l3_, l4_, glob_, gain_;
++  uint32_t w_ = 0, h_ = 0;
++  float strength_ = 1.f, peak_cap_ = 0.f, peak_ = 1.f;
++  bool gamma22_ = false, log_ = false, failed_ = false;
++  std::chrono::steady_clock::time_point log_since_ {};
++  uint64_t log_frames_ = 0;
+ };
+ 
+ } // namespace dxmt
+diff --git a/src/dxmt/ember_autohdr_shader.h b/src/dxmt/ember_autohdr_shader.h
+new file mode 100644
+--- /dev/null
++++ b/src/dxmt/ember_autohdr_shader.h
+@@ -0,0 +1,179 @@
++/* generated by Tools/autohdr/gen_shader.sh from ember_autohdr.metal - do not edit */
++static const char ember_autohdr_shader_src[] =
++"// Ember Auto HDR - highlight gain map (shared by DXMT presenter / Tools/autohdr bench).\n"
++"// ASCII ONLY: winemetal compiles this from source with NSASCIIStringEncoding.\n"
++"// Regenerate ember_autohdr_shader.h with Tools/autohdr/gen_shader.sh after editing.\n"
++"//\n"
++"// Passes (all tiny render passes, full-screen triangle):\n"
++"//   l1   : game frame -> L1a (RGBA16F: mean vY, max vmax, clip fraction, mean |grad vY|) + L1b (R16F: mean sat*vY), 4x4 blocks\n"
++"//   l2   : L1a -> L2 (4x4 of L1: mean, max, mean, mean)\n"
++"//   l3   : L2  -> L3 (4x4 of L2: mean, max, mean)\n"
++"//   l4   : L3  -> L4 (same reduce)\n"
++"//   glob : L4 -> 1x1 (frame mean vY, frame clip fraction)\n"
++"//   mlp  : per L1 block features (14) -> tiny MLP (14-16-16-2) -> gain map RG16F (G stops, knee k)\n"
++"// The present shader samples the gain map (bilinear) and applies T = log2(Y) + s*G*w(vmax), then the display roll-off.\n"
++"// Definitions must match Tools/autohdr/autohdr.py features()/Net/expand().\n"
++"#include <metal_stdlib>\n"
++"using namespace metal;\n"
++"\n"
++"struct ahdr_vout { float4 position [[position]]; float2 uv; };\n"
++"\n"
++"vertex ahdr_vout vs_ember_ahdr(uint vid [[vertex_id]]) {\n"
++"  ahdr_vout o;\n"
++"  float2 p = float2((vid << 1) & 2, vid & 2);\n"
++"  o.position = float4(p * float2(2, -2) + float2(-1, 1), 0, 1);\n"
++"  o.uv = p;\n"
++"  return o;\n"
++"}\n"
++"\n"
++"struct ahdr_params {\n"
++"  uint src_w, src_h;      // source (game frame) size\n"
++"  uint flags;             // 1 = source is sRGB format (reads are linear -> re-encode)\n"
++"  uint pad;\n"
++"};\n"
++"\n"
++"static inline float3 ahdr_srgb_encode(float3 l) {\n"
++"  l = clamp(l, 0.0, 1.0);\n"
++"  return select(1.055 * pow(l, 1.0 / 2.4) - 0.055, l * 12.92, l <= 0.0031308);\n"
++"}\n"
++"static inline float3 ahdr_srgb_decode(float3 v) {\n"
++"  return select(pow((v + 0.055) / 1.055, 2.4), v / 12.92, v <= 0.04045);\n"
++"}\n"
++"static inline float ahdr_vY(float3 v) { return dot(v, float3(0.2126, 0.7152, 0.0722)); }\n"
++"\n"
++"static inline float3 ahdr_fetch(texture2d<float, access::read> src, int2 p, constant ahdr_params &pr) {\n"
++"  p = clamp(p, int2(0), int2(pr.src_w - 1, pr.src_h - 1));\n"
++"  float3 v = src.read(uint2(p)).rgb;\n"
++"  if (pr.flags & 1) v = ahdr_srgb_encode(v);\n"
++"  return clamp(v, 0.0, 1.0);\n"
++"}\n"
++"\n"
++"struct ahdr_l1_out { half4 a [[color(0)]]; half b [[color(1)]]; };\n"
++"\n"
++"// One fragment = one 4x4 block. Walks the block row by row keeping only the current and next row (low register\n"
++"// pressure); gradient uses the right/below neighbour (edge pixel repeats at the frame edge -> 0, same as torch's pad).\n"
++"fragment ahdr_l1_out fs_ember_ahdr_l1(ahdr_vout in [[stage_in]],\n"
++"                                      texture2d<float, access::read> src [[texture(0)]],\n"
++"                                      constant ahdr_params &pr [[buffer(0)]]) {\n"
++"  int2 b = int2(in.position.xy) * 4;\n"
++"  int2 lim = int2(pr.src_w - 1, pr.src_h - 1);\n"
++"  float cy[5], ny[5];\n"
++"  float3 cv[4], nv[4];\n"
++"  for (int x = 0; x < 5; x++) {\n"
++"    float3 v = ahdr_fetch(src, b + int2(x, 0), pr);\n"
++"    cy[x] = ahdr_vY(v);\n"
++"    if (x < 4) cv[x] = v;\n"
++"  }\n"
++"  float s_vy = 0, m_vmax = 0, s_clip = 0, s_g = 0, s_sat = 0, n = 0;\n"
++"  for (int y = 0; y < 4; y++) {\n"
++"    for (int x = 0; x < 5; x++) {\n"
++"      float3 v = ahdr_fetch(src, b + int2(x, y + 1), pr);\n"
++"      ny[x] = ahdr_vY(v);\n"
++"      if (x < 4) nv[x] = v;\n"
++"    }\n"
++"    if (b.y + y <= lim.y) {\n"
++"      for (int x = 0; x < 4; x++) {\n"
++"        if (b.x + x > lim.x) continue;\n"
++"        float3 v = cv[x];\n"
++"        float vmax = max3(v.r, v.g, v.b), vmin = min3(v.r, v.g, v.b);\n"
++"        float2 l = ahdr_srgb_decode(float3(vmax, vmin, 0)).xy;   // decode is monotonic: lin max/min = decode(max/min)\n"
++"        float sat = (l.x - l.y) / (l.x + 1e-3);\n"
++"        float g = abs(cy[x + 1] - cy[x]) + abs(ny[x] - cy[x]);\n"
++"        s_vy += cy[x]; m_vmax = max(m_vmax, vmax); s_clip += vmax >= 0.98 ? 1.0 : 0.0; s_g += g; s_sat += sat * cy[x]; n += 1;\n"
++"      }\n"
++"    }\n"
++"    for (int x = 0; x < 5; x++) { cy[x] = ny[x]; if (x < 4) cv[x] = nv[x]; }\n"
++"  }\n"
++"  n = max(n, 1.0);\n"
++"  ahdr_l1_out o;\n"
++"  o.a = half4(s_vy / n, m_vmax, s_clip / n, s_g / n);\n"
++"  o.b = half(s_sat / n);\n"
++"  return o;\n"
++"}\n"
++"\n"
++"// 4x4 reduce: x mean, y max, z mean, w mean (partial blocks at the edge average only valid texels)\n"
++"fragment half4 fs_ember_ahdr_reduce(ahdr_vout in [[stage_in]], texture2d<half, access::read> src [[texture(0)]]) {\n"
++"  int2 b = int2(in.position.xy) * 4;\n"
++"  int w = src.get_width(), h = src.get_height();\n"
++"  float4 s = 0; float m = 0, n = 0;\n"
++"  for (int y = 0; y < 4; y++)\n"
++"    for (int x = 0; x < 4; x++) {\n"
++"      int2 p = b + int2(x, y);\n"
++"      if (p.x >= w || p.y >= h) continue;\n"
++"      float4 t = float4(src.read(uint2(p)));\n"
++"      s += t; m = max(m, t.y); n += 1;\n"
++"    }\n"
++"  s /= max(n, 1.0);\n"
++"  return half4(s.x, m, s.z, s.w);\n"
++"}\n"
++"\n"
++"// frame means of vY and clip fraction: average of the L4 texels (L3 reduced once more, <= 16 x 9 at 4K)\n"
++"fragment half4 fs_ember_ahdr_glob(ahdr_vout in [[stage_in]], texture2d<half, access::read> l4 [[texture(0)]]) {\n"
++"  int w = l4.get_width(), h = l4.get_height();\n"
++"  float2 s = 0;\n"
++"  for (int y = 0; y < h; y++)\n"
++"    for (int x = 0; x < w; x++) { float4 t = float4(l4.read(uint2(x, y))); s += float2(t.x, t.z); }\n"
++"  s /= float(max(w * h, 1));\n"
++"  return half4(s.x, s.y, 0, 1);\n"
++"}\n"
++"\n"
++"#define AHDR_NF 14\n"
++"#define AHDR_H 16\n"
++"// Flat weight layout (float): mu[14] sd[14] w0[16][14] b0[16] w1[16][16] b1[16] w2[2][16] b2[2] wexp gscale kmin krange\n"
++"#define AHDR_MU 0\n"
++"#define AHDR_SD 14\n"
++"#define AHDR_W0 28\n"
++"#define AHDR_B0 252\n"
++"#define AHDR_W1 268\n"
++"#define AHDR_B1 524\n"
++"#define AHDR_W2 540\n"
++"#define AHDR_B2 572\n"
++"#define AHDR_GS 575\n"
++"#define AHDR_KMIN 576\n"
++"#define AHDR_KR 577\n"
++"// The generator (gen_shader.sh / ahdr_bench) inserts \"constant float AHDR_WF[578] = {...};\" at the marker below so the\n"
++"// weights become compile-time constants (folded into the instruction stream; 3x faster than a buffer at 4K).\n"
++"constant float AHDR_WF[578] = {0.467352778,0.567440212,0.0343587399,0.0381546617,0.161473289,0.467352837,0.640886724,0.0343587399,0.0381546617,0.467352837,0.754844487,0.0343587399,0.467352778,0.0343587399,0.197849289,0.211486682,0.173469454,0.0656459704,0.123463593,0.18259789,0.207233608,0.152453944,0.0506874397,0.156741768,0.196136758,0.121018007,0.103458181,0.0733011961,0.110642083,0.181379512,0.0819073543,-0.272134602,-0.703024745,0.231134385,0.0393928289,0.400440067,0.368385226,0.263209969,0.0431553163,0.103018105,-0.540238261,-0.141211599,-0.126284137,0.0178993419,0.129466102,0.257812321,-0.754876733,-0.117023766,0.113044932,0.137772813,-0.0264648963,0.203543812,0.024939755,-0.144623891,-0.0165442806,-0.560660183,-0.101673804,0.446192294,-0.192554578,0.373554558,-0.585928738,-0.264612317,0.388600647,-0.341601491,-0.3495031,-0.194222465,0.523984075,-0.637558818,-0.122875124,-0.381821334,0.246698439,-0.0471369326,-0.189478055,-0.56103158,0.0807704106,0.268373549,0.13394253,-0.283759385,-0.120064802,0.0984829739,0.253708929,-0.436272919,0.333411604,0.255032986,0.0307827964,-0.161120623,-0.154465482,-0.0852439702,0.573553324,0.0549260303,-0.0916199237,0.0882836729,0.0422706194,-0.0905185044,0.0774199292,0.0810305104,0.859310985,0.415674359,-0.25995633,0.0553738363,0.170531005,0.363322645,0.795024395,0.150364235,0.213425741,-0.143258542,-0.421800405,-0.290622622,-0.103683293,0.30442366,0.658953488,-0.12048886,-0.158958048,-0.104207061,-0.0829888657,-0.321934551,-0.129882932,-0.302030712,0.264349222,0.241425648,0.312474489,0.161740407,0.0699249879,-0.164442375,0.64977181,0.0717066526,-0.531771541,0.0722658187,0.284976602,0.439874023,0.441934198,-0.390717268,0.0187813323,0.0888695493,-0.34883824,-0.374379873,0.114471547,0.0814259946,-0.51957041,0.123096384,-0.104317479,0.418400109,0.160015166,-0.366604477,-0.106339872,0.000627242087,0.196309298,-0.0776791796,-0.0210152101,-0.148111194,-0.114707254,-0.0986058637,-0.480472624,-0.288391858,0.0888088942,-0.175616354,-0.809873164,-0.551320195,-0.117123634,0.138106167,-0.101796471,-0.355943024,0.3826814,-0.237507179,-0.159720287,-0.411671907,-0.227956787,-0.217786387,0.145341352,-0.0163169019,0.360974252,-0.172545105,-0.950317919,-0.143391371,0.00716610812,0.0370940082,0.0331923701,-0.146034971,-0.354518086,-0.211561978,-0.289674878,0.108469613,-0.691825092,-0.305373549,-0.0563990548,0.160031319,-0.555956006,-0.542187214,0.304520547,0.0391670316,0.477505267,-0.451212585,0.215962708,-0.00947177224,-0.451940894,0.00538761821,-0.454965264,0.0490279421,0.295275599,0.215724885,1.01366699,-0.10868679,-0.126314893,0.281175822,-0.190586105,-0.18688716,0.340662897,-0.0405064784,0.16822727,0.0355122425,0.265882134,0.240107894,0.212600768,-0.0854346603,-0.155272946,-0.0640930012,-0.0844009891,0.128582671,-0.211572304,0.0915811583,-0.144446358,-0.0354253054,-0.408952177,-0.22254169,-0.0619918779,0.22099188,-0.210484251,-0.239290193,0.685643017,0.225476876,-0.0897822604,-0.265608788,-0.599968076,0.108131371,-0.0709752664,0.128726602,0.378357381,0.0971225724,-0.141392455,-0.135850132,-0.35022524,-0.167728722,-0.178171307,-0.0468248017,-0.105750643,-0.286758304,0.184178323,-0.10459999,0.133897215,0.202969417,0.749891281,0.191346928,-0.180129573,0.10032519,0.179258168,-0.130684897,-0.114268102,0.0539822988,-0.145205468,0.488635629,0.00620649708,0.666710734,0.0153265586,0.0298461691,0.109756239,-0.145091295,-0.0258577634,-0.115081273,-0.266061485,0.124214992,0.727772892,-0.187638849,-0.00781070441,0.11501877,-0.135127202,-0.228520885,-0.202071965,0.939930141,-0.457736224,-0.102093518,0.411194682,-0.39366737,-0.173935622,-0.572895169,-0.558600843,0.670112431,0.460082978,-0.115303561,0.0822030008,0.354587078,0.889161468,0.622768342,0.057851892,-0.771957457,0.0134557597,0.626400352,0.364964277,0.130091265,-0.0120434863,0.741918325,-0.228737906,0.0573470853,-0.0950149819,-0.276240945,0.591757596,0.155879542,0.280490637,0.625765264,0.0235649273,-0.836187184,-0.0918457955,0.795942426,0.573995948,0.375840753,-0.0658802167,0.788694561,-0.0321570113,-0.147687137,-0.248039812,0.0414351709,0.642466664,0.170631662,0.442162782,0.449297369,0.107322268,-0.830997229,0.36038363,0.40510571,0.259854913,0.168261304,-0.149267077,1.10012746,-0.208489835,-0.218816802,1.04479074,0.405902386,0.0370485224,0.0366998017,0.243688151,0.274715692,0.156340137,0.98463285,-0.0820218325,0.64359498,0.0448894724,0.0435516424,0.215516686,0.159248441,-0.0666688234,-0.051093407,0.147432745,-0.119443521,0.121316671,0.351552933,0.116988726,0.212246135,0.0525253229,-0.697508574,-0.482434332,-0.24430792,0.487539887,-0.0328661278,-0.217384577,-0.070000723,0.19071418,0.362203449,-0.0245683771,-0.0622720942,-0.28313145,-0.291300774,0.0884138644,-0.134086058,-0.195659742,0.3519274,0.0986071825,-0.322841048,-0.362870872,0.0026169857,-0.337455869,0.0988993049,-0.172881141,0.000532956212,0.447981,0.262049854,0.105347455,0.371847391,0.258576334,0.512607217,-0.0308712944,-0.0470978804,-0.21695511,0.687335908,0.599398613,0.365517139,0.268895715,0.153172329,-0.51660645,0.22703968,-0.0221878532,0.0114016747,-0.116661824,0.274674565,-0.581958354,-0.660035431,-0.246210456,0.66029346,0.308516115,0.00432300242,0.379483193,-0.38452968,0.0234167371,-0.25677985,-0.101650409,0.204542562,0.953168035,0.292562038,0.00642812252,0.31901449,0.422206551,0.476125836,0.00217626453,0.621457696,-0.332937092,0.611904383,0.566518009,0.0160116106,-0.0640277192,0.674194813,0.138403103,0.0733658671,-0.0843217671,0.308046818,-0.0931963623,-0.424875587,0.0917977989,0.0216834228,-0.244567961,-0.320650697,-0.283493727,-0.20175752,0.0414848365,-0.109025367,-0.311678231,-0.228035048,-0.230382428,-0.101060264,0.375487417,0.417848498,0.174537942,-0.199447975,0.299659133,0.445153713,0.140631348,-0.423708558,-0.135750413,0.258218616,0.0784260929,0.149862885,-0.0722014084,0.487105608,-0.0465326309,0.046878241,0.909403026,-0.0854090676,-0.240594953,0.184647456,-0.242785767,-0.0161200687,-0.435703754,1.06686473,-0.352139175,0.156612486,0.0734663308,0.0976272747,-0.0778059885,-0.46004495,-0.101422049,-0.215725854,0.515518367,0.268943638,0.429170787,0.376392066,0.271801174,0.587713718,0.156984121,0.0121882623,-0.13299638,0.360475719,0.218703955,-0.0139373513,0.164695546,0.229174808,0.299203187,0.337646842,-0.649734378,0.246887192,-0.323740065,-0.286629647,0.273856223,0.0375222601,0.341867357,-1.19611168,0.264884323,-0.0685314015,-0.356011957,0.319168359,-0.105476096,0.246847406,-0.274828196,-0.110137001,0.472323656,0.34434396,0.0717617199,0.349264085,0.516602576,0.538260758,0.185095668,0.247130588,-0.102917559,0.528779209,0.456282467,-0.0113699781,0.294715226,0.293398172,-0.0293868482,-0.218819633,0.145868883,0.107326724,-0.103837244,0.0371324606,0.0977338254,0.161275357,0.341556638,-0.0214332212,-0.0123197744,0.0227119382,0.248618856,0.114910215,0.050664641,0.24889344,0.0614124089,-1.02879238,-0.151055112,-0.0239409097,-0.240458995,-0.256610543,0.132984236,-0.190139279,0.418126941,-0.272121936,0.128692076,-0.363614023,-0.0461396612,-0.262841523,0.410644323,-0.216851726,-0.812315106,0.355713189,0.925739706,0.774097681,-0.383717865,0.0421637408,0.114165649,0.000256378873,-0.124064654,-0.371319503,-0.0308044218,0.185536489,-1.12422395,0.195579097,0.603953362,-0.11440523,0.0443128385,0.229947895,0.824094176,1.5,0.449999988,0.5};\n"
++"\n"
++"// bilinear sample of a coarser level at the L1 block centre (torch interpolate, align_corners=False)\n"
++"static inline float4 ahdr_up(texture2d<half, access::sample> t, float2 p1, float scale) {\n"
++"  constexpr sampler ls(coord::pixel, filter::linear, address::clamp_to_edge);\n"
++"  return float4(t.sample(ls, (p1 + 0.5) / scale));\n"
++"}\n"
++"\n"
++"fragment half4 fs_ember_ahdr_mlp(ahdr_vout in [[stage_in]],\n"
++"                                 texture2d<half, access::read> l1a [[texture(0)]],\n"
++"                                 texture2d<half, access::read> l1b [[texture(1)]],\n"
++"                                 texture2d<half, access::sample> l2 [[texture(2)]],\n"
++"                                 texture2d<half, access::sample> l3 [[texture(3)]],\n"
++"                                 texture2d<half, access::read> gl [[texture(4)]]) {\n"
++"  uint2 p = uint2(in.position.xy);\n"
++"  float4 a = float4(l1a.read(p));\n"
++"  float b = float(l1b.read(p).r);\n"
++"  float4 u2 = ahdr_up(l2, float2(p), 4.0);\n"
++"  float4 u3 = ahdr_up(l3, float2(p), 16.0);\n"
++"  float4 g = float4(gl.read(uint2(0, 0)));\n"
++"  float f[AHDR_NF] = {a.x, a.y, a.z, a.w, b, u2.x, u2.y, u2.z, u2.w, u3.x, u3.y, u3.z, g.x, g.y};\n"
++"  half fh[AHDR_NF];\n"
++"  for (int i = 0; i < AHDR_NF; i++) fh[i] = half((f[i] - AHDR_WF[AHDR_MU + i]) / AHDR_WF[AHDR_SD + i]);\n"
++"  half h0[AHDR_H], h1[AHDR_H];\n"
++"  for (int j = 0; j < AHDR_H; j++) {\n"
++"    half s = half(AHDR_WF[AHDR_B0 + j]);\n"
++"    for (int i = 0; i < AHDR_NF; i++) s = fma(half(AHDR_WF[AHDR_W0 + j * AHDR_NF + i]), fh[i], s);\n"
++"    h0[j] = max(s, 0.0h);\n"
++"  }\n"
++"  for (int j = 0; j < AHDR_H; j++) {\n"
++"    half s = half(AHDR_WF[AHDR_B1 + j]);\n"
++"    for (int i = 0; i < AHDR_H; i++) s = fma(half(AHDR_WF[AHDR_W1 + j * AHDR_H + i]), h0[i], s);\n"
++"    h1[j] = max(s, 0.0h);\n"
++"  }\n"
++"  float o0 = AHDR_WF[AHDR_B2], o1 = AHDR_WF[AHDR_B2 + 1];\n"
++"  for (int i = 0; i < AHDR_H; i++) { o0 += AHDR_WF[AHDR_W2 + i] * float(h1[i]); o1 += AHDR_WF[AHDR_W2 + AHDR_H + i] * float(h1[i]); }\n"
++"  float G = (o0 > 20.0 ? o0 : log(1.0 + exp(o0))) * AHDR_WF[AHDR_GS];   // softplus * 1.5\n"
++"  float k = AHDR_WF[AHDR_KMIN] + AHDR_WF[AHDR_KR] / (1.0 + exp(-o1));   // sigmoid * 0.5 + 0.45\n"
++"  return half4(G, k, 0, 1);\n"
++"}\n"
++"\n"
++;
++/* pixel weight exponent (ahdr_weights[n-4]) */
++static const float ember_autohdr_wexp = 0.824094176f;
+diff --git a/src/dxmt/ember_autohdr_weights.h b/src/dxmt/ember_autohdr_weights.h
+new file mode 100644
+--- /dev/null
++++ b/src/dxmt/ember_autohdr_weights.h
+@@ -0,0 +1,77 @@
++/*
++                                                                                                                          */
++static const float ember_autohdr_weights[578] = {
++  4.67352778e-01f, 5.67440212e-01f, 3.43587399e-02f, 3.81546617e-02f, 1.61473289e-01f, 4.67352837e-01f, 6.40886724e-01f, 3.43587399e-02f,
++  3.81546617e-02f, 4.67352837e-01f, 7.54844487e-01f, 3.43587399e-02f, 4.67352778e-01f, 3.43587399e-02f, 1.97849289e-01f, 2.11486682e-01f,
++  1.73469454e-01f, 6.56459704e-02f, 1.23463593e-01f, 1.82597890e-01f, 2.07233608e-01f, 1.52453944e-01f, 5.06874397e-02f, 1.56741768e-01f,
++  1.96136758e-01f, 1.21018007e-01f, 1.03458181e-01f, 7.33011961e-02f, 1.10642083e-01f, 1.81379512e-01f, 8.19073543e-02f, -2.72134602e-01f,
++  -7.03024745e-01f, 2.31134385e-01f, 3.93928289e-02f, 4.00440067e-01f, 3.68385226e-01f, 2.63209969e-01f, 4.31553163e-02f, 1.03018105e-01f,
++  -5.40238261e-01f, -1.41211599e-01f, -1.26284137e-01f, 1.78993419e-02f, 1.29466102e-01f, 2.57812321e-01f, -7.54876733e-01f, -1.17023766e-01f,
++  1.13044932e-01f, 1.37772813e-01f, -2.64648963e-02f, 2.03543812e-01f, 2.49397550e-02f, -1.44623891e-01f, -1.65442806e-02f, -5.60660183e-01f,
++  -1.01673804e-01f, 4.46192294e-01f, -1.92554578e-01f, 3.73554558e-01f, -5.85928738e-01f, -2.64612317e-01f, 3.88600647e-01f, -3.41601491e-01f,
++  -3.49503100e-01f, -1.94222465e-01f, 5.23984075e-01f, -6.37558818e-01f, -1.22875124e-01f, -3.81821334e-01f, 2.46698439e-01f, -4.71369326e-02f,
++  -1.89478055e-01f, -5.61031580e-01f, 8.07704106e-02f, 2.68373549e-01f, 1.33942530e-01f, -2.83759385e-01f, -1.20064802e-01f, 9.84829739e-02f,
++  2.53708929e-01f, -4.36272919e-01f, 3.33411604e-01f, 2.55032986e-01f, 3.07827964e-02f, -1.61120623e-01f, -1.54465482e-01f, -8.52439702e-02f,
++  5.73553324e-01f, 5.49260303e-02f, -9.16199237e-02f, 8.82836729e-02f, 4.22706194e-02f, -9.05185044e-02f, 7.74199292e-02f, 8.10305104e-02f,
++  8.59310985e-01f, 4.15674359e-01f, -2.59956330e-01f, 5.53738363e-02f, 1.70531005e-01f, 3.63322645e-01f, 7.95024395e-01f, 1.50364235e-01f,
++  2.13425741e-01f, -1.43258542e-01f, -4.21800405e-01f, -2.90622622e-01f, -1.03683293e-01f, 3.04423660e-01f, 6.58953488e-01f, -1.20488860e-01f,
++  -1.58958048e-01f, -1.04207061e-01f, -8.29888657e-02f, -3.21934551e-01f, -1.29882932e-01f, -3.02030712e-01f, 2.64349222e-01f, 2.41425648e-01f,
++  3.12474489e-01f, 1.61740407e-01f, 6.99249879e-02f, -1.64442375e-01f, 6.49771810e-01f, 7.17066526e-02f, -5.31771541e-01f, 7.22658187e-02f,
++  2.84976602e-01f, 4.39874023e-01f, 4.41934198e-01f, -3.90717268e-01f, 1.87813323e-02f, 8.88695493e-02f, -3.48838240e-01f, -3.74379873e-01f,
++  1.14471547e-01f, 8.14259946e-02f, -5.19570410e-01f, 1.23096384e-01f, -1.04317479e-01f, 4.18400109e-01f, 1.60015166e-01f, -3.66604477e-01f,
++  -1.06339872e-01f, 6.27242087e-04f, 1.96309298e-01f, -7.76791796e-02f, -2.10152101e-02f, -1.48111194e-01f, -1.14707254e-01f, -9.86058637e-02f,
++  -4.80472624e-01f, -2.88391858e-01f, 8.88088942e-02f, -1.75616354e-01f, -8.09873164e-01f, -5.51320195e-01f, -1.17123634e-01f, 1.38106167e-01f,
++  -1.01796471e-01f, -3.55943024e-01f, 3.82681400e-01f, -2.37507179e-01f, -1.59720287e-01f, -4.11671907e-01f, -2.27956787e-01f, -2.17786387e-01f,
++  1.45341352e-01f, -1.63169019e-02f, 3.60974252e-01f, -1.72545105e-01f, -9.50317919e-01f, -1.43391371e-01f, 7.16610812e-03f, 3.70940082e-02f,
++  3.31923701e-02f, -1.46034971e-01f, -3.54518086e-01f, -2.11561978e-01f, -2.89674878e-01f, 1.08469613e-01f, -6.91825092e-01f, -3.05373549e-01f,
++  -5.63990548e-02f, 1.60031319e-01f, -5.55956006e-01f, -5.42187214e-01f, 3.04520547e-01f, 3.91670316e-02f, 4.77505267e-01f, -4.51212585e-01f,
++  2.15962708e-01f, -9.47177224e-03f, -4.51940894e-01f, 5.38761821e-03f, -4.54965264e-01f, 4.90279421e-02f, 2.95275599e-01f, 2.15724885e-01f,
++  1.01366699e+00f, -1.08686790e-01f, -1.26314893e-01f, 2.81175822e-01f, -1.90586105e-01f, -1.86887160e-01f, 3.40662897e-01f, -4.05064784e-02f,
++  1.68227270e-01f, 3.55122425e-02f, 2.65882134e-01f, 2.40107894e-01f, 2.12600768e-01f, -8.54346603e-02f, -1.55272946e-01f, -6.40930012e-02f,
++  -8.44009891e-02f, 1.28582671e-01f, -2.11572304e-01f, 9.15811583e-02f, -1.44446358e-01f, -3.54253054e-02f, -4.08952177e-01f, -2.22541690e-01f,
++  -6.19918779e-02f, 2.20991880e-01f, -2.10484251e-01f, -2.39290193e-01f, 6.85643017e-01f, 2.25476876e-01f, -8.97822604e-02f, -2.65608788e-01f,
++  -5.99968076e-01f, 1.08131371e-01f, -7.09752664e-02f, 1.28726602e-01f, 3.78357381e-01f, 9.71225724e-02f, -1.41392455e-01f, -1.35850132e-01f,
++  -3.50225240e-01f, -1.67728722e-01f, -1.78171307e-01f, -4.68248017e-02f, -1.05750643e-01f, -2.86758304e-01f, 1.84178323e-01f, -1.04599990e-01f,
++  1.33897215e-01f, 2.02969417e-01f, 7.49891281e-01f, 1.91346928e-01f, -1.80129573e-01f, 1.00325190e-01f, 1.79258168e-01f, -1.30684897e-01f,
++  -1.14268102e-01f, 5.39822988e-02f, -1.45205468e-01f, 4.88635629e-01f, 6.20649708e-03f, 6.66710734e-01f, 1.53265586e-02f, 2.98461691e-02f,
++  1.09756239e-01f, -1.45091295e-01f, -2.58577634e-02f, -1.15081273e-01f, -2.66061485e-01f, 1.24214992e-01f, 7.27772892e-01f, -1.87638849e-01f,
++  -7.81070441e-03f, 1.15018770e-01f, -1.35127202e-01f, -2.28520885e-01f, -2.02071965e-01f, 9.39930141e-01f, -4.57736224e-01f, -1.02093518e-01f,
++  4.11194682e-01f, -3.93667370e-01f, -1.73935622e-01f, -5.72895169e-01f, -5.58600843e-01f, 6.70112431e-01f, 4.60082978e-01f, -1.15303561e-01f,
++  8.22030008e-02f, 3.54587078e-01f, 8.89161468e-01f, 6.22768342e-01f, 5.78518920e-02f, -7.71957457e-01f, 1.34557597e-02f, 6.26400352e-01f,
++  3.64964277e-01f, 1.30091265e-01f, -1.20434863e-02f, 7.41918325e-01f, -2.28737906e-01f, 5.73470853e-02f, -9.50149819e-02f, -2.76240945e-01f,
++  5.91757596e-01f, 1.55879542e-01f, 2.80490637e-01f, 6.25765264e-01f, 2.35649273e-02f, -8.36187184e-01f, -9.18457955e-02f, 7.95942426e-01f,
++  5.73995948e-01f, 3.75840753e-01f, -6.58802167e-02f, 7.88694561e-01f, -3.21570113e-02f, -1.47687137e-01f, -2.48039812e-01f, 4.14351709e-02f,
++  6.42466664e-01f, 1.70631662e-01f, 4.42162782e-01f, 4.49297369e-01f, 1.07322268e-01f, -8.30997229e-01f, 3.60383630e-01f, 4.05105710e-01f,
++  2.59854913e-01f, 1.68261304e-01f, -1.49267077e-01f, 1.10012746e+00f, -2.08489835e-01f, -2.18816802e-01f, 1.04479074e+00f, 4.05902386e-01f,
++  3.70485224e-02f, 3.66998017e-02f, 2.43688151e-01f, 2.74715692e-01f, 1.56340137e-01f, 9.84632850e-01f, -8.20218325e-02f, 6.43594980e-01f,
++  4.48894724e-02f, 4.35516424e-02f, 2.15516686e-01f, 1.59248441e-01f, -6.66688234e-02f, -5.10934070e-02f, 1.47432745e-01f, -1.19443521e-01f,
++  1.21316671e-01f, 3.51552933e-01f, 1.16988726e-01f, 2.12246135e-01f, 5.25253229e-02f, -6.97508574e-01f, -4.82434332e-01f, -2.44307920e-01f,
++  4.87539887e-01f, -3.28661278e-02f, -2.17384577e-01f, -7.00007230e-02f, 1.90714180e-01f, 3.62203449e-01f, -2.45683771e-02f, -6.22720942e-02f,
++  -2.83131450e-01f, -2.91300774e-01f, 8.84138644e-02f, -1.34086058e-01f, -1.95659742e-01f, 3.51927400e-01f, 9.86071825e-02f, -3.22841048e-01f,
++  -3.62870872e-01f, 2.61698570e-03f, -3.37455869e-01f, 9.88993049e-02f, -1.72881141e-01f, 5.32956212e-04f, 4.47981000e-01f, 2.62049854e-01f,
++  1.05347455e-01f, 3.71847391e-01f, 2.58576334e-01f, 5.12607217e-01f, -3.08712944e-02f, -4.70978804e-02f, -2.16955110e-01f, 6.87335908e-01f,
++  5.99398613e-01f, 3.65517139e-01f, 2.68895715e-01f, 1.53172329e-01f, -5.16606450e-01f, 2.27039680e-01f, -2.21878532e-02f, 1.14016747e-02f,
++  -1.16661824e-01f, 2.74674565e-01f, -5.81958354e-01f, -6.60035431e-01f, -2.46210456e-01f, 6.60293460e-01f, 3.08516115e-01f, 4.32300242e-03f,
++  3.79483193e-01f, -3.84529680e-01f, 2.34167371e-02f, -2.56779850e-01f, -1.01650409e-01f, 2.04542562e-01f, 9.53168035e-01f, 2.92562038e-01f,
++  6.42812252e-03f, 3.19014490e-01f, 4.22206551e-01f, 4.76125836e-01f, 2.17626453e-03f, 6.21457696e-01f, -3.32937092e-01f, 6.11904383e-01f,
++  5.66518009e-01f, 1.60116106e-02f, -6.40277192e-02f, 6.74194813e-01f, 1.38403103e-01f, 7.33658671e-02f, -8.43217671e-02f, 3.08046818e-01f,
++  -9.31963623e-02f, -4.24875587e-01f, 9.17977989e-02f, 2.16834228e-02f, -2.44567961e-01f, -3.20650697e-01f, -2.83493727e-01f, -2.01757520e-01f,
++  4.14848365e-02f, -1.09025367e-01f, -3.11678231e-01f, -2.28035048e-01f, -2.30382428e-01f, -1.01060264e-01f, 3.75487417e-01f, 4.17848498e-01f,
++  1.74537942e-01f, -1.99447975e-01f, 2.99659133e-01f, 4.45153713e-01f, 1.40631348e-01f, -4.23708558e-01f, -1.35750413e-01f, 2.58218616e-01f,
++  7.84260929e-02f, 1.49862885e-01f, -7.22014084e-02f, 4.87105608e-01f, -4.65326309e-02f, 4.68782410e-02f, 9.09403026e-01f, -8.54090676e-02f,
++  -2.40594953e-01f, 1.84647456e-01f, -2.42785767e-01f, -1.61200687e-02f, -4.35703754e-01f, 1.06686473e+00f, -3.52139175e-01f, 1.56612486e-01f,
++  7.34663308e-02f, 9.76272747e-02f, -7.78059885e-02f, -4.60044950e-01f, -1.01422049e-01f, -2.15725854e-01f, 5.15518367e-01f, 2.68943638e-01f,
++  4.29170787e-01f, 3.76392066e-01f, 2.71801174e-01f, 5.87713718e-01f, 1.56984121e-01f, 1.21882623e-02f, -1.32996380e-01f, 3.60475719e-01f,
++  2.18703955e-01f, -1.39373513e-02f, 1.64695546e-01f, 2.29174808e-01f, 2.99203187e-01f, 3.37646842e-01f, -6.49734378e-01f, 2.46887192e-01f,
++  -3.23740065e-01f, -2.86629647e-01f, 2.73856223e-01f, 3.75222601e-02f, 3.41867357e-01f, -1.19611168e+00f, 2.64884323e-01f, -6.85314015e-02f,
++  -3.56011957e-01f, 3.19168359e-01f, -1.05476096e-01f, 2.46847406e-01f, -2.74828196e-01f, -1.10137001e-01f, 4.72323656e-01f, 3.44343960e-01f,
++  7.17617199e-02f, 3.49264085e-01f, 5.16602576e-01f, 5.38260758e-01f, 1.85095668e-01f, 2.47130588e-01f, -1.02917559e-01f, 5.28779209e-01f,
++  4.56282467e-01f, -1.13699781e-02f, 2.94715226e-01f, 2.93398172e-01f, -2.93868482e-02f, -2.18819633e-01f, 1.45868883e-01f, 1.07326724e-01f,
++  -1.03837244e-01f, 3.71324606e-02f, 9.77338254e-02f, 1.61275357e-01f, 3.41556638e-01f, -2.14332212e-02f, -1.23197744e-02f, 2.27119382e-02f,
++  2.48618856e-01f, 1.14910215e-01f, 5.06646410e-02f, 2.48893440e-01f, 6.14124089e-02f, -1.02879238e+00f, -1.51055112e-01f, -2.39409097e-02f,
++  -2.40458995e-01f, -2.56610543e-01f, 1.32984236e-01f, -1.90139279e-01f, 4.18126941e-01f, -2.72121936e-01f, 1.28692076e-01f, -3.63614023e-01f,
++  -4.61396612e-02f, -2.62841523e-01f, 4.10644323e-01f, -2.16851726e-01f, -8.12315106e-01f, 3.55713189e-01f, 9.25739706e-01f, 7.74097681e-01f,
++  -3.83717865e-01f, 4.21637408e-02f, 1.14165649e-01f, 2.56378873e-04f, -1.24064654e-01f, -3.71319503e-01f, -3.08044218e-02f, 1.85536489e-01f,
++  -1.12422395e+00f, 1.95579097e-01f, 6.03953362e-01f, -1.14405230e-01f, 4.43128385e-02f, 2.29947895e-01f, 8.24094176e-01f, 1.50000000e+00f,
++  4.49999988e-01f, 5.00000000e-01f,
++};
+diff --git a/src/dxmt/ember_neural.cpp b/src/dxmt/ember_neural.cpp
+--- a/src/dxmt/ember_neural.cpp
++++ b/src/dxmt/ember_neural.cpp
+@@ -1,94 +1,47 @@
+-/*
+- * Ember Tone (EMBER_NEURAL) glue, DXMT side — see ember_neural.hpp. The engine is libEmberTone.dylib (EmberCore).
+- *
+- * This library is free software; you can redistribute it and/or modify it under the terms of the GNU Lesser
+- * General Public License as published by the Free Software Foundation; either version 2.1 of the License, or
+- * (at your option) any later version.
+- */
++/*                                                                                                    */
+ #include "ember_neural.hpp"
+-#include "dxmt_ember_d11.hpp"
++#include "ember_neural_shader.h"
++#include "ember_neural_thunks.h"
+ #include "log/log.hpp"
+ #include "util_env.hpp"
+-#include "util_string.hpp"
+-#include "../winemetal/ember_fg_thunks.h"
+ #include <algorithm>
++#include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+-#include <cwctype>
+-#include <windows.h>
+ 
+ namespace dxmt {
+ 
+-namespace embertone {
+-
+ namespace {
+-using call_fn = int32_t (*)(unixcall_ember_fg *);
+-
+-call_fn
+-resolve() {
+-  // Resolved at run time: an older winemetal.dll without the thunk simply means "Tone/Flare off".
+-  static call_fn fn = [] {
+-    HMODULE wm = GetModuleHandleA("winemetal.dll");
+-    return wm ? (call_fn)(void *)GetProcAddress(wm, "EmberFG_call") : nullptr;
+-  }();
+-  return fn;
+-}
+-
+-void
+-forward_log(const char *buf, size_t n) {
+-  size_t start = 0;
+-  while (start < n) {
+-    const char *nl = (const char *)std::memchr(buf + start, '\n', n - start);
+-    size_t end = nl ? (size_t)(nl - buf) : n;
+-    if (end > start + 2) {
+-      std::string line(buf + start + 2, end - start - 2);
+-      if (buf[start] == 'E') Logger::err(line);
+-      else if (buf[start] == 'W') Logger::warn(line);
+-      else Logger::info(line);
+-    }
+-    start = end + 1;
+-  }
+-}
++
++float
++nn_env_pct(const char *name, float def) {
++  auto v = env::getEnvVar(name);
++  float f = v.empty() ? def : (float)std::atof(v.c_str());
++  return std::clamp(f, 0.f, 100.f) / 100.f;
++}
++
++//
++WMT::Texture
++nn_borrow(obj_handle_t h) {
++  WMT::Texture t;
++  t.handle = h;
++  return t;
++}
++
++bool
++nn_is_float_format(WMTPixelFormat f) {
++  switch (f) {
++  case WMTPixelFormatRGBA16Float:
++  case WMTPixelFormatRGBA32Float:
++  case WMTPixelFormatRG11B10Float:
++  case WMTPixelFormatRGB9E5Float:
++    return true;
++  default:
++    return false;
++  }
++}
++
+ } // namespace
+-
+-int32_t
+-call(uint32_t op, uint64_t &ctx, uint64_t device, const void *in, uint64_t in_size, void *out, uint64_t out_size) {
+-  auto fn = resolve();
+-  if (!fn) return 0;
+-  char log[4096];
+-  unixcall_ember_fg p;
+-  std::memset(&p, 0, sizeof(p));
+-  p.op = op;
+-  p.ctx = ctx;
+-  p.device = device;
+-  WMT_MEMPTR_SET(p.in, in);
+-  p.in_size = in_size;
+-  WMT_MEMPTR_SET(p.out, out);
+-  p.out_size = out_size;
+-  WMT_MEMPTR_SET(p.log, log);
+-  p.log_cap = sizeof(log);
+-  int32_t r = fn(&p);
+-  if (p.log_len) forward_log(log, (size_t)std::min<uint64_t>(p.log_len, sizeof(log) - 1));
+-  ctx = p.ctx;
+-  return r;
+-}
+-
+-std::string
+-envBlock() {
+-  std::string out;
+-  LPWCH env = GetEnvironmentStringsW();
+-  if (!env) return out;
+-  for (LPWCH p = env; *p; p += wcslen(p) + 1) {
+-    if (*p == L'=') continue;
+-    if (_wcsnicmp(p, L"EMBER_", 6)) continue;
+-    out += str::fromws(p);
+-    out.push_back('\0');
+-  }
+-  FreeEnvironmentStringsW(env);
+-  out.push_back('\0');
+-  return out;
+-}
+-
+-} // namespace embertone
+ 
+ bool
+ EmberNeural::enabled() {
+@@ -97,44 +50,280 @@
+   return on;
+ }
+ 
+-EmberNeural::EmberNeural(WMT::Device device) {
+-  auto env = embertone::envBlock();
+-  uint64_t ctx = 0;
+-  if (embertone::call(EMBER_FG_OP_TONE_NEURAL_CREATE, ctx, device.handle, env.data(), env.size(), nullptr, 0) && ctx)
+-    ctx_ = ctx;
+-  else
+-    Logger::warn("ember-neural: libEmberTone 없음(winemetal.so 옆) — AI 화질 다듬기 끔");
++EmberNeural::EmberNeural(WMT::Device device) : device_(device) {
++  auto pool = WMT::MakeAutoreleasePool();
++  log_ = env::getEnvVar("EMBER_NEURAL_LOG") == "1";
++  auto res = env::getEnvVar("EMBER_NEURAL_RES");
++  if (!res.empty()) res_ = std::max(0, std::atoi(res.c_str()));
++  auto model = env::getEnvVar("EMBER_NEURAL_MODEL");
++  bool has_model = !model.empty();
++  base_.strength = nn_env_pct("EMBER_NEURAL_STRENGTH", 60);
++  base_.contrast = nn_env_pct("EMBER_NEURAL_CONTRAST", has_model ? 0 : 35);
++  base_.clarity = nn_env_pct("EMBER_NEURAL_CLARITY", 25);
++  base_.vibrance = nn_env_pct("EMBER_NEURAL_VIBRANCE", has_model ? 0 : 20);
++  base_.grain = nn_env_pct("EMBER_NEURAL_GRAIN", 0);
++  base_.guard = nn_env_pct("EMBER_NEURAL_GUARD", 100);
++  base_.neural = nn_env_pct("EMBER_NEURAL_MODEL_WEIGHT", 100);
++  base_.ema = 0.9f;
++  base_.in_scale = base_.out_scale = 1.f;
++  if (!ensurePipelines()) {
++    failed_ = true;
++    return;
++  }
++  if (has_model) openModel(model);
++  if (log_) {
++    char line[256];
++    std::snprintf(line, sizeof(line), "ember-neural: on strength=%.0f%% contrast=%.0f%% clarity=%.0f%% vibrance=%.0f%% guard=%.0f%% res=%d model=%s",
++                  base_.strength * 100, base_.contrast * 100, base_.clarity * 100, base_.vibrance * 100, base_.guard * 100, res_,
++                  ane_ ? model.c_str() : "(baseline)");
++    Logger::info(line);
++  }
+ }
+ 
+ EmberNeural::~EmberNeural() {
+-  if (ctx_) embertone::call(EMBER_FG_OP_TONE_NEURAL_DESTROY, ctx_, 0, nullptr, 0, nullptr, 0);
+-  ctx_ = 0;
++  if (ane_) EmberNeural_close(ane_);
++}
++
++void
++EmberNeural::openModel(const std::string &spec) {
++  ember_neural_ane_desc desc {};
++  auto units = env::getEnvVar("EMBER_NEURAL_UNITS");
++  int h = res_ > 0 ? res_ : 720, w = h * 16 / 9;
++  //
++  ane_ = EmberNeural_open(device_.handle, spec.c_str(), units.c_str(), (uint32_t)w, (uint32_t)h, log_ ? 1 : 0, &desc);
++  if (!ane_) {
++    Logger::warn("ember-neural: model '" + spec + "' unavailable, baseline pass only");
++    return;
++  }
++  ane_w_ = desc.width;
++  ane_h_ = desc.height;
++  ane_layout_ = desc.layout;
++  base_.in_scale = desc.in_scale;
++  base_.in_bias = desc.in_bias;
++  base_.out_scale = desc.out_scale;
++  base_.out_bias = desc.out_bias;
++}
++
++bool
++EmberNeural::ensurePipelines() {
++  WMT::Reference<WMT::Error> error;
++  library_ = device_.newLibraryWithSource(std::string_view(ember_neural_shader_src), error);
++  if (!library_) {
++    Logger::err("ember-neural: shader compile failed");
++    return false;
++  }
++  auto fn = library_.newFunction("cs_ember_nn_stats");
++  if (!fn) return false;
++  stats_pso_ = device_.newComputePipelineState(fn, error);
++  if (!stats_pso_) {
++    Logger::err("ember-neural: stats pipeline failed");
++    return false;
++  }
++  WMTBufferInfo binfo {};
++  binfo.length = 64;
++  binfo.options = WMTResourceStorageModePrivate;
++  stats_ = device_.newBuffer(binfo);
++  WMTTextureInfo tinfo {};
++  tinfo.pixel_format = WMTPixelFormatRGBA16Float;
++  tinfo.width = 256;
++  tinfo.height = 144;
++  tinfo.depth = 1;
++  tinfo.array_length = 1;
++  tinfo.type = WMTTextureType2D;
++  tinfo.mipmap_level_count = 1;
++  tinfo.sample_count = 1;
++  tinfo.usage = (WMTTextureUsage)(WMTTextureUsageShaderRead | WMTTextureUsageRenderTarget);
++  tinfo.options = WMTResourceStorageModePrivate;
++  analysis_ = device_.newTexture(tinfo);
++  return stats_ && analysis_;
++}
++
++WMT::RenderPipelineState
++EmberNeural::pso(const char *kind, WMTPixelFormat format) {
++  for (auto &e : psos_)
++    if (e.format == format && e.kind == kind) return e.pso;
++  auto pool = WMT::MakeAutoreleasePool();
++  WMT::Reference<WMT::Error> error;
++  std::string fs_name = std::string("fs_ember_nn_") + kind;
++  auto vs = library_.newFunction("vs_ember_nn");
++  auto fs = library_.newFunction(fs_name.c_str());
++  WMT::Reference<WMT::RenderPipelineState> ps;
++  if (vs && fs) {
++    WMTRenderPipelineInfo info;
++    WMT::InitializeRenderPipelineInfo(info);
++    info.colors[0].pixel_format = format;
++    info.vertex_function = vs;
++    info.fragment_function = fs;
++    ps = device_.newRenderPipelineState(info, error);
++  }
++  if (!ps) Logger::err(std::string("ember-neural: pipeline ") + kind + " failed");
++  psos_.push_back({kind, format, ps});
++  return ps;
++}
++
++bool
++EmberNeural::ensureScratch(WMT::Texture backbuffer) {
++  if (scratch_ && scratch_.width() == backbuffer.width() && scratch_.height() == backbuffer.height() &&
++      scratch_.pixelFormat() == backbuffer.pixelFormat())
++    return true;
++  WMTTextureInfo info {};
++  info.pixel_format = backbuffer.pixelFormat();
++  info.width = (uint32_t)backbuffer.width();
++  info.height = (uint32_t)backbuffer.height();
++  info.depth = 1;
++  info.array_length = 1;
++  info.type = WMTTextureType2D;
++  info.mipmap_level_count = 1;
++  info.sample_count = 1;
++  info.usage = (WMTTextureUsage)(WMTTextureUsageShaderRead | WMTTextureUsageRenderTarget);
++  info.options = WMTResourceStorageModePrivate;
++  scratch_ = device_.newTexture(info);
++  return scratch_;
++}
++
++void
++EmberNeural::draw(
++    WMT::CommandBuffer cmdbuf, const char *kind, WMT::Texture src, WMT::Texture target, const Params &p,
++    WMT::Texture lo_in, WMT::Texture lo_out, std::function<void(WMT::RenderCommandEncoder)> *wait_fences
++) {
++  auto ps = pso(kind, target.pixelFormat());
++  if (!ps) return;
++  WMTRenderPassInfo info;
++  WMT::InitializeRenderPassInfo(info);
++  info.colors[0].load_action = WMTLoadActionDontCare;
++  info.colors[0].store_action = WMTStoreActionStore;
++  info.colors[0].texture = target;
++  auto enc = cmdbuf.renderCommandEncoder(info);
++  if (wait_fences) (*wait_fences)(enc);   //
++  enc.setRenderPipelineState(ps);
++  enc.setFragmentTexture(src, 0);
++  if (lo_in.handle) enc.setFragmentTexture(lo_in, 1);
++  if (lo_out.handle) enc.setFragmentTexture(lo_out, 2);
++  enc.setFragmentBytes(&p, sizeof(p), 0);
++  enc.setFragmentBuffer(stats_, 0, 1);
++  enc.setViewport({0, 0, (double)target.width(), (double)target.height(), 0, 1});
++  enc.drawPrimitives(WMTPrimitiveTypeTriangle, 0, 3);
++  enc.endEncoding();
+ }
+ 
+ WMT::Texture
+ EmberNeural::encode(
+-    WMT::CommandBuffer cmdbuf, WMT::Texture backbuffer, uint32_t sample_count, const uint64_t *fences, uint32_t n_fences
++    WMT::CommandBuffer cmdbuf, WMT::Texture backbuffer, uint32_t sample_count,
++    std::function<void(WMT::RenderCommandEncoder)> &wait_fences
+ ) {
+-  if (!ctx_ || sample_count > 1 || !backbuffer.handle) return backbuffer;
+-  embertone::NeuralIn in;
+-  n_fences = std::min(n_fences, embertone::kMaxWaitFences);
+-  in.size = (uint32_t)(offsetof(embertone::NeuralIn, wait_fences) + 8 * n_fences);
+-  in.rt_mode = EmberD11Get(kEmberD11NeuralRt);   // fgneural: C:\ember-d11.cfg EMBER_NEURAL_RT live toggle
+-  in.command_buffer = cmdbuf.handle;
+-  in.source = backbuffer.handle;
+-  in.target = 0;
+-  in.sample_count = sample_count;
+-  in.n_wait_fences = n_fences;
+-  for (uint32_t i = 0; i < n_fences; i++) in.wait_fences[i] = fences[i];
+-  embertone::NeuralOut out {};
+-  out.size = sizeof(out);
+-  uint64_t ctx = ctx_;
+-  if (!embertone::call(EMBER_FG_OP_TONE_NEURAL_ENCODE, ctx, 0, &in, in.size, &out, sizeof(out)) || !out.processed ||
+-      !out.texture)
+-    return backbuffer;
+-  WMT::Texture t;   // library-owned (lives until the next resize / destroy), borrowed here
+-  t.handle = out.texture;
+-  return t;
++  if (failed_ || sample_count > 1 || !backbuffer.handle) return backbuffer;
++  if (!ensureScratch(backbuffer)) return backbuffer;
++  if (!pso("apply", backbuffer.pixelFormat())) { failed_ = true; return backbuffer; }
++
++  Params p = base_;
++  p.frame = ++frame_;
++  p.flags = (stats_valid_ ? kFlagStats : 0) | (nn_is_float_format(backbuffer.pixelFormat()) ? kFlagHDR : 0);
++
++  WMT::Texture lo_in {}, lo_out {};
++  int32_t age = 0;
++  if (ane_) {
++    obj_handle_t in = 0, out = 0;
++    uint64_t seq = 0;
++    if (EmberNeural_latest(ane_, &in, &out, &seq, &age)) {
++      //
++      float fade = age <= 60 ? 1.f : (age >= 120 ? 0.f : (120 - age) / 60.f);
++      p.neural *= fade;
++      lo_in = nn_borrow(in);
++      lo_out = nn_borrow(out);
++      if (p.neural > 0) p.flags |= kFlagNeural | (ane_layout_ == 1 ? kFlagPlanar : 0);
++      p.lo_w = ane_w_;
++      p.lo_h = ane_h_;
++    }
++  }
++  if (!lo_in.handle) { lo_in = analysis_; lo_out = analysis_; }
++
++  //
++  {
++    Params d = p;
++    d.flags &= ~kFlagPlanar;
++    d.lo_w = 256;
++    d.lo_h = 144;
++    draw(cmdbuf, "down", backbuffer, analysis_, d, {}, {}, &wait_fences);
++  }
++  //
++  int32_t slot = -1;
++  if (ane_) {
++    obj_handle_t in_tex = 0;
++    slot = EmberNeural_begin(ane_, &in_tex);
++    if (slot >= 0 && in_tex) {
++      Params d = p;
++      d.flags = (d.flags & ~kFlagPlanar) | (ane_layout_ == 1 ? kFlagPlanar : 0);
++      d.lo_w = ane_w_;
++      d.lo_h = ane_h_;
++      draw(cmdbuf, "down", backbuffer, nn_borrow(in_tex), d, {}, {}, &wait_fences);
++    } else if (slot >= 0) {
++      EmberNeural_cancel(ane_, slot);
++      slot = -1;
++    }
++  }
++  //
++  {
++    auto enc = cmdbuf.computeCommandEncoder(false);
++    wmtcmd_compute_setpso setpso;
++    setpso.type = WMTComputeCommandSetPSO;
++    setpso.pso = stats_pso_.handle;
++    setpso.threadgroup_size = {256, 1, 1};
++    wmtcmd_compute_settexture st[3];
++    WMT::Texture texs[3] = {analysis_, lo_in, lo_out};
++    wmtcmd_base *last = (wmtcmd_base *)&setpso;
++    for (uint8_t i = 0; i < 3; i++) {
++      st[i].type = WMTComputeCommandSetTexture;
++      st[i].texture = texs[i].handle;
++      st[i].index = i;
++      last->next.set(&st[i]);
++      last = (wmtcmd_base *)&st[i];
++    }
++    wmtcmd_compute_setbytes sb;
++    sb.type = WMTComputeCommandSetBytes;
++    sb.bytes.set((void *)&p);
++    sb.length = sizeof(p);
++    sb.index = 0;
++    last->next.set(&sb);
++    last = (wmtcmd_base *)&sb;
++    wmtcmd_compute_setbuffer sbuf;
++    sbuf.type = WMTComputeCommandSetBuffer;
++    sbuf.buffer = stats_.handle;
++    sbuf.offset = 0;
++    sbuf.index = 1;
++    last->next.set(&sbuf);
++    last = (wmtcmd_base *)&sbuf;
++    wmtcmd_compute_dispatch d;
++    d.type = WMTComputeCommandDispatch;
++    d.size = {1, 1, 1};
++    d.next.set(nullptr);
++    last->next.set(&d);
++    enc.encodeCommands((const wmtcmd_compute_nop *)&setpso);
++    enc.endEncoding();
++    stats_valid_ = true;
++  }
++  //
++  draw(cmdbuf, "apply", backbuffer, scratch_, p, lo_in, lo_out, &wait_fences);
++  //
++  if (slot >= 0) EmberNeural_submit(ane_, cmdbuf.handle, slot);
++
++  if (log_) {
++    log_frames_++;
++    auto now = std::chrono::steady_clock::now();
++    if (!log_since_.time_since_epoch().count()) log_since_ = now;
++    double el = std::chrono::duration<double>(now - log_since_).count();
++    if (el >= 5.0) {
++      unixcall_ember_neural_stats s {};
++      if (ane_) EmberNeural_stats(ane_, &s);
++      char line[256];
++      std::snprintf(line, sizeof(line), "ember-neural: frames=%.1f/s model=%s done=%llu skip=%llu fail=%llu ms=%.2f max=%.2f age=%d neural=%.2f",
++                    log_frames_ / el, ane_ ? "on" : "off", (unsigned long long)s.done, (unsigned long long)s.skipped,
++                    (unsigned long long)s.failed, s.ms_ema, s.ms_max, (int)age, p.neural);
++      Logger::info(line);
++      log_frames_ = 0;
++      log_since_ = now;
++    }
++  }
++  return scratch_;
+ }
+ 
+ } // namespace dxmt
+diff --git a/src/dxmt/ember_neural.hpp b/src/dxmt/ember_neural.hpp
+--- a/src/dxmt/ember_neural.hpp
++++ b/src/dxmt/ember_neural.hpp
+@@ -1,87 +1,78 @@
+ #pragma once
+ /*
+- * Ember Tone (EMBER_NEURAL) / Ember Flare (EMBER_AUTOHDR) glue, DXMT side.
+- *
+- * Both post-processing engines live in the optional libEmberTone.dylib (EmberCore, separate proprietary library, not part of
+- * this tree). The presenter calls them through winemetal's EmberFG_call (ops EMBER_FG_OP_TONE_*, unix side ember_fg_unix.c
+- * loads the library next to winemetal.so). When the library or the winemetal support is missing, frames pass through
+- * unchanged. The wire structs below mirror EmberCore/tone/include/ember_tone.h (ABI 1.x) byte for byte.
+- *
+- * This library is free software; you can redistribute it and/or modify it under the terms of the GNU Lesser
+- * General Public License as published by the Free Software Foundation; either version 2.1 of the License, or
+- * (at your option) any later version.
++
++
++
++
++
++
++
++
++
++
++
+  */
+ #include "Metal.hpp"
+-#include <cstddef>
++#include <chrono>
+ #include <cstdint>
++#include <functional>
+ #include <string>
++#include <vector>
+ 
+ namespace dxmt {
+-
+-namespace embertone {
+-
+-constexpr uint32_t kMaxWaitFences = 256;
+-constexpr uint32_t kHostDXMT = 0;
+-
+-struct NeuralIn {
+-  uint32_t size;
+-  int32_t rt_mode;
+-  uint64_t command_buffer, source, target;
+-  uint32_t sample_count, n_wait_fences;
+-  uint64_t wait_fences[kMaxWaitFences];
+-};
+-struct NeuralOut {
+-  uint32_t size, processed;
+-  uint64_t texture;
+-};
+-struct AhdrConfig {
+-  uint32_t size, failed;
+-  float strength, peak_cap, gamma22, wexp, peak, pad;
+-};
+-struct AhdrEncodeIn {
+-  uint32_t size, flags;
+-  uint64_t command_buffer, source;
+-  uint32_t n_wait_fences, pad;
+-  uint64_t wait_fences[kMaxWaitFences];
+-};
+-constexpr uint32_t kAhdrSrcSRGB = 1;
+-struct AhdrEncodeOut {
+-  uint32_t size, ok;
+-  uint64_t gain;
+-};
+-struct AhdrFrameIn {
+-  uint32_t size, log;
+-  double edr_now, edr_potential;
+-};
+-struct AhdrFrameOut {
+-  uint32_t size;
+-  float peak;
+-};
+-static_assert(offsetof(NeuralIn, wait_fences) == 40 && sizeof(NeuralOut) == 16 && sizeof(AhdrConfig) == 32 &&
+-              offsetof(AhdrEncodeIn, wait_fences) == 32 && sizeof(AhdrEncodeOut) == 16 && sizeof(AhdrFrameIn) == 24 &&
+-              sizeof(AhdrFrameOut) == 8, "ember_tone.h layout");
+-
+-/// One EmberFG_call with a Tone op. ctx in/out (create). Queued library log lines go to the DXMT log. 0 = no support.
+-int32_t call(uint32_t op, uint64_t &ctx, uint64_t device, const void *in, uint64_t in_size, void *out, uint64_t out_size);
+-/// The EMBER_* switches from the Windows environment, as "KEY=VALUE\0...\0\0".
+-std::string envBlock();
+-
+-} // namespace embertone
+ 
+ class EmberNeural {
+ public:
+   explicit EmberNeural(WMT::Device device);
+   ~EmberNeural();
+ 
+-  /// EMBER_NEURAL=1 (read once)
++  //
+   static bool enabled();
+ 
+-  /// backbuffer → processed copy (library-owned texture). Pass-through when off/failed/multisampled.
+-  /// fences: this Present's game fences — passes that read the backbuffer wait for them.
+-  WMT::Texture encode(WMT::CommandBuffer cmdbuf, WMT::Texture backbuffer, uint32_t sample_count, const uint64_t *fences, uint32_t n_fences);
++  //
++  //
++  WMT::Texture encode(
++      WMT::CommandBuffer cmdbuf, WMT::Texture backbuffer, uint32_t sample_count,
++      std::function<void(WMT::RenderCommandEncoder)> &wait_fences
++  );
++
++  bool modelLoaded() const { return ane_ != 0; }
+ 
+ private:
+-  uint64_t ctx_ = 0;
++  struct Params {
++    float strength, contrast, clarity, vibrance, grain, guard, neural, ema;
++    float in_scale, in_bias, out_scale, out_bias;
++    uint32_t frame, flags, lo_w, lo_h;
++  };
++  enum : uint32_t { kFlagNeural = 1, kFlagPlanar = 2, kFlagStats = 4, kFlagHDR = 8 };
++
++  bool ensurePipelines();
++  WMT::RenderPipelineState pso(const char *kind, WMTPixelFormat format);
++  bool ensureScratch(WMT::Texture backbuffer);
++  void draw(
++      WMT::CommandBuffer cmdbuf, const char *kind, WMT::Texture src, WMT::Texture target, const Params &p,
++      WMT::Texture lo_in, WMT::Texture lo_out, std::function<void(WMT::RenderCommandEncoder)> *wait_fences
++  );
++  void openModel(const std::string &spec);
++
++  WMT::Device device_;
++  WMT::Reference<WMT::Library> library_;
++  WMT::Reference<WMT::ComputePipelineState> stats_pso_;
++  struct PsoEntry { std::string kind; WMTPixelFormat format; WMT::Reference<WMT::RenderPipelineState> pso; };
++  std::vector<PsoEntry> psos_;
++  WMT::Reference<WMT::Buffer> stats_;
++  WMT::Reference<WMT::Texture> analysis_, scratch_;
++  Params base_ {};
++  int res_ = 720;
++  bool log_ = false;
++  bool failed_ = false;
++  uint32_t frame_ = 0;
++  bool stats_valid_ = false;
++  //
++  uint64_t ane_ = 0;
++  uint32_t ane_w_ = 0, ane_h_ = 0, ane_layout_ = 0;
++  std::chrono::steady_clock::time_point log_since_ {};
++  uint64_t log_frames_ = 0;
+ };
+ 
+ } // namespace dxmt
+diff --git a/src/dxmt/ember_neural_shader.h b/src/dxmt/ember_neural_shader.h
+new file mode 100644
+--- /dev/null
++++ b/src/dxmt/ember_neural_shader.h
+@@ -0,0 +1,193 @@
++/* generated by Tools/neuralbench/gen_shader.sh from ember_neural.metal - do not edit */
++static const char ember_neural_shader_src[] =
++"// Ember Neural look pass (shared by winemac.drv / DXMT / Tools/neuralbench).\n"
++"// ASCII ONLY: winemetal compiles this from source with NSASCIIStringEncoding.\n"
++"// Regenerate ember_neural_shader.h with Tools/neuralbench/gen_shader.sh after editing.\n"
++"//\n"
++"// Pipeline per game frame (all in the present command buffer, GPU only, no CPU sync):\n"
++"//   vs_ember_nn / fs_ember_nn_down   : full frame -> small analysis texture (RGBA16F) or ANE input (BGRA8 / planar R16F)\n"
++"//   cs_ember_nn_stats                : analysis texture -> per-channel mean/var of input and of the graded output\n"
++"//                                      (EMA in a 64-byte buffer; the color guard reads it in the same frame)\n"
++"//   vs_ember_nn / fs_ember_nn_apply  : full frame -> graded frame: neural delta (from the last finished ANE result,\n"
++"//                                      1..N frames old, low-frequency only, detail re-injected from the original),\n"
++"//                                      filmic S-curve, local contrast, vibrance, grain, color-consistency guard, mix.\n"
++"#include <metal_stdlib>\n"
++"using namespace metal;\n"
++"\n"
++"struct EmberNNParams {\n"
++"    float strength;    // 0..1 final mix original -> graded\n"
++"    float contrast;    // 0..1 filmic S-curve amount\n"
++"    float clarity;     // 0..1 local contrast\n"
++"    float vibrance;    // 0..1\n"
++"    float grain;       // 0..1\n"
++"    float guard;       // 0..1 color-consistency guard (1 = fully match input mean/var per channel)\n"
++"    float neural;      // 0..1 weight of the neural delta (0 when no result yet / stale)\n"
++"    float ema;         // stats EMA keep factor (0 = no smoothing)\n"
++"    float in_scale;    // planar ANE input = c * in_scale + in_bias\n"
++"    float in_bias;\n"
++"    float out_scale;   // planar ANE output c = (v - out_bias) / out_scale\n"
++"    float out_bias;\n"
++"    uint  frame;\n"
++"    uint  flags;       // 1 neural delta available, 2 planar fp16 layout, 4 stats buffer initialised, 8 float (HDR) source\n"
++"    uint  lo_w;\n"
++"    uint  lo_h;\n"
++"};\n"
++"\n"
++"struct EmberNNStats {\n"
++"    float4 mean_in;    // rgb\n"
++"    float4 var_in;\n"
++"    float4 mean_out;\n"
++"    float4 var_out;\n"
++"};\n"
++"\n"
++"struct EmberNNVaryings { float4 pos [[position]]; float2 uv; };\n"
++"\n"
++"vertex EmberNNVaryings vs_ember_nn(uint id [[vertex_id]]) {\n"
++"    float2 p = float2((id << 1) & 2, id & 2);\n"
++"    EmberNNVaryings o;\n"
++"    o.pos = float4(p * 2.0 - 1.0, 0.0, 1.0);\n"
++"    o.uv = float2(p.x, 1.0 - p.y);\n"
++"    return o;\n"
++"}\n"
++"\n"
++"static inline float ember_nn_luma(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }\n"
++"\n"
++"// Reads one texel of the ANE input/output pair in the frame's [0,1] domain regardless of layout.\n"
++"static inline float3 ember_nn_read_lo(texture2d<float> t, float2 uv, constant EmberNNParams &p, float scale, float bias) {\n"
++"    constexpr sampler s(filter::linear, address::clamp_to_edge);\n"
++"    if (p.flags & 2u) {\n"
++"        // planar: R16F texture, rows [0,H) = R, [H,2H) = G, [2H,3H) = B\n"
++"        float r = t.sample(s, float2(uv.x, (uv.y + 0.0) / 3.0)).r;\n"
++"        float g = t.sample(s, float2(uv.x, (uv.y + 1.0) / 3.0)).r;\n"
++"        float b = t.sample(s, float2(uv.x, (uv.y + 2.0) / 3.0)).r;\n"
++"        return (float3(r, g, b) - bias) / max(scale, 1e-4);\n"
++"    }\n"
++"    return t.sample(s, uv).rgb;\n"
++"}\n"
++"\n"
++"// The grade without spatial terms (used by the stats kernel and the apply pass).\n"
++"static inline float3 ember_nn_grade(float3 c, float2 uv, constant EmberNNParams &p,\n"
++"                                    texture2d<float> lo_in, texture2d<float> lo_out) {\n"
++"    if ((p.flags & 1u) && p.neural > 0.0) {\n"
++"        float3 a = ember_nn_read_lo(lo_in, uv, p, p.in_scale, p.in_bias);\n"
++"        float3 b = ember_nn_read_lo(lo_out, uv, p, p.out_scale, p.out_bias);\n"
++"        c += (b - a) * p.neural;          // low-frequency delta only: full-res detail of c survives untouched\n"
++"    }\n"
++"    if (p.contrast > 0.0) {\n"
++"        // filmic S-curve, pivot 0.5, black and white fixed, identity outside [0,1] (HDR safe)\n"
++"        float3 x = clamp(c, 0.0, 1.0);\n"
++"        c -= (p.contrast * 0.22) * sin(6.2831853 * x) / 6.2831853;\n"
++"        // gentle shoulder: pull the top 10% down so the S-curve does not clip\n"
++"        float3 hi = max(c - 0.9, 0.0);\n"
++"        c -= hi * hi * (p.contrast * 2.0);\n"
++"    }\n"
++"    if (p.vibrance > 0.0) {\n"
++"        float l = ember_nn_luma(c);\n"
++"        float sat = max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);\n"
++"        c = mix(float3(l), c, 1.0 + p.vibrance * 0.7 * saturate(1.0 - sat * 1.5));\n"
++"    }\n"
++"    return c;\n"
++"}\n"
++"\n"
++"// --- analysis / ANE input downscale (render pass so it can wait on the game fence directly) ---\n"
++"// target is either the analysis texture (lo_w x lo_h, RGBA16F), the ANE BGRA8 image (lo_w x lo_h),\n"
++"// or the planar R16F ANE input (lo_w x 3*lo_h): the plane comes from the y position.\n"
++"fragment float4 fs_ember_nn_down(EmberNNVaryings in [[stage_in]], texture2d<float> src [[texture(0)]],\n"
++"                                 constant EmberNNParams &p [[buffer(0)]]) {\n"
++"    constexpr sampler s(filter::linear, address::clamp_to_edge);\n"
++"    float2 uv = in.uv;\n"
++"    uint plane = 0;\n"
++"    if (p.flags & 2u) {\n"
++"        float y = uv.y * 3.0;\n"
++"        plane = min((uint)y, 2u);\n"
++"        uv.y = y - (float)plane;\n"
++"    }\n"
++"    // 4-tap box (bilinear taps at +-0.25 output pixel): fine up to ~3x reduction\n"
++"    float2 h = 0.25 / float2(p.lo_w, p.lo_h);\n"
++"    float3 c = src.sample(s, uv + float2(-h.x, -h.y)).rgb + src.sample(s, uv + float2(h.x, -h.y)).rgb +\n"
++"               src.sample(s, uv + float2(-h.x, h.y)).rgb + src.sample(s, uv + float2(h.x, h.y)).rgb;\n"
++"    c *= 0.25;\n"
++"    if (p.flags & 2u) {\n"
++"        float v = (plane == 0 ? c.r : (plane == 1 ? c.g : c.b)) * p.in_scale + p.in_bias;\n"
++"        return float4(v, v, v, 1.0);\n"
++"    }\n"
++"    return float4(c, 1.0);\n"
++"}\n"
++"\n"
++"// --- statistics: one threadgroup of 256 threads, 128x72 sample grid over the analysis texture ---\n"
++"kernel void cs_ember_nn_stats(texture2d<float> analysis [[texture(0)]],\n"
++"                              texture2d<float> lo_in [[texture(1)]], texture2d<float> lo_out [[texture(2)]],\n"
++"                              constant EmberNNParams &p [[buffer(0)]],\n"
++"                              device EmberNNStats &st [[buffer(1)]],\n"
++"                              uint tid [[thread_index_in_threadgroup]],\n"
++"                              uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {\n"
++"    constexpr sampler s(filter::linear, address::clamp_to_edge);\n"
++"    threadgroup float3 part[4][8];\n"
++"    float3 s_in = 0, q_in = 0, s_out = 0, q_out = 0;\n"
++"    const uint W = 128, H = 72;\n"
++"    for (uint i = tid; i < W * H; i += 256) {\n"
++"        float2 uv = (float2(i % W, i / W) + 0.5) / float2(W, H);\n"
++"        float3 c = analysis.sample(s, uv).rgb;\n"
++"        float3 g = ember_nn_grade(c, uv, p, lo_in, lo_out);\n"
++"        s_in += c; q_in += c * c; s_out += g; q_out += g * g;\n"
++"    }\n"
++"    s_in = simd_sum(s_in); q_in = simd_sum(q_in); s_out = simd_sum(s_out); q_out = simd_sum(q_out);\n"
++"    if (lane == 0) { part[0][sg] = s_in; part[1][sg] = q_in; part[2][sg] = s_out; part[3][sg] = q_out; }\n"
++"    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
++"    if (tid == 0) {\n"
++"        float3 a = 0, b = 0, c = 0, d = 0;\n"
++"        for (uint k = 0; k < 8; k++) { a += part[0][k]; b += part[1][k]; c += part[2][k]; d += part[3][k]; }\n"
++"        float n = (float)(W * H);\n"
++"        float3 mi = a / n, mo = c / n;\n"
++"        float3 vi = max(b / n - mi * mi, 0.0), vo = max(d / n - mo * mo, 0.0);\n"
++"        float k = (p.flags & 4u) ? p.ema : 0.0;\n"
++"        st.mean_in = float4(mix(mi, st.mean_in.rgb, k), 1.0);\n"
++"        st.var_in = float4(mix(vi, st.var_in.rgb, k), 1.0);\n"
++"        st.mean_out = float4(mix(mo, st.mean_out.rgb, k), 1.0);\n"
++"        st.var_out = float4(mix(vo, st.var_out.rgb, k), 1.0);\n"
++"    }\n"
++"}\n"
++"\n"
++"static inline float ember_nn_hash(float2 v) {\n"
++"    return fract(sin(dot(v, float2(12.9898, 78.233))) * 43758.5453);\n"
++"}\n"
++"\n"
++"fragment float4 fs_ember_nn_apply(EmberNNVaryings in [[stage_in]], texture2d<float> src [[texture(0)]],\n"
++"                                  texture2d<float> lo_in [[texture(1)]], texture2d<float> lo_out [[texture(2)]],\n"
++"                                  constant EmberNNParams &p [[buffer(0)]],\n"
++"                                  constant EmberNNStats &st [[buffer(1)]]) {\n"
++"    constexpr sampler s(filter::linear, address::clamp_to_edge);\n"
++"    float4 o = src.sample(s, in.uv);\n"
++"    float3 c = o.rgb;\n"
++"    float3 g = ember_nn_grade(c, in.uv, p, lo_in, lo_out);\n"
++"    if (p.clarity > 0.0) {\n"
++"        // local contrast: luma minus a wide 8-tap ring blur (radius 6 px), multiplicative so hues stay\n"
++"        float2 px = 6.0 / float2(src.get_width(), src.get_height());\n"
++"        float blur = 0.0;\n"
++"        for (int k = 0; k < 8; k++) {\n"
++"            float a = (float)k * 0.7853982 + 0.3926991;\n"
++"            blur += ember_nn_luma(src.sample(s, in.uv + px * float2(cos(a), sin(a))).rgb);\n"
++"        }\n"
++"        blur *= 0.125;\n"
++"        float l = ember_nn_luma(c);\n"
++"        g *= 1.0 + p.clarity * 1.2 * (l - blur) / (l + 0.15);\n"
++"    }\n"
++"    if (p.guard > 0.0) {\n"
++"        // match the graded frame's per-channel mean/std back to the input's (kills any tint / exposure drift)\n"
++"        float3 sc = sqrt((st.var_in.rgb + 1e-5) / (st.var_out.rgb + 1e-5));\n"
++"        sc = clamp(sc, 0.5, 2.0);\n"
++"        float3 off = st.mean_in.rgb - st.mean_out.rgb * sc;\n"
++"        float3 guarded = g * sc + off;\n"
++"        g = mix(g, guarded, p.guard);\n"
++"    }\n"
++"    if (p.grain > 0.0) {\n"
++"        float2 seed = in.pos.xy + float2((p.frame * 7u) % 977u, (p.frame * 13u) % 991u);\n"
++"        float n = ember_nn_hash(seed) - 0.5;\n"
++"        float l = saturate(ember_nn_luma(g));\n"
++"        g += n * p.grain * 0.08 * (1.0 - l * 0.7);\n"
++"    }\n"
++"    g = mix(c, g, p.strength);\n"
++"    if (!(p.flags & 8u)) g = clamp(g, 0.0, 1.0);\n"
++"    return float4(g, o.a);\n"
++"}\n"
++;

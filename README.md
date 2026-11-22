@@ -1,12 +1,11 @@
-# Ember 1.0.1 — corresponding source for LGPL components / LGPL 구성요소 대응 소스
+# Ember 1.0.1.2 — corresponding source for LGPL components / LGPL 구성요소 대응 소스
 
-This package contains the source changes for the GPL- and LGPL-licensed components bundled in Ember 1.0.1
+This package contains the source changes for the GPL- and LGPL-licensed components bundled in Ember 1.0.1.2
 (Wine runtimes, DXMT, and the Windows virtual machine components: QEMU, GLib and the VM renderer libraries). Each component is provided as *upstream source + Ember patch series*.
-`BINARIES.tsv` lists every LGPL binary shipped in the app, its MD5 and the patch series that produces it.
+`BINARIES.tsv` maps listed app binaries to their MD5 and corresponding source series.
 
-이 묶음은 Ember 1.0.1 에 들어 있는 GPL·LGPL 구성요소(Wine 런타임 3종, DXMT, 가상 머신 구성요소인 QEMU·GLib·VM 렌더러 라이브러리)의 소스 변경분입니다.
-각 구성요소는 *업스트림 원본 소스 + Ember 패치 series* 로 제공됩니다. `BINARIES.tsv` 에 앱에 들어 있는
-LGPL 바이너리마다 MD5 와 그 바이너리를 만드는 패치 series 를 적었습니다.
+이 묶음은 Ember 1.0.1.2에 들어 있는 GPL·LGPL 구성요소(Wine 런타임 3종, DXMT, 가상 머신 구성요소인 QEMU·GLib·VM 렌더러 라이브러리)의 소스 변경분입니다.
+각 구성요소는 *업스트림 원본 소스 + Ember 패치 series* 로 제공됩니다. `BINARIES.tsv`에는 목록에 등재한 바이너리의 MD5와 대응 소스 series를 적었습니다.
 
 Source for Ember 1.0 is kept at the [v1.0 tag](https://github.com/eunggg0/ember-source/tree/v1.0). / Ember 1.0 의 소스는 [v1.0 태그](https://github.com/eunggg0/ember-source/tree/v1.0)에 있습니다.
 Questions about this source: realnoma@naver.com / 소스 문의: realnoma@naver.com
@@ -22,7 +21,7 @@ Questions about this source: realnoma@naver.com / 소스 문의: realnoma@naver.
 | `patches/dxmt-winemetal-cx` | same | `WineCX/…/x86_64-unix/winemetal.so` |
 | `patches/dxmt-d3d11` | same | `Renderers/dxmt/x86_64-windows/d3d11.dll`, `Renderers/dxmt-arm64ec/d3d11.dll` |
 | `patches/dxmt-d3d11-i386` | same | `Renderers/dxmt/i386-windows/d3d11.dll` |
-| `patches/dxmt-dxgi` | same | `dxgi.dll` (x86_64, i386, arm64ec) |
+| `patches/dxmt-dxgi` + `patches/dxmt-dxgi-release` | same | `dxgi.dll` (x86_64, i386, arm64ec) |
 | `patches/dxmt-winemetal-pe` | same | `winemetal.dll` (x86_64, i386, arm64ec) |
 | `patches/dxmt-winemetal-wine11` | same | `Wine/…/x86_64-unix/winemetal.so` |
 | `patches/dxmt-nvext-d3d10core` | same | `Renderers/dxmt-nvext/*` (`nvapi64.dll`, `nvngx.dll`), `d3d10core.dll` |
@@ -34,6 +33,25 @@ Questions about this source: realnoma@naver.com / 소스 문의: realnoma@naver.
 | `patches/forgeplay-origin/NOTICE.md` | — | attribution for Wine changes that originate from ForgePlay (already contained in the Wine series) |
 
 Each series folder has `series` (apply order) and `FILES.txt` (changed files; `A` = new file, `M` = modified).
+
+## v1.0.1.2 소스 보완
+
+`BINARIES.tsv`의 series 열에서 `+`는 왼쪽부터 같은 소스 디렉터리에 차례로 적용한다는 뜻입니다.
+DXGI 세 아키텍처는 DXMT `7c8dee1`에서 다음 두 명령을 실행합니다.
+
+```sh
+sh scripts/apply-series.sh patches/dxmt-dxgi "$dxmt_src"
+sh scripts/apply-series.sh patches/dxmt-dxgi-release "$dxmt_src"
+```
+
+d3d10core 세 아키텍처는 기본 DXMT 소스의 새 사본에 `dxmt-nvext-d3d10core`를 적용합니다.
+WineARM64의 i386 `kernelbase.dll`, `ntdll.dll`, `wmp.dll`은 Wine 11.18의 새 사본에 다음 순서로 적용합니다.
+다른 WineARM64 모듈은 해당 행의 series를 따릅니다.
+
+```sh
+sh scripts/apply-series.sh patches/wine-arm64 "$wine_src"
+sh scripts/apply-series.sh patches/wine-arm64-i386-release "$wine_src"
+```
 
 ## Rebuild / 다시 빌드
 

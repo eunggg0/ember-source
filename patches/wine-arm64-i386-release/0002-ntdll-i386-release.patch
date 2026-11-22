@@ -1,0 +1,291 @@
+From: Ember <realnoma@naver.com>
+Subject: [PATCH 2/3] ntdll: 1.0.1.2 i386 출시 입력 복원
+
+diff --git a/dlls/ntdll/Makefile.in b/dlls/ntdll/Makefile.in
+index 63c41aa7eccb90867b012bd53818c44e9b1e6356..9a15bc319a4fda08a9d5e678e4cec4ced959d9bc 100644
+--- a/dlls/ntdll/Makefile.in
++++ b/dlls/ntdll/Makefile.in
+@@ -14,7 +14,6 @@
+ VER_PRODUCTVERSION = 6,1,7601,24059
+ 
+ SOURCES = \
+-	unix/ember_shield_adapter.h \
+ 	actctx.c \
+ 	alpc.c \
+ 	atom.c \
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index d954f6572c63903427a54677cda76b35468541a4..04a0d944eee4b0b7cf24856275fec20fdd4aa9c0 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -512,100 +512,9 @@
+ static inline ULONG_PTR allocate_stub( const char *dll, const char *name ) { return 0xdeadbeef; }
+ #endif  /* __i386__ */
+ 
+-/* Ember loahang (10-16): what the loader-lock owner is doing right now. 10-16 18:30 STOVE (FEX) sat for minutes with
+- * "loader_section ... blocked by 1044" while 1044 itself never printed anything (it was not waiting on another critical
+- * section) and no debugger could be attached. The owner writes a small fixed-size record (no pointers - a waiter may
+- * read it at any time) at each step that can block: load_dll, DllMain / TLS callbacks, LDR notifications, FEX thread
+- * init. RtlpWaitForCriticalSection prints it when a thread times out on loader_section. */
+-struct ember_ldr_mark
+-{
+-    const char *what;        /* static string */
+-    WCHAR       dll[48];
+-    void       *module;
+-    UINT        reason;
+-    ULONG       since;       /* NtGetTickCount() */
+-};
+-static struct ember_ldr_mark ember_ldr_cur;
+-
+-static void ember_ldr_push( struct ember_ldr_mark *save, const char *what, const WCHAR *dll, USHORT dll_bytes,
+-                            void *module, UINT reason )
+-{
+-    struct ember_ldr_mark m;
+-    size_t n = 0;
+-
+-    *save = ember_ldr_cur;
+-    m.what = what;
+-    if (dll)
+-    {
+-        const WCHAR *p = dll;
+-        size_t i, len = dll_bytes ? dll_bytes / sizeof(WCHAR) : wcslen( dll );
+-        for (i = 0; i < len; i++) if (dll[i] == '\\' || dll[i] == '/') p = dll + i + 1;
+-        len -= p - dll;
+-        for (; n < len && n < ARRAY_SIZE(m.dll) - 1; n++) m.dll[n] = p[n];
+-    }
+-    m.dll[n] = 0;
+-    m.module = module;
+-    m.reason = reason;
+-    m.since = NtGetTickCount();
+-    ember_ldr_cur = m;
+-}
+-
+-static void ember_ldr_pop( const struct ember_ldr_mark *save )
+-{
+-    ember_ldr_cur = *save;
+-}
+-
+-/* is this thread gone (exited, or its id now belongs to another process)? */
+-BOOL ember_thread_gone( ULONG tid )
+-{
+-    OBJECT_ATTRIBUTES attr;
+-    CLIENT_ID cid;
+-    THREAD_BASIC_INFORMATION tbi;
+-    HANDLE handle;
+-    NTSTATUS status;
+-
+-    if (!tid) return FALSE;
+-    InitializeObjectAttributes( &attr, NULL, 0, NULL, NULL );
+-    cid.UniqueProcess = 0;
+-    cid.UniqueThread = ULongToHandle( tid );
+-    status = NtOpenThread( &handle, THREAD_QUERY_LIMITED_INFORMATION, &attr, &cid );
+-    if (status == STATUS_INVALID_CID || status == STATUS_INVALID_PARAMETER) return TRUE;
+-    if (status) return FALSE;
+-    status = NtQueryInformationThread( handle, ThreadBasicInformation, &tbi, sizeof(tbi), NULL );
+-    NtClose( handle );
+-    if (status) return FALSE;
+-    if (HandleToULong( tbi.ClientId.UniqueProcess ) != HandleToULong( NtCurrentTeb()->ClientId.UniqueProcess )) return TRUE;
+-    return tbi.ExitStatus != STATUS_PENDING;
+-}
+-
+-void ember_loader_lock_report( ULONG owner )
+-{
+-    struct ember_ldr_mark m = ember_ldr_cur;   /* may be torn; fixed-size data only, so harmless */
+-
+-    m.dll[ARRAY_SIZE(m.dll) - 1] = 0;
+-    ERR( "loader lock owner %04lx: %s %s module %p reason %u, for %lu ms; owner thread %s\n", owner,
+-         m.what ? m.what : "(not in a marked loader step)", debugstr_w(m.dll), m.module, m.reason,
+-         m.what ? NtGetTickCount() - m.since : 0, ember_thread_gone( owner ) ? "GONE" : "alive" );
+-}
+-
+-/* Take over a loader lock whose owner thread no longer exists (default on; EMBER_LDR_ORPHAN=0 turns it off).
+- * A dead owner can never release it, so without this the process is stuck for good. */
+-BOOL ember_loader_lock_orphan_ok(void)
+-{
+-    WCHAR buf[8];
+-    UNICODE_STRING name = RTL_CONSTANT_STRING( L"EMBER_LDR_ORPHAN" ), value;
+-
+-    value.Buffer = buf;
+-    value.Length = 0;
+-    value.MaximumLength = sizeof(buf);
+-    if (!RtlQueryEnvironmentVariable_U( NULL, &name, &value ) && value.Length && buf[0] == '0') return FALSE;
+-    return TRUE;
+-}
+-
+ /* call ldr notifications */
+ static void call_ldr_notifications( ULONG reason, LDR_DATA_TABLE_ENTRY *module )
+ {
+-    struct ember_ldr_mark ember_save;
+     struct ldr_notification *notify, *notify_next;
+     LDR_DLL_NOTIFICATION_DATA data;
+ 
+@@ -622,10 +531,7 @@
+         TRACE_(relay)("\1Call LDR notification callback (proc=%p,reason=%lu,data=%p,context=%p)\n",
+                 notify->callback, reason, &data, notify->context );
+ 
+-        ember_ldr_push( &ember_save, "LDR notification", module->BaseDllName.Buffer, module->BaseDllName.Length,
+-                        module->DllBase, reason );
+         notify->callback(reason, &data, notify->context);
+-        ember_ldr_pop( &ember_save );
+ 
+         TRACE_(relay)("\1Ret  LDR notification callback (proc=%p,reason=%lu,data=%p,context=%p)\n",
+                 notify->callback, reason, &data, notify->context );
+@@ -1754,10 +1660,7 @@
+                       *callback, module, reason_names[reason] );
+         __TRY
+         {
+-            struct ember_ldr_mark ember_save;
+-            ember_ldr_push( &ember_save, "TLS callback", NULL, 0, module, reason );
+             call_dll_entry_point( (DLLENTRYPROC)*callback, module, reason, NULL );
+-            ember_ldr_pop( &ember_save );
+         }
+         __EXCEPT_ALL
+         {
+@@ -1801,10 +1704,7 @@
+ 
+     __TRY
+     {
+-        struct ember_ldr_mark ember_save;
+-        ember_ldr_push( &ember_save, "DllMain", wm->ldr.BaseDllName.Buffer, wm->ldr.BaseDllName.Length, module, reason );
+         retv = call_dll_entry_point( entry, module, reason, lpReserved );
+-        ember_ldr_pop( &ember_save );
+         if (!retv)
+             status = STATUS_DLL_INIT_FAILED;
+     }
+@@ -2142,12 +2042,6 @@
+         if (result) *result = 1;
+     }
+     *magic = GetCurrentThreadId();
+-    /* Ember loahang: an app/DLL (anti-cheat, CEF, FEX…) holding the loader lock itself shows up in the report */
+-    if (!ember_ldr_cur.what && loader_section.RecursionCount == 1)
+-    {
+-        struct ember_ldr_mark unused;
+-        ember_ldr_push( &unused, "LdrLockLoaderLock (held by caller code)", NULL, 0, NULL, 0 );
+-    }
+     return STATUS_SUCCESS;
+ }
+ 
+@@ -2160,9 +2054,6 @@
+     if (magic)
+     {
+         if (magic != GetCurrentThreadId()) return STATUS_INVALID_PARAMETER_2;
+-        if (loader_section.RecursionCount == 1 && ember_ldr_cur.what &&
+-            !strcmp( ember_ldr_cur.what, "LdrLockLoaderLock (held by caller code)" ))
+-            ember_ldr_cur.what = NULL;
+         RtlLeaveCriticalSection( &loader_section );
+     }
+     return STATUS_SUCCESS;
+@@ -2383,7 +2274,7 @@
+     IMAGE_NT_HEADERS *nt;
+     WINE_MODREF *wm;
+     NTSTATUS status;
+-    SIZE_T map_size; ULONG cor_size;
++    SIZE_T map_size;
+ 
+     if (!(nt = RtlImageNtHeader( *module ))) return STATUS_INVALID_IMAGE_FORMAT;
+ 
+@@ -2398,8 +2289,8 @@
+     if (!(wm = alloc_module( *module, nt_name, is_builtin ))) return STATUS_NO_MEMORY;
+ 
+     if (id) wm->id = *id;
+-    /* Ember ngxnogptk (10-28): image_info is the file that was opened; if the unix side mapped a builtin in its place (load order 'b', e.g. a signed .NET placeholder for nvngx), its COR flags must not be applied, or fixup_imports_ilonly() leaves the builtin's imports unresolved and makes _CorDllMain its entry point (hang). Trust them only when the mapped module has a CLR header. */ if ((image_info->LoaderFlags || image_info->ComPlusILOnly) && RtlImageDirectoryEntryToData( *module, TRUE, IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR, &cor_size )) {
+-    if (image_info->LoaderFlags) wm->ldr.Flags |= LDR_COR_IMAGE; if (image_info->ComPlusILOnly) wm->ldr.Flags |= LDR_COR_ILONLY; }
++    if (image_info->LoaderFlags) wm->ldr.Flags |= LDR_COR_IMAGE;
++    if (image_info->ComPlusILOnly) wm->ldr.Flags |= LDR_COR_ILONLY;
+     if (redirected) wm->ldr.Flags |= LDR_REDIRECTED;
+     wm->system = system;
+ 
+@@ -3454,20 +3345,7 @@
+  * Load a PE style module according to the load order.
+  * The loader_section must be locked while calling this function.
+  */
+-static NTSTATUS load_dll_unmarked( const WCHAR *load_path, const WCHAR *libname, DWORD flags, WINE_MODREF** pwm, BOOL system );
+-
+ static NTSTATUS load_dll( const WCHAR *load_path, const WCHAR *libname, DWORD flags, WINE_MODREF** pwm, BOOL system )
+-{
+-    struct ember_ldr_mark ember_save;
+-    NTSTATUS status;
+-
+-    ember_ldr_push( &ember_save, "load_dll", libname, 0, NULL, 0 );
+-    status = load_dll_unmarked( load_path, libname, flags, pwm, system );
+-    ember_ldr_pop( &ember_save );
+-    return status;
+-}
+-
+-static NTSTATUS load_dll_unmarked( const WCHAR *load_path, const WCHAR *libname, DWORD flags, WINE_MODREF** pwm, BOOL system )
+ {
+     UNICODE_STRING nt_name;
+     struct file_id id;
+@@ -4658,12 +4536,7 @@
+         if (NtCurrentTeb()->WowTebOffset) init_wow64( context );
+ #endif
+ #ifdef __arm64ec__
+-        {
+-            struct ember_ldr_mark ember_save;
+-            ember_ldr_push( &ember_save, "arm64ec_thread_init (FEX ThreadInit)", NULL, 0, NULL, 0 );
+-            arm64ec_thread_init();
+-            ember_ldr_pop( &ember_save );
+-        }
++        arm64ec_thread_init();
+ #endif
+ 
+         if (NtCurrentTeb()->SkipThreadAttach)
+diff --git a/dlls/ntdll/locale.c b/dlls/ntdll/locale.c
+index b0d2d18ef5af7f3ce821e3ffbb1e99371c588051..993032f923d8fe38a31fb7bd187deb3ae549cb78 100644
+--- a/dlls/ntdll/locale.c
++++ b/dlls/ntdll/locale.c
+@@ -27,11 +27,7 @@
+ #include "winbase.h"
+ #include "winnls.h"
+ #include "ntdll_misc.h"
+-#ifndef _WIN64
+-#include "wine/wow64base.h"  /* fex32 */
+-#else
+-#define wine_wow64_h64( p ) PtrToUlong( p )  /* srcsync-1028: 64비트 PE(aarch64/arm64ec)는 fex32 이전과 같게 */
+-#endif
++#include "wine/wow64base.h"
+ #include "locale_private.h"
+ #include "wine/debug.h"
+ 
+diff --git a/dlls/ntdll/ntdll_misc.h b/dlls/ntdll/ntdll_misc.h
+index f94a259f96a8f08f5eed91cea77d5d64561acace..2bf3cfaca3214b90957a7ce5de769357439fce00 100644
+--- a/dlls/ntdll/ntdll_misc.h
++++ b/dlls/ntdll/ntdll_misc.h
+@@ -185,9 +185,4 @@
+ 
+ #endif
+ 
+-/* Ember loahang (10-16): loader-lock owner breadcrumbs (loader.c), reported by RtlpWaitForCriticalSection */
+-extern void ember_loader_lock_report( ULONG owner );
+-extern BOOL ember_loader_lock_orphan_ok(void);
+-extern BOOL ember_thread_gone( ULONG tid );
+-
+ #endif
+diff --git a/dlls/ntdll/sync.c b/dlls/ntdll/sync.c
+index ad35be51d2c18d1658d95c474ca92e838f7f1fd7..ca6dd4a7d934255a8504002e07acf3b2a67a3108 100644
+--- a/dlls/ntdll/sync.c
++++ b/dlls/ntdll/sync.c
+@@ -318,24 +318,6 @@
+ 
+         ERR( "section %p %s wait timed out in thread %04lx, blocked by %04lx, retrying (%u sec)\n",
+              crit, debugstr_a(crit_section_get_name(crit)), GetCurrentThreadId(), HandleToULong(crit->OwningThread), timeout );
+-
+-        /* Ember loahang (10-16): name what the loader-lock owner is doing; if the owner thread is gone the lock can never
+-         * be released - take it over (its RecursionCount entries leave LockCount; only one waiter wins the CAS). */
+-        if (crit == NtCurrentTeb()->Peb->LoaderLock)
+-        {
+-            HANDLE owner = crit->OwningThread;
+-            LONG rec = crit->RecursionCount;
+-
+-            ember_loader_lock_report( HandleToULong( owner ) );
+-            if (owner && rec > 0 && ember_thread_gone( HandleToULong( owner ) ) && ember_loader_lock_orphan_ok() &&
+-                InterlockedCompareExchangePointer( &crit->OwningThread, ULongToHandle( GetCurrentThreadId() ), owner ) == owner)
+-            {
+-                InterlockedExchangeAdd( &crit->LockCount, -rec );
+-                ERR( "loader lock: owner %04lx is gone (recursion %ld), thread %04lx takes it over\n",
+-                     HandleToULong( owner ), rec, GetCurrentThreadId() );
+-                break;
+-            }
+-        }
+     }
+     if (crit_section_has_debuginfo( crit )) crit->DebugInfo->ContentionCount++;
+     return STATUS_SUCCESS;

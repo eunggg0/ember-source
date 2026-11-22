@@ -1,0 +1,13 @@
+# Wine 11.18 + wine-arm64, WineARM64 i386 전용
+M dlls/kernelbase/volume.c
+M dlls/ntdll/Makefile.in
+M dlls/ntdll/loader.c
+M dlls/ntdll/locale.c
+M dlls/ntdll/ntdll_misc.h
+M dlls/ntdll/sync.c
+M dlls/wmp/Makefile.in
+D dlls/wmp/error.c
+M dlls/wmp/events.c
+M dlls/wmp/oleobj.c
+M dlls/wmp/player.c
+M dlls/wmp/wmp_private.h

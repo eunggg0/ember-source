@@ -2,7 +2,7 @@
 Renderers/dxmt-arm64ec/d3d10core.dll	2430df53af14416c0ad649f329ba7c1f	dxmt-nvext-d3d10core
 Renderers/dxmt-arm64ec/d3d11.dll	da2d51bbce6c899f81776ef4c773639d	dxmt-d3d11
 Renderers/dxmt-arm64ec/d3d12.dll	7f42471c5cf767f74c2de4911275e543	dxmt-d3d12
-Renderers/dxmt-arm64ec/dxgi.dll	aff73f796502d91d16377b338cb3ab70	dxmt-dxgi
+Renderers/dxmt-arm64ec/dxgi.dll	aff73f796502d91d16377b338cb3ab70	dxmt-dxgi+dxmt-dxgi-release
 Renderers/dxmt-nvext/aarch64-windows/_nvngx.dll	dafcc4c45d2fa27b1ed2bf94a5e9fd49	dxmt-nvext-d3d10core
 Renderers/dxmt-nvext/aarch64-windows/nvapi64.dll	26d0fef2e5730a30918a51d200161961	dxmt-nvext-d3d10core
 Renderers/dxmt-nvext/aarch64-windows/nvngx.dll	dafcc4c45d2fa27b1ed2bf94a5e9fd49	dxmt-nvext-d3d10core
@@ -11,11 +11,11 @@ Renderers/dxmt-nvext/x86_64-windows/nvapi64.dll	c015ac34e9b4396baea7177ad6383895
 Renderers/dxmt-nvext/x86_64-windows/nvngx.dll	c78e8c77dfeaaf27b4098df22eb1c593	dxmt-nvext-d3d10core
 Renderers/dxmt/i386-windows/d3d10core.dll	c0a3bec81228100aa75d7024f655a1d0	dxmt-nvext-d3d10core
 Renderers/dxmt/i386-windows/d3d11.dll	8f3984ec202b347652f1ff0c27c75101	dxmt-d3d11-i386
-Renderers/dxmt/i386-windows/dxgi.dll	c41686b7d777409b7a8743a3125acf06	dxmt-dxgi
+Renderers/dxmt/i386-windows/dxgi.dll	c41686b7d777409b7a8743a3125acf06	dxmt-dxgi+dxmt-dxgi-release
 Renderers/dxmt/x86_64-windows/d3d10core.dll	65452a6eb6b1a61a7a35eca6e869c3dd	dxmt-nvext-d3d10core
 Renderers/dxmt/x86_64-windows/d3d11.dll	aad64513e742e7bb4e63598d1d9a5ae6	dxmt-d3d11
 Renderers/dxmt/x86_64-windows/d3d12.dll	747dec4923fca4317b9840dc6e110a9d	dxmt-d3d12
-Renderers/dxmt/x86_64-windows/dxgi.dll	4c02d922b373e00a26fc2866470d39e7	dxmt-dxgi
+Renderers/dxmt/x86_64-windows/dxgi.dll	4c02d922b373e00a26fc2866470d39e7	dxmt-dxgi+dxmt-dxgi-release
 Renderers/dxmt/x86_64-windows/winemetal.dll	05971588d17cabe1f112b4dd33e53fd1	dxmt-winemetal-pe
 Renderers/stock/x86_64-windows/d3d10core.dll	7fb42a1791c8feb08bdc85dcf6917f47	wine-x64
 Renderers/stock/x86_64-windows/d3d11.dll	cb4b476a7f1f4145954bfeb2afbee9f3	wine-x64
@@ -2712,7 +2712,7 @@ WineARM64/lib/wine/i386-windows/jscript.dll	c5951a14c999f8dba7f2fba851866df9	win
 WineARM64/lib/wine/i386-windows/jsproxy.dll	ac1e4be8c8eb9e81e7863490c6c6c6df	wine-arm64
 WineARM64/lib/wine/i386-windows/kerberos.dll	14e8a7926c6b4ee48b39813a683f2e5c	wine-arm64
 WineARM64/lib/wine/i386-windows/kernel32.dll	1fbb1d0f2e9919531c5e0ba7315654bd	wine-arm64
-WineARM64/lib/wine/i386-windows/kernelbase.dll	b7bd918433c92370bee97eaf80d2bbb0	wine-arm64
+WineARM64/lib/wine/i386-windows/kernelbase.dll	b7bd918433c92370bee97eaf80d2bbb0	wine-arm64+wine-arm64-i386-release
 WineARM64/lib/wine/i386-windows/keyboard.drv16	4c08063e7d3314319fd4bf277cbdd33c	wine-arm64
 WineARM64/lib/wine/i386-windows/klist.exe	4ce7224ee50f0a82bce51a19c7884bc6	wine-arm64
 WineARM64/lib/wine/i386-windows/krnl386.exe16	75eeb7555ae5cc222e4d1cd1007db546	wine-arm64
@@ -2873,7 +2873,7 @@ WineARM64/lib/wine/i386-windows/npmshtml.dll	ee66c7d1dafb5d2b7553428bd2d7a748	wi
 WineARM64/lib/wine/i386-windows/npptools.dll	11fc65f1586729f275e2cda70c292855	wine-arm64
 WineARM64/lib/wine/i386-windows/nsi.dll	00faec9893562fdeb72a7fa927f7ccf3	wine-arm64
 WineARM64/lib/wine/i386-windows/nsiproxy.sys	ab4d6135319195f5b149d6031e8537da	wine-arm64
-WineARM64/lib/wine/i386-windows/ntdll.dll	f6d7f4565263fcc1c304cb680c78b8f7	wine-arm64
+WineARM64/lib/wine/i386-windows/ntdll.dll	f6d7f4565263fcc1c304cb680c78b8f7	wine-arm64+wine-arm64-i386-release
 WineARM64/lib/wine/i386-windows/ntdsapi.dll	f2135ae9d02f8b9dd2f01fac5eb38960	wine-arm64
 WineARM64/lib/wine/i386-windows/ntoskrnl.exe	7e951b6037ba8df43a988fe246c1f7b3	wine-arm64
 WineARM64/lib/wine/i386-windows/ntprint.dll	d7d6cdff57be490b2809b577af13eab2	wine-arm64
@@ -3188,7 +3188,7 @@ WineARM64/lib/wine/i386-windows/wmic.exe	18e1223dd7470d22ccfa14184b86e93c	wine-a
 WineARM64/lib/wine/i386-windows/wmilib.sys	6f750e8483bcdae7b741bd43ab437e08	wine-arm64
 WineARM64/lib/wine/i386-windows/wminet_utils.dll	4d4cd4e052bec0335b3203968a5b2046	wine-arm64
 WineARM64/lib/wine/i386-windows/wmiutils.dll	1affbbfe0a09391aabcf77efb46e4716	wine-arm64
-WineARM64/lib/wine/i386-windows/wmp.dll	1058266a417e215589c7021da03afb1a	wine-arm64
+WineARM64/lib/wine/i386-windows/wmp.dll	1058266a417e215589c7021da03afb1a	wine-arm64+wine-arm64-i386-release
 WineARM64/lib/wine/i386-windows/wmphoto.dll	ab941c0679594e92a53beffc0c336088	wine-arm64
 WineARM64/lib/wine/i386-windows/wmplayer.exe	43ecdde35084582eecb2dd1eb100bca1	wine-arm64
 WineARM64/lib/wine/i386-windows/wmvcore.dll	d36ab804c203034c73a83138568105a5	wine-arm64

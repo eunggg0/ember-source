@@ -1,0 +1,7 @@
+src/dxmt/ember_autohdr.cpp
+src/dxmt/ember_autohdr.hpp
+src/dxmt/ember_autohdr_shader.h
+src/dxmt/ember_autohdr_weights.h
+src/dxmt/ember_neural.cpp
+src/dxmt/ember_neural.hpp
+src/dxmt/ember_neural_shader.h
