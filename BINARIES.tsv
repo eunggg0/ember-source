@@ -1635,6 +1635,9 @@ Wine/lib/wine/x86_64-windows/xpsprint.dll	4c3be85c6ba1e38db16a2cb08beb5dee	wine-
 Wine/lib/wine/x86_64-windows/xpssvcs.dll	0805084e3b8cf73ec5a927e743af2ef9	wine-x64
 WineARM64/bin/wine	4b464b1954eb7b484cc10b4f0d84a68e	wine-arm64
 WineARM64/bin/wineserver	3fb839771e878658d0afd3c239175d6d	wine-arm64
+WineARM64/lib/libgio-2.0.0.dylib	7e2f5db21e18cca93aa18d760ed89048	arm64-glib
+WineARM64/lib/libglib-2.0.0.dylib	381b70a9d0f2f0ea268e55153010a3a5	arm64-glib
+WineARM64/lib/libusb-1.0.0.dylib	14de918a3c0e8b8e03d12b9476f3a850	upstream libusb-1.0.29 (unmodified, configure ac_cv_func_pipe2=no)
 WineARM64/lib/wine/aarch64-unix/avicap32.so	8cd13c9e371146f8c616650d43391ed1	wine-arm64
 WineARM64/lib/wine/aarch64-unix/crypt32.so	0235ac6e8d90f97821c920d8cf612093	wine-arm64
 WineARM64/lib/wine/aarch64-unix/ctapi32.so	566f0100c17f2d2c3eceeabff676f29f	wine-arm64

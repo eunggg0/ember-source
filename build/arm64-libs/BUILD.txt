@@ -1,0 +1,54 @@
+GLib 2.90.0 and libusb 1.0.29 for the WineARM64 runtime (Ember 1.0.1.3)
+
+Binaries (Ember.app/Contents/Resources/):
+  WineARM64/lib/libglib-2.0.0.dylib   GLib 2.90.0 + patches/arm64-glib
+  WineARM64/lib/libgio-2.0.0.dylib    GLib 2.90.0 + patches/arm64-glib
+  WineARM64/lib/libusb-1.0.0.dylib    libusb 1.0.29, unmodified source
+The other GLib libraries in WineARM64/lib (libgobject, libgmodule) are unchanged from earlier releases.
+
+Upstream archives (upstream/SOURCES.tsv, group arm64-libs):
+  glib-2.90.0.tar.xz      sha256 17d15cac2af80a33271127408e0abc2748eb297c595c2a26409e81e14e7d1b8f
+  libusb-1.0.29.tar.bz2   sha256 5977fc950f8d1395ccea9bd48c06b3f808fd3c2c961b44b0c2e6e29fc3a70a85
+
+Why: these libraries target macOS 11.0, but the macOS 27 SDK provides pipe2(), which only exists on macOS 27 and later.
+Without the change, configure/meson detected pipe2 and the libraries called it unconditionally, which can fail on macOS 14-26.
+GLib: patches/arm64-glib makes the Darwin pipe2 check use the <unistd.h> prototype with -Werror=unguarded-availability-new,
+so HAVE_PIPE2 is not defined and GLib's existing pipe()+fcntl() path is used. libusb: configure with ac_cv_func_pipe2=no.
+
+Toolchain used: Apple clang 21.0.0 (clang-2100.3.34.2), macOS SDK 27, Meson 1.12.1, GNU Autoconf 2.71 generated configure.
+Environment (both libraries):
+  MACOSX_DEPLOYMENT_TARGET=11.0
+  CC="clang -arch arm64" CXX="clang++ -arch arm64" OBJC="clang -arch arm64"
+  CFLAGS/CXXFLAGS/OBJCFLAGS="-O2 -mmacosx-version-min=11.0 -Werror=unguarded-availability-new"
+  LDFLAGS="-mmacosx-version-min=11.0 -L$PREFIX/lib -Wl,-headerpad_max_install_names"
+  PKG_CONFIG_LIBDIR=$PREFIX/lib/pkgconfig  (dependencies pcre2 10.48 and gettext libintl 1.0 from upstream/SOURCES.tsv, built the same way)
+
+GLib:
+  sh scripts/apply-series.sh patches/arm64-glib glib-2.90.0
+  meson setup _b --prefix=$PREFIX --libdir=lib --buildtype=release --default-library=shared -Db_ndebug=if-release \
+    -Dtests=false -Dintrospection=disabled -Dman-pages=disabled -Ddocumentation=false -Dsysprof=disabled \
+    -Dlibelf=disabled -Dselinux=disabled -Dxattr=false -Dnls=enabled -Dglib_debug=disabled -Dglib_assert=true \
+    -Dglib_checks=true -Dgio_module_dir=/var/empty/gio-modules --wrap-mode=nofallback
+  ninja -C _b && meson install -C _b
+  Result: meson-log "Checking for function "pipe2" : NO"; generated config.h = glib-2.90.0-config.h
+  (sha256 70f299d60a3a0d9f254f0be869cd25ecc5cab6c3c4a11aad02bf33480e0c91c1; it contains no HAVE_PIPE2).
+
+libusb:
+  ./configure --prefix=$PREFIX --enable-shared --disable-static --host=aarch64-apple-darwin --build=aarch64-apple-darwin \
+    --disable-dependency-tracking --disable-examples-build --disable-tests-build ac_cv_func_pipe2=no
+  make && make install
+  Result: config.h = libusb-1.0.29-config.h (sha256 fb900eaa0938207d5e52a2820732acd3fa160f70f867adb0a7c2916df3dfa537, "/* #undef HAVE_PIPE2 */").
+
+Staging into WineARM64/lib (same treatment as the other runtime libraries):
+  cp $PREFIX/lib/<name>.dylib WineARM64/lib/
+  strip -x <name>.dylib
+  install_name_tool -id @rpath/<name>.dylib <name>.dylib
+  install_name_tool -change <prefix path of each non-system dependency> @loader_path/<dependency file name> <name>.dylib
+  install_name_tool -delete_rpath <each LC_RPATH> <name>.dylib
+  codesign -f -s - <name>.dylib
+The MD5 values in BINARIES.tsv are taken at this point, before release code signing:
+  libglib-2.0.0.dylib  381b70a9d0f2f0ea268e55153010a3a5
+  libgio-2.0.0.dylib   7e2f5db21e18cca93aa18d760ed89048
+  libusb-1.0.0.dylib   14de918a3c0e8b8e03d12b9476f3a850
+Install names and dependency lists are the same as in Ember 1.0.1.2 (@rpath/libglib-2.0.0.dylib, @loader_path/libintl.8.dylib,
+@loader_path/libpcre2-8.0.dylib, ...); minimum OS 11.0.

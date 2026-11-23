@@ -1,4 +1,4 @@
-3ab87ec54e4d4bab144707e2106ad58db9322a2bfa25d1582a2363ad24b5a5a3  ./BINARIES.tsv
+70cc00f9fd887e0293c13372a25f145b56b98c9a3f7757c81a1ca396674d402a  ./BINARIES.tsv
 383e50e4f91fbf294532099f1e8d0a18802177b7797e4ec93f71a316f7fe3aeb  ./LICENSES/CURRENT.md
 cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30  ./LICENSES/apache-2.0.txt
 ae025f125a5d639f0f7abe5146efa1e3d7453cc10b744b2910806fa3f46626ef  ./LICENSES/crossover-wine-license.txt
@@ -30,7 +30,10 @@ a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c  ./LICENSES/lib
 4f5dabb1b44bb6fc5cd53820b1f103147ad61b395a57903991325bd1b85d97bf  ./LICENSES/orc-copying.txt
 197d8a73ffee0d6b09adba2f9c677b5f5aede24edf89258a68e48248d010d811  ./LICENSES/pcre2-licence.txt
 ae025f125a5d639f0f7abe5146efa1e3d7453cc10b744b2910806fa3f46626ef  ./LICENSES/wine-license.txt
-03af10afc08d2013b3359b6aa995f9e0cf02ee1f860b23ce33d9dce06918ee52  ./README.md
+f49e724eb210f8476d91a1027da77375e0dda2438def0590c7cd9c499dc77f23  ./README.md
+95208b111fb8db502d2176e3e3c1941cac07de5d5373e5b5899e3d8470ba7dfc  ./build/arm64-libs/BUILD.txt
+70f299d60a3a0d9f254f0be869cd25ecc5cab6c3c4a11aad02bf33480e0c91c1  ./build/arm64-libs/glib-2.90.0-config.h
+fb900eaa0938207d5e52a2820732acd3fa160f70f867adb0a7c2916df3dfa537  ./build/arm64-libs/libusb-1.0.29-config.h
 b7a6907756e665e77fead5e0562a6145584d776dbecd0e304cccc70127eedc64  ./build/vm-qemu/BUILD.txt
 83b2188461fbc0ead4d1ef1c0f60f3205aa9d12e25cfcecaedb185fb75031298  ./macports/REFS.txt
 adfd998eb0aa9c4bdf9a379652ce4538ee1646cd31a33c84b4dd6f61278e8379  ./macports/ports/devel/gettext/Portfile
@@ -50,6 +53,10 @@ f9ef8c4d83ef47a2111be6089a0cc5bdc7ae9e76b8dd6548a62ee1f984bc4f6d  ./macports/por
 6aaa130c8ba72a758b1cf8b37566d4e9e0836576a3dacf86270b60e92a737e2a  ./macports/ports/textproc/libiconv/files/patch-utf8mac.diff
 c47f5a7f6afdfc403e9d0c7eaf629e3d8d403de2e7be4d195a507711933e8cf9  ./macports/ports/textproc/libunistring/Portfile
 bbd98e7944e5456a6988e9363a9916bd0ce8688f90457e5754e156fef7d1ed1f  ./macports/ports/textproc/libunistring/files/0700-multiarch-libc.patch
+f54eab897e6bf32d016443c4be46cdc039d39f87cf8c6db07d44f0cf13a3358d  ./patches/arm64-glib/0001-darwin-pipe2-availability.patch
+d4598e759343182f88616f8a87cc3bfbcf34ca326fa2b492f9d68bbd27c43b7e  ./patches/arm64-glib/FILES.txt
+04ebe76f2c0287473bf4b454a8977f701bbc46761a9709686a3e1bd95eba9fa1  ./patches/arm64-glib/README.md
+0d22a1ce0069a45e8755b43a1f4385b5782fc4db35f7cc04856eadce4c700553  ./patches/arm64-glib/series
 2fea8188c7cf0a98c98b551c903e825f28049585b61b267cbd09952e186bbbb5  ./patches/dxmt-d3d11-i386/0001-src-d3d10.patch
 8a5b27d570c2a66b49cdeb4d01afd5fa00c3a125521a460f98b243d06245de55  ./patches/dxmt-d3d11-i386/0002-src-d3d11.patch
 4105aedc224ba484ae10f3b3d04316f4164daa4ac5b0d09123229e33e0223caf  ./patches/dxmt-d3d11-i386/0003-src-d3d12.patch

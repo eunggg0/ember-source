@@ -1,2 +1,4 @@
 # Patch hunk context contains meaningful space-only lines.
 *.patch -whitespace
+# Generated config.h files are kept byte-for-byte as produced by the build.
+build/arm64-libs/*-config.h -whitespace

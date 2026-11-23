@@ -1,0 +1,18 @@
+--- a/meson.build	2026-10-31 00:00:38
++++ b/meson.build	2026-10-31 00:00:39
+@@ -832,7 +832,14 @@
+ endif
+ 
+ foreach f : functions
+-  if cc.has_function(f)
++  # os14fix-1030 (Ember): 원형 없는 링크 검사는 SDK 에 심볼만 있으면 "있음"이라, macOS 27 SDK 의 pipe2 를
++  # 최소 OS(11.0)에서도 있다고 보고 검사 없이 불렀다(옛 macOS 에서 NULL 호출). 다윈에서 pipe2 는 헤더 원형+가용성 오류로 본다.
++  if host_system == 'darwin' and f == 'pipe2'
++    have_f = cc.has_function(f, prefix : '#include <unistd.h>', args : ['-Werror=unguarded-availability-new'])
++  else
++    have_f = cc.has_function(f)
++  endif
++  if have_f
+     define = 'HAVE_' + f.underscorify().to_upper()
+     glib_conf.set(define, 1)
+     glib_conf_prefix = glib_conf_prefix + '#define @0@ 1\n'.format(define)
