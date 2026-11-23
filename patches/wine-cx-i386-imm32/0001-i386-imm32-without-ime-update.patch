@@ -1,0 +1,127 @@
+diff --git a/dlls/imm32/ime.c b/dlls/imm32/ime.c
+index 1b1642e..65f46f2 100644
+--- a/dlls/imm32/ime.c
++++ b/dlls/imm32/ime.c
+@@ -491,8 +491,7 @@ BOOL WINAPI ImeSelect( HIMC himc, BOOL select )
+     if (!himc || !select) return TRUE;
+     if (!(ctx = ImmLockIMC( himc ))) return FALSE;
+ 
+-    if (!is_mac_korean_ime_layout( GetKeyboardLayout( 0 ) ))
+-        ImmSetOpenStatus( himc, FALSE );
++    ImmSetOpenStatus( himc, FALSE );
+ 
+     if ((priv = ImmLockIMCC( ctx->hPrivate )))
+     {
+@@ -510,11 +509,6 @@ BOOL WINAPI ImeSetActiveContext( HIMC himc, BOOL flag )
+     return TRUE;
+ }
+ 
+-static BOOL is_korean_ime_layout( HKL hkl )
+-{
+-    return HIWORD(hkl) == MAKELANGID(LANG_KOREAN, SUBLANG_DEFAULT) || is_mac_korean_ime_layout( hkl );
+-}
+-
+ BOOL WINAPI ImeProcessKey( HIMC himc, UINT vkey, LPARAM lparam, BYTE *state )
+ {
+     struct ime_driver_call_params params = {.himc = himc, .state = state};
+@@ -524,13 +518,8 @@ BOOL WINAPI ImeProcessKey( HIMC himc, UINT vkey, LPARAM lparam, BYTE *state )
+     TRACE( "himc %p, vkey %#x, lparam %#Ix, state %p\n", himc, vkey, lparam, state );
+ 
+     if (!(ctx = ImmLockIMC( himc ))) return FALSE;
+-    /* Preserve the driver result, but closed contexts must leave game keys alone.
+-     * Match the Korean key-up policy of the verified ARM64 runtime. */
+-    ret = FALSE;
+-    if (ctx->fOpen && !(is_korean_ime_layout( GetKeyboardLayout( 0 ) ) &&
+-                       (HIWORD(lparam) & KF_UP)))
+-        ret = NtUserMessageCall( ctx->hWnd, WINE_IME_PROCESS_KEY, vkey, lparam, &params,
+-                                 NtUserImeDriverCall, FALSE );
++    ret = NtUserMessageCall( ctx->hWnd, WINE_IME_PROCESS_KEY, vkey, lparam, &params,
++                             NtUserImeDriverCall, FALSE );
+     ImmUnlockIMC( himc );
+ 
+     return ret;
+@@ -591,10 +580,6 @@ UINT WINAPI ImeToAsciiEx( UINT vkey, UINT vsc, BYTE *state, TRANSMSGLIST *msgs,
+             if (compstr->dwCompAttrOffset) msg.lParam |= GCS_COMPATTR;
+             if (compstr->dwCompClauseOffset) msg.lParam |= GCS_COMPCLAUSE;
+             else msg.lParam |= CS_INSERTCHAR|CS_NOMOVECARET;
+-            /* Keep the verified MS Korean single-unit preedit message flags. */
+-            if (is_korean_ime_layout( GetKeyboardLayout( 0 ) ) &&
+-                compstr->dwCompStrLen == 1)
+-                msg.lParam = GCS_COMPSTR | GCS_COMPATTR | CS_INSERTCHAR | CS_NOMOVECARET;
+             msgs->TransMsg[count++] = msg;
+         }
+ 
+diff --git a/dlls/imm32/imm.c b/dlls/imm32/imm.c
+index b9df3ce..0b2814d 100644
+--- a/dlls/imm32/imm.c
++++ b/dlls/imm32/imm.c
+@@ -598,9 +598,6 @@ static void ime_save_input_context( struct ime *ime, HIMC himc, INPUTCONTEXT *ct
+     struct imc_entry *entry;
+ 
+     *ctx = default_input_context;
+-    /* The macOS input source is active when winemac creates this HKL. Default
+-     * only a new builtin context to open, leaving cached app choices intact. */
+-    ctx->fOpen = ime->pImeSelect == ImeSelect && is_mac_korean_ime_layout( ime->hkl );
+     ctx->hWnd = old.hWnd;
+     ctx->hMsgBuf = old.hMsgBuf;
+     ctx->hCompStr = old.hCompStr;
+@@ -1023,30 +1020,6 @@ static BOOL CALLBACK enum_associate_context( HWND hwnd, LPARAM lparam )
+ /***********************************************************************
+  *              ImmAssociateContextEx (IMM32.@)
+  */
+-/* Lost Ark compatibility: its IACE_CHILDREN calls also select the game window's
+- * IMC when entering/leaving chat. Do not change the global API contract here. */
+-static BOOL use_lostark_parent_ime_association(void)
+-{
+-    static LONG cached;
+-    LONG value = InterlockedCompareExchange(&cached, 0, 0);
+-    WCHAR path[1024], *base;
+-    DWORD error, size;
+-    BOOL enabled = FALSE;
+-
+-    if (value) return value == 2;
+-    error = GetLastError();
+-    size = GetModuleFileNameW(NULL, path, ARRAY_SIZE(path));
+-    if (size && size < ARRAY_SIZE(path))
+-    {
+-        base = wcsrchr(path, '\\');
+-        base = base ? base + 1 : path;
+-        enabled = !wcsicmp(base, L"LostArk.exe");
+-    }
+-    InterlockedCompareExchange(&cached, enabled ? 2 : 1, 0);
+-    SetLastError(error);
+-    return enabled;
+-}
+-
+ BOOL WINAPI ImmAssociateContextEx( HWND hwnd, HIMC new_himc, DWORD flags )
+ {
+     HIMC old_himc;
+@@ -1059,8 +1032,7 @@ BOOL WINAPI ImmAssociateContextEx( HWND hwnd, HIMC new_himc, DWORD flags )
+     if (flags == IACE_CHILDREN)
+     {
+         EnumChildWindows( hwnd, enum_associate_context, (LPARAM)new_himc );
+-        if (!use_lostark_parent_ime_association()) return TRUE;
+-        flags = 0;
++        return TRUE;
+     }
+ 
+     old_himc = NtUserGetWindowInputContext( hwnd );
+diff --git a/dlls/imm32/imm_private.h b/dlls/imm32/imm_private.h
+index 47c5fb6..4cc4acd 100644
+--- a/dlls/imm32/imm_private.h
++++ b/dlls/imm32/imm_private.h
+@@ -47,14 +47,6 @@ extern UINT WM_MSIME_RECONVERT;
+ extern UINT WM_MSIME_QUERYPOSITION;
+ extern UINT WM_MSIME_DOCUMENTFEED;
+ 
+-/* winemac encodes host input methods with 0xe000 in the high word.
+- * Additional layouts for the same language can use the low bits of that word. */
+-static inline BOOL is_mac_korean_ime_layout( HKL hkl )
+-{
+-    return (HIWORD(hkl) & 0xf000) == 0xe000 &&
+-           LOWORD(hkl) == MAKELANGID(LANG_KOREAN, SUBLANG_DEFAULT);
+-}
+-
+ static const char *debugstr_wm_ime( UINT msg )
+ {
+     switch (msg)

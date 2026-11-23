@@ -31,6 +31,9 @@ Questions about this source: realnoma@naver.com / 소스 문의: realnoma@naver.
 | `patches/vm-dxmt-d3d12` | 3Shain/dxmt `7c8dee1` (+ submodules) | `VM/host/vmd12fix-1105/out5/libember-d3d12-native.dylib` |
 | `patches/vm-glib` | GLib 2.90.0 | `VM/host/vmdist-1025/prefix/lib/libglib-2.0.0.dylib`, `libgio`, `libgobject`, `libgmodule` |
 | `patches/arm64-glib` | GLib 2.90.0 | `WineARM64/lib/libglib-2.0.0.dylib`, `WineARM64/lib/libgio-2.0.0.dylib` (build: `build/arm64-libs/BUILD.txt`) |
+| `patches/wine-x64-i386-imm32` (after `wine-x64`) | Wine 11.0 | `Wine/lib/wine/i386-windows/imm32.dll` |
+| `patches/wine-cx-i386-imm32` (after `wine-cx`) | CrossOver 26.3.0 | `WineCX/lib/wine/i386-windows/imm32.dll` |
+| `patches/wine-arm64-aarch64-mshtml` (after `wine-arm64`) | Wine 11.18 | `WineARM64/lib/wine/aarch64-windows/mshtml.dll` |
 | `patches/forgeplay-origin/NOTICE.md` | — | attribution for Wine changes that originate from ForgePlay (already contained in the Wine series) |
 
 Each series folder has `series` (apply order) and `FILES.txt` (changed files; `A` = new file, `M` = modified).
@@ -48,6 +51,15 @@ Ember 1.0.1.3 은 WineARM64 런타임의 라이브러리 3개를 바꿨습니다
 ```sh
 sh scripts/apply-series.sh patches/arm64-glib "$glib_src"
 ```
+
+Three Wine modules that were built from an earlier state of their series are now described exactly: the i386 `imm32.dll` of
+`Wine` and `WineCX` (built before the IMM32 Korean input update, which was rebuilt only for x86_64) and the aarch64 `mshtml.dll`
+of `WineARM64` (built before `wine-arm64/0014-dlls-mshtml.patch`). Apply `wine-x64-i386-imm32`, `wine-cx-i386-imm32` or
+`wine-arm64-aarch64-mshtml` after the base series for these files; `BINARIES.tsv` shows the order. The binaries are the same as in 1.0.1.2.
+
+이전 상태의 series 로 빌드된 Wine 모듈 3개도 정확히 적었습니다: `Wine`·`WineCX` 의 i386 `imm32.dll`(x86_64 만 다시 빌드한 IMM32 한글 입력 수정 전)과
+`WineARM64` 의 aarch64 `mshtml.dll`(`wine-arm64/0014-dlls-mshtml.patch` 전). 이 파일들은 기본 series 다음에 `wine-x64-i386-imm32`·`wine-cx-i386-imm32`·
+`wine-arm64-aarch64-mshtml` 을 적용합니다. 순서는 `BINARIES.tsv` 에 있습니다. 바이너리는 1.0.1.2 와 같습니다.
 
 ## v1.0.1.2 소스 보완
 

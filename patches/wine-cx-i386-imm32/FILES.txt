@@ -1,0 +1,4 @@
+# wine-cx 다음에 적용, 대상 WineCX/lib/wine/i386-windows/imm32.dll
+M dlls/imm32/ime.c
+M dlls/imm32/imm.c
+M dlls/imm32/imm_private.h

@@ -1,0 +1,4 @@
+# wine-arm64 다음에 적용, 대상 WineARM64/lib/wine/aarch64-windows/mshtml.dll
+M dlls/mshtml/htmlnode.c
+M dlls/mshtml/mutation.c
+M dlls/mshtml/omnavigator.c

@@ -1,4 +1,4 @@
-70cc00f9fd887e0293c13372a25f145b56b98c9a3f7757c81a1ca396674d402a  ./BINARIES.tsv
+f246159319a1308024160e4f59cf5dea3fc75c5523f56900dab9eb042a64b3c3  ./BINARIES.tsv
 383e50e4f91fbf294532099f1e8d0a18802177b7797e4ec93f71a316f7fe3aeb  ./LICENSES/CURRENT.md
 cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30  ./LICENSES/apache-2.0.txt
 ae025f125a5d639f0f7abe5146efa1e3d7453cc10b744b2910806fa3f46626ef  ./LICENSES/crossover-wine-license.txt
@@ -30,7 +30,7 @@ a853c2ffec17057872340eee242ae4d96cbf2b520ae27d903e1b2fef1a5f9d1c  ./LICENSES/lib
 4f5dabb1b44bb6fc5cd53820b1f103147ad61b395a57903991325bd1b85d97bf  ./LICENSES/orc-copying.txt
 197d8a73ffee0d6b09adba2f9c677b5f5aede24edf89258a68e48248d010d811  ./LICENSES/pcre2-licence.txt
 ae025f125a5d639f0f7abe5146efa1e3d7453cc10b744b2910806fa3f46626ef  ./LICENSES/wine-license.txt
-f49e724eb210f8476d91a1027da77375e0dda2438def0590c7cd9c499dc77f23  ./README.md
+083ee0640efd5f18c9ae2ca53992e0ccd629eb24c98c28b5555bd4893188fcc4  ./README.md
 95208b111fb8db502d2176e3e3c1941cac07de5d5373e5b5899e3d8470ba7dfc  ./build/arm64-libs/BUILD.txt
 70f299d60a3a0d9f254f0be869cd25ecc5cab6c3c4a11aad02bf33480e0c91c1  ./build/arm64-libs/glib-2.90.0-config.h
 fb900eaa0938207d5e52a2820732acd3fa160f70f867adb0a7c2916df3dfa537  ./build/arm64-libs/libusb-1.0.29-config.h
@@ -187,6 +187,10 @@ f2cf22956a0cb762f077c2f83ce6e34831b0f691cbd8df2205cda85dfb9aae27  ./patches/vm-q
 a2b63805f7f863a252879461cd5ca20f4092414fbe3dbfa057b3dc729cfec106  ./patches/vm-qemu-img/series
 b5633b778579a7a6094c0d42e3378b1443f4cd4919ae72b5ee428b011a6749a6  ./patches/vm-qemu/0001-ember-vm.patch
 ac55d63090ed929e731670f459455b2c5ee2dbd25f1f4ab3946bb5559dc3adab  ./patches/vm-qemu/series
+81be23cabd195bb5d9388405898bcd3a39e2b7cf8212d635114218534ceba165  ./patches/wine-arm64-aarch64-mshtml/0001-aarch64-mshtml-without-0014.patch
+b58ded12b3c771f31aea67cc087c391cfe34d5d38952cd7d35af75b388ac019a  ./patches/wine-arm64-aarch64-mshtml/FILES.txt
+8db0e7089ee8130b95ef1a0763be5fd2e868b1a31ade8a8bbb15d04735467c9c  ./patches/wine-arm64-aarch64-mshtml/README.md
+3514af9276c4791bc72da0f456887e791225075c5e69276a46239398c73e8ff7  ./patches/wine-arm64-aarch64-mshtml/series
 f39a4663e78a61f0f7544d9e433d7a749916976aa6e710e385a531c52f8a1bcc  ./patches/wine-arm64-i386-release/0001-kernelbase-i386-release.patch
 dfdd5d96f79931fd37de14d8f47df5e126c66655730447756492524556cc92c0  ./patches/wine-arm64-i386-release/0002-ntdll-i386-release.patch
 83e56cdfc3592655db74a822c8b405978c807a106b7ea45f9d3e1746dd6eb9b4  ./patches/wine-arm64-i386-release/0003-wmp-i386-release.patch
@@ -242,6 +246,10 @@ b728546c5f4996be14a53c25c4faf5e55075ec935074624b3bc8488cbe2b5653  ./patches/wine
 a01bf99438b71e4a2154969348c14d34e532ab7bc4a506a393f29824b4cecb97  ./patches/wine-arm64/0047-ime-korean-composition.patch
 c23783062019adea176c24ad0fc9dbcddb07318496538059092488c0aeb26ac9  ./patches/wine-arm64/FILES.txt
 2f599a2c52460d529d270227c9f8b98d4efd308de1675e0d1cb028bb2c4c912a  ./patches/wine-arm64/series
+248ed4f2838fe83874046d35d7db4a71c0db4619a3ca8d6dec514755a9dd3b9d  ./patches/wine-cx-i386-imm32/0001-i386-imm32-without-ime-update.patch
+3648ada38fb4ae88dd0cb2d5652c47353a01d1ac33dcc87658b765208f01728b  ./patches/wine-cx-i386-imm32/FILES.txt
+aba6906615c09f1e3c047ea14c778e3ac4806dd7f7afcff318c07619585cab4a  ./patches/wine-cx-i386-imm32/README.md
+287f09837ea434f031efaa83e67aed9d1734877a5427cfa6320a509e299b5c7b  ./patches/wine-cx-i386-imm32/series
 2772471fce92359130badbf13561bf90d8cad57bde850ce1d8ee73dc785318b3  ./patches/wine-cx/0001-common.patch
 ada2c1c2f5d16c74de9be11081f5b5e8bb3ae540288fa38e30a00ec040cf2d6e  ./patches/wine-cx/0002-dlls-advapi32.patch
 28b74736311ad086a1dba9b8cede4b9b23995394e41e34835675ddc3752086b4  ./patches/wine-cx/0003-dlls-avifil32.patch
@@ -342,6 +350,10 @@ d1c96d18c7d78e8e40d969b4f897905f33ad92bfb485de568113e6e671467f4c  ./patches/wine
 384fe0579fb876353e0340b8f3ac0d54abf49ab1ce7081c7b74ef013e7cb57d5  ./patches/wine-cx/0098-win32u-ulw-foreign-child.patch
 a3816e644b3794fb7b2e3b815e8517f0375a32503642a216e5053ca8a2b78f58  ./patches/wine-cx/FILES.txt
 2a73c61b77268f5e64fe2f215127ce7d1c163b4e536f50b682a6ed4b8e07c08c  ./patches/wine-cx/series
+c9feb88d721977622e15bd87de9425bb6e2ad65e7763d739266add419090bfe3  ./patches/wine-x64-i386-imm32/0001-i386-imm32-without-ime-update.patch
+24f54531dd6b6ea44ed6ba920e9c30b33954d1f3b5c5b7478f9ea65b0be1e719  ./patches/wine-x64-i386-imm32/FILES.txt
+f9163fea25502cd46f726e8b8772ae769010a2b5d65a3f35ad119a14a9e5ceae  ./patches/wine-x64-i386-imm32/README.md
+287f09837ea434f031efaa83e67aed9d1734877a5427cfa6320a509e299b5c7b  ./patches/wine-x64-i386-imm32/series
 af490585e5f9fdc11d843d5e38334891c6c76bfdd6e22680b4b3f2bb3cea8ecf  ./patches/wine-x64/0001-dlls-bcrypt.patch
 20640ab3f673afee021fc7ae55e57fb96ea5185b53faa1d4ebaba758a7156580  ./patches/wine-x64/0002-dlls-dnsapi.patch
 c44ad578fa593543e8c94f3b54593ea315fa80c23f9f3ffb42a515726b2ac83a  ./patches/wine-x64/0003-dlls-dwrite.patch

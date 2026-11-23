@@ -282,7 +282,7 @@ Wine/lib/wine/i386-windows/ifsmgr.vxd	02d9c40b3e6bba5c226994b258f896da	wine-x64
 Wine/lib/wine/i386-windows/imaadp32.acm	cabe989c5742bae158f9c932865d877c	wine-x64
 Wine/lib/wine/i386-windows/imagehlp.dll	f7c457d78517b23b9a730235d940315a	wine-x64
 Wine/lib/wine/i386-windows/imm.dll16	4363b27610a52cf1c1017f446d9ec927	wine-x64
-Wine/lib/wine/i386-windows/imm32.dll	0915552f138f36b89c82751bc45f1326	wine-x64
+Wine/lib/wine/i386-windows/imm32.dll	0915552f138f36b89c82751bc45f1326	wine-x64+wine-x64-i386-imm32
 Wine/lib/wine/i386-windows/inetcomm.dll	4c0a0ec4ef7c79de52f9770705b76319	wine-x64
 Wine/lib/wine/i386-windows/inetcpl.cpl	77eeb778a9cfb5370a02efacf132369a	wine-x64
 Wine/lib/wine/i386-windows/inetmib1.dll	4fd8154d826891998f4393c767309c44	wine-x64
@@ -2001,7 +2001,7 @@ WineARM64/lib/wine/aarch64-windows/msftedit.dll	a8639c2671a04a995d37631f18713820
 WineARM64/lib/wine/aarch64-windows/msg711.acm	236ad6df6dd8d4b1640616110b634a17	wine-arm64
 WineARM64/lib/wine/aarch64-windows/msgsm32.acm	68ca6478be236504ca88681280aedd7d	wine-arm64
 WineARM64/lib/wine/aarch64-windows/mshta.exe	7b1a68212b4b0958765f23b0e4ee07e4	wine-arm64
-WineARM64/lib/wine/aarch64-windows/mshtml.dll	76e1f54ce93eb4b89d3553e55cc2ffde	wine-arm64
+WineARM64/lib/wine/aarch64-windows/mshtml.dll	76e1f54ce93eb4b89d3553e55cc2ffde	wine-arm64+wine-arm64-aarch64-mshtml
 WineARM64/lib/wine/aarch64-windows/mshtml.tlb	368cdf6c3061daf3caa91f857427d0c4	wine-arm64
 WineARM64/lib/wine/aarch64-windows/msi.dll	562ab0aa3538f53d1b4103b75375a031	wine-arm64
 WineARM64/lib/wine/aarch64-windows/msidb.exe	f4c43ee094fea231d2f1ec7daf36df75	wine-arm64
@@ -3522,7 +3522,7 @@ WineCX/lib/wine/i386-windows/ifsmgr.vxd	03f742093674853750b0f6cfcf889fc2	wine-cx
 WineCX/lib/wine/i386-windows/imaadp32.acm	f752d950197f6bfd60b774f9485a645d	wine-cx
 WineCX/lib/wine/i386-windows/imagehlp.dll	f10cdd1b4333db6365fa58b512fc2cce	wine-cx
 WineCX/lib/wine/i386-windows/imm.dll16	0d9e52705be50de7f540cee7a70d83dd	wine-cx
-WineCX/lib/wine/i386-windows/imm32.dll	277dc6bae8e986c2c2b90a26b974840f	wine-cx
+WineCX/lib/wine/i386-windows/imm32.dll	277dc6bae8e986c2c2b90a26b974840f	wine-cx+wine-cx-i386-imm32
 WineCX/lib/wine/i386-windows/inetcomm.dll	18af76285f030af8e80309fc1d9e3d07	wine-cx
 WineCX/lib/wine/i386-windows/inetcpl.cpl	d5f325b68eccf40af1513bae3d7f489e	wine-cx
 WineCX/lib/wine/i386-windows/inetmib1.dll	ce8cb3316178934b4fe819afb6c153df	wine-cx
